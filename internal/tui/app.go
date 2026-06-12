@@ -63,6 +63,12 @@ type Model struct {
 	histIdx   int // index into the focused session's history; -1 = not browsing
 	histDraft string
 
+	// Completion overlay (@ files, / commands) and its file cache.
+	comp        completion
+	fileList    []string
+	fileListDir string
+	fileListAt  time.Time
+
 	form sessionForm
 }
 
@@ -397,7 +403,13 @@ func (m *Model) viewBoard() string {
 		b.WriteString(styleFlash.Render("  "+m.flash) + "\n")
 	}
 	today, month := m.sup.Spend()
-	b.WriteString(styleDim.Render("  spend today "+spendLabel(today)+" · month "+spendLabel(month)) + "\n")
+	footer := styleDim.Render("  spend today " + spendLabel(today) + " · month " + spendLabel(month))
+	if sess := m.selected(); sess != nil {
+		if model := sess.View().Model; model != "" {
+			footer = rightAlign(m.width, footer, styleDim.Render("model: "+model))
+		}
+	}
+	b.WriteString(footer + "\n")
 	b.WriteString("\n" + keybar(
 		"enter", "attach", "n", "new", "a", "approve", "d", "diff", "e", "export", "A", "auto⚡", "x", "abort", "K", "kill", "q", "quit"))
 	return b.String()

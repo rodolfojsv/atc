@@ -218,8 +218,8 @@ func (s *Supervisor) NewSession(opts NewSessionOptions) (*Session, error) {
 
 	sess := &Session{
 		Name: name, Repo: repo, Dir: repo, Backend: backendName,
-		Preset: presetName, ReadOnly: opts.ReadOnly, Created: time.Now(),
-		status: StatusStarting,
+		Preset: presetName, ReadOnly: opts.ReadOnly, Model: model,
+		Created: time.Now(), status: StatusStarting,
 	}
 	s.mu.Lock()
 	s.sessions = append(s.sessions, sess)
@@ -517,6 +517,29 @@ func (s *Supervisor) Prompt(sess *Session, text string) error {
 		s.poke()
 	}
 	return err
+}
+
+// SwitchModel changes the model for the session's subsequent turns.
+func (s *Supervisor) SwitchModel(sess *Session, model string) error {
+	ag := sess.agentSession()
+	if ag == nil {
+		return errors.New("session is still starting")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := ag.SetModel(ctx, model); err != nil {
+		sess.appendEntry(EntryError, "model switch: "+err.Error())
+		s.poke()
+		return err
+	}
+	sess.mu.Lock()
+	sess.Model = model
+	sess.usage.Model = model
+	sess.mu.Unlock()
+	s.log.Log(logx.Info, "session.model_switch", map[string]any{"session": sess.Name, "model": model})
+	sess.appendEntry(EntrySystem, "model switched to "+model)
+	s.poke()
+	return nil
 }
 
 // Abort cancels the session's current turn.

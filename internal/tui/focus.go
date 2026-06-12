@@ -87,6 +87,9 @@ func (m *Model) syncFocusLayout() {
 	}
 	m.input.SetHeight(lines)
 	h := m.height - 6 - lines
+	if m.comp.active {
+		h -= len(m.comp.items)
+	}
 	if h < 3 {
 		h = 3
 	}
@@ -157,6 +160,27 @@ func (m *Model) updateFocus(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.mode = modeBoard
 		return m, nil
 	}
+	if m.comp.active {
+		switch msg.String() {
+		case "up":
+			if m.comp.sel > 0 {
+				m.comp.sel--
+			}
+			return m, nil
+		case "down":
+			if m.comp.sel < len(m.comp.items)-1 {
+				m.comp.sel++
+			}
+			return m, nil
+		case "tab", "enter":
+			m.acceptCompletion()
+			return m, nil
+		case "esc":
+			m.comp = completion{}
+			m.syncFocusLayout()
+			return m, nil
+		}
+	}
 	switch msg.String() {
 	case "esc":
 		m.mode = modeBoard
@@ -178,6 +202,9 @@ func (m *Model) updateFocus(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.histIdx, m.histDraft = -1, ""
 		m.vpFollow = true
 		sup := m.sup
+		if strings.HasPrefix(text, "/") {
+			return m.runSlashCommand(sess, text)
+		}
 		return m, func() tea.Msg {
 			if err := sup.Prompt(sess, text); err != nil {
 				return flashMsg{text: err.Error()}
@@ -205,8 +232,59 @@ func (m *Model) updateFocus(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
+	m.syncCompletion()
 	m.syncFocusLayout()
 	return m, cmd
+}
+
+// runSlashCommand dispatches atc's own prompt-box commands. Backend
+// CLI slash commands (/fleet, /compact, …) don't exist over the SDK
+// path — these are atc-native.
+func (m *Model) runSlashCommand(sess *supervisor.Session, text string) (tea.Model, tea.Cmd) {
+	cmd, arg, _ := strings.Cut(text, " ")
+	arg = strings.TrimSpace(arg)
+	sup := m.sup
+	switch cmd {
+	case "/model":
+		if arg == "" {
+			cur := sess.View().Model
+			if cur == "" {
+				cur = "backend default"
+			}
+			m.flash = "model: " + cur + " — /model <name> to switch"
+			return m, nil
+		}
+		return m, func() tea.Msg {
+			if err := sup.SwitchModel(sess, arg); err != nil {
+				return flashMsg{text: err.Error()}
+			}
+			return RefreshMsg{}
+		}
+	case "/diff":
+		return m.openDiff(sess)
+	case "/export":
+		return m.exportSession(sess)
+	case "/abort":
+		return m, func() tea.Msg { sup.Abort(sess); return RefreshMsg{} }
+	case "/auto":
+		on := !sess.View().AutoApprove
+		sess.SetAutoApprove(on)
+		if on {
+			m.flash = "auto-approve ON (deny-list still applies)"
+		} else {
+			m.flash = "auto-approve off"
+		}
+		return m, nil
+	case "/help":
+		names := make([]string, len(slashCommands))
+		for i, c := range slashCommands {
+			names[i] = c.name
+		}
+		m.flash = strings.Join(names, " · ") + " — @ mentions a file"
+		return m, nil
+	}
+	m.flash = "unknown command " + cmd + " — /help lists them"
+	return m, nil
 }
 
 // historyNav recalls previous prompts shell-style: ↑ on the first line
@@ -281,14 +359,24 @@ func (m *Model) viewFocus() string {
 		b.WriteString("\n")
 	}
 
+	if m.comp.active {
+		b.WriteString(m.renderCompletion())
+	}
 	box := styleInputBox
 	if m.input.Focused() {
 		box = styleInputBoxFocused
 	}
 	b.WriteString(box.Width(m.width-2).Render(m.input.View()) + "\n")
-	b.WriteString(keybar("esc", "board", "enter", "send", "ctrl+j", "newline", "ctrl+x", "abort", "wheel", "scroll"))
+	bottom := keybar("esc", "board", "enter", "send", "ctrl+j", "newline", "ctrl+x", "abort", "wheel", "scroll")
 	if m.flash != "" {
-		b.WriteString("  " + styleFlash.Render(m.flash))
+		bottom += "  " + styleFlash.Render(m.flash)
 	}
+	model := v.Model
+	if model == "" {
+		model = "model: default"
+	} else {
+		model = "model: " + model
+	}
+	b.WriteString(rightAlign(m.width, bottom, styleDim.Render(model)))
 	return b.String()
 }

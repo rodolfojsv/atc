@@ -91,7 +91,8 @@ type Session struct {
 	Branch   string // worktree branch
 	Backend  string // "copilot" | "claude"
 	Preset   string
-	ReadOnly bool // backend plan mode: inspect but never modify
+	ReadOnly bool   // backend plan mode: inspect but never modify
+	Model    string // configured model ("" = backend default); usage reports the actual one
 	Created  time.Time
 
 	// BaseBranch/BaseCommit record where the worktree branched off,
@@ -120,6 +121,7 @@ type Session struct {
 type SessionView struct {
 	Name, Dir, Repo, Worktree, Branch, Backend, Preset string
 	BaseBranch                                         string
+	Model                                              string // best known model: actual from usage, else configured, else ""
 	Status                                             Status
 	Intent, Err, LastLine                              string
 	Usage                                              Usage
@@ -190,6 +192,10 @@ func (s *Session) View() SessionView {
 		head := s.pending[0]
 		v.Pending = &PermissionView{Kind: head.Kind, Summary: head.Summary, Detail: append([]string(nil), head.Detail...)}
 		v.PendingCount = len(s.pending)
+	}
+	v.Model = s.usage.Model
+	if v.Model == "" {
+		v.Model = s.Model
 	}
 	v.LastLine = s.lastLineLocked()
 	if !s.lastEvent.IsZero() {

@@ -101,6 +101,8 @@ type Session interface {
 	ID() string
 	// Send submits a user prompt; the response streams via OnEvent.
 	Send(ctx context.Context, prompt string) error
+	// SetModel switches the model for subsequent turns.
+	SetModel(ctx context.Context, model string) error
 	// History returns the persisted transcript as replayable events,
 	// oldest first. Best-effort: empty when unavailable.
 	History(ctx context.Context) []Event

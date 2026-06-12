@@ -93,6 +93,11 @@ func (s *session) Send(ctx context.Context, prompt string) error {
 	return err
 }
 
+func (s *session) SetModel(ctx context.Context, model string) error {
+	_, err := s.sdk.RPC.Model.SwitchTo(ctx, &rpc.ModelSwitchToRequest{ModelID: model})
+	return err
+}
+
 func (s *session) Abort(ctx context.Context) error { return s.sdk.Abort(ctx) }
 
 func (s *session) Close() error { return s.sdk.Disconnect() }
