@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -46,7 +48,7 @@ type Model struct {
 	target   *supervisor.Session // focused / modal subject
 	vp       viewport.Model
 	vpFollow bool
-	input    textinput.Model
+	input    textarea.Model
 
 	// Markdown rendering for assistant transcript entries.
 	mdr     *glamour.TermRenderer
@@ -57,9 +59,14 @@ type Model struct {
 }
 
 func New(sup *supervisor.Supervisor, cfg *config.Config) *Model {
-	input := textinput.New()
-	input.Placeholder = "prompt — enter to send"
+	input := textarea.New()
+	input.Placeholder = "prompt — enter to send, ctrl+j for a new line"
 	input.CharLimit = 0
+	input.ShowLineNumbers = false
+	input.SetHeight(1)
+	// Enter is reserved for sending; ctrl+j inserts a manual newline.
+	// Long prompts soft-wrap into a growing paragraph either way.
+	input.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("ctrl+j"))
 	return &Model{sup: sup, cfg: cfg, vpFollow: true, input: input}
 }
 
@@ -164,8 +171,7 @@ func (m *Model) updateBoard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.vpFollow = true
 			m.layoutFocus()
 			m.refreshViewport()
-			m.input.Focus()
-			return m, textinput.Blink
+			return m, m.input.Focus()
 		}
 	case "n":
 		m.form = newSessionForm(m.cfg)

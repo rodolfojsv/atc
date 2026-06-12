@@ -21,25 +21,21 @@ func reject(feedback string) rpc.PermissionDecision {
 	return &rpc.PermissionDecisionReject{Feedback: &feedback}
 }
 
-// focusChromeLines is the vertical space around the viewport: title,
-// blank, permission banner slot, input, keybar.
-const focusChromeLines = 5
+// maxInputLines caps how far the prompt box grows before it scrolls
+// internally.
+const maxInputLines = 6
 
 func (m *Model) layoutFocus() {
 	if m.width == 0 {
 		return
 	}
-	h := m.height - focusChromeLines
-	if h < 3 {
-		h = 3
-	}
 	if m.vp.Width == 0 {
-		m.vp = viewport.New(m.width, h)
+		m.vp = viewport.New(m.width, 3)
 	} else {
 		m.vp.Width = m.width
-		m.vp.Height = h
 	}
-	m.input.Width = m.width - 4
+	m.input.SetWidth(m.width - 2)
+	m.syncFocusLayout()
 
 	if m.mdWidth != m.width {
 		// Markdown rendering is width-dependent; rebuild the renderer
@@ -55,6 +51,25 @@ func (m *Model) layoutFocus() {
 			m.mdr = r
 		}
 	}
+}
+
+// syncFocusLayout grows the prompt box with its content (a long prompt
+// wraps into a paragraph) and gives the viewport the remaining height.
+// Chrome around them: title, permission banner slot, keybar.
+func (m *Model) syncFocusLayout() {
+	lines := m.input.LineCount()
+	if lines < 1 {
+		lines = 1
+	}
+	if lines > maxInputLines {
+		lines = maxInputLines
+	}
+	m.input.SetHeight(lines)
+	h := m.height - 4 - lines
+	if h < 3 {
+		h = 3
+	}
+	m.vp.Height = h
 }
 
 // renderMarkdown renders assistant text via glamour, caching by content
@@ -137,7 +152,8 @@ func (m *Model) updateFocus(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if text == "" {
 			return m, nil
 		}
-		m.input.SetValue("")
+		m.input.Reset()
+		m.syncFocusLayout()
 		m.vpFollow = true
 		sup := m.sup
 		return m, func() tea.Msg {
@@ -163,6 +179,7 @@ func (m *Model) updateFocus(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
+	m.syncFocusLayout()
 	return m, cmd
 }
 
@@ -191,8 +208,8 @@ func (m *Model) viewFocus() string {
 		b.WriteString("\n")
 	}
 
-	b.WriteString("> " + m.input.View() + "\n")
-	b.WriteString(keybar("esc", "board", "enter", "send", "ctrl+x", "abort", "pgup/pgdn", "scroll"))
+	b.WriteString(m.input.View() + "\n")
+	b.WriteString(keybar("esc", "board", "enter", "send", "ctrl+j", "newline", "ctrl+x", "abort", "wheel", "scroll"))
 	if m.flash != "" {
 		b.WriteString("  " + styleFlash.Render(m.flash))
 	}
