@@ -58,7 +58,9 @@ Design priorities, in order:
 
 **Board** — `↑/↓`/wheel select · `enter` attach · `n` new session · `a` review permission · `d` diff (then `m` merge) · `e` export to markdown · `A` toggle auto-approve (⚡, deny-list still applies) · `x` abort turn · `K` kill · `q` quit
 
-**Focus** — type + `enter` send prompt · `/model` show · `/model <name>` switch model mid-session · `ctrl+j` newline · `↑/↓` prompt history · `ctrl+y`/`ctrl+n` approve/deny pending permission · `ctrl+x` abort · `pgup/pgdn` scroll · `esc` back to board. The active model shows bottom-right.
+**Focus** — type + `enter` send prompt · `ctrl+j` newline · `↑/↓` prompt history · `ctrl+y`/`ctrl+n` approve/deny pending permission · `ctrl+x` abort · `pgup/pgdn` scroll · `esc` back to board. The active model shows bottom-right.
+
+**Prompt box extras** — `@` fuzzy-finds a file in the session's directory (type to filter, `↑/↓` select, `tab`/`enter` insert the path); `/` opens atc's command palette: `/model [name]` (show/switch model mid-session), `/diff`, `/export`, `/abort`, `/auto`, `/help`. Note these are atc commands — backend CLI slash commands (`/fleet`, `/compact`) don't exist over the SDK path.
 
 **Permission modal** — `y` approve once · `s` always allow this kind for the session · `a` approve + auto-approve session · `n` deny · `esc` back
 

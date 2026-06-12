@@ -63,6 +63,12 @@ type Model struct {
 	histIdx   int // index into the focused session's history; -1 = not browsing
 	histDraft string
 
+	// Completion overlay (@ files, / commands) and its file cache.
+	comp        completion
+	fileList    []string
+	fileListDir string
+	fileListAt  time.Time
+
 	form sessionForm
 }
 
