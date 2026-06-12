@@ -121,6 +121,54 @@ Notes for both:
 - **Headless/scheduled sessions can't answer permission prompts.** In `atc run`, anything the preset doesn't pre-approve is denied with an explanatory message; in-process scheduled sessions block at ⚠ WAITING instead. For unattended work use an `allow-all` preset (deny-list still applies), ideally with `"worktree": true` so it can't touch your main checkout. For look-don't-touch jobs (PR triage that only reports), say so in the prompt — and the run still lands as a session you can continue interactively to apply anything it suggested.
 - **Every firing spends credits** — sanity-check the cadence before leaving an aggressive schedule running.
 
+### Setting up your first scheduled task (step by step)
+
+1. **Add a preset for unattended runs** to `%APPDATA%\atc\config.json` (plain JSON, no comments):
+
+   ```json
+   "presets": {
+     "default":    { "approval": "prompt" },
+     "unattended": { "approval": "allow-all" }
+   }
+   ```
+
+2. **Add the schedule.** `name` is required (it becomes the task name) and the prompt should state the ground rules:
+
+   ```json
+   "schedules": [
+     { "name": "pr-triage", "cron": "0 9 * * 1-5", "preset": "unattended",
+       "repo": "C:/dev/app", "worktree": false,
+       "prompt": "Review new comments on my open PRs. Summarize what was said and suggest how I should respond or what to change. Do NOT modify any files." }
+   ]
+   ```
+
+3. **Preview the translation** — confirms the cron maps onto Task Scheduler terms:
+
+   ```powershell
+   atc schedule list
+   # pr-triage   0 9 * * 1-5  → /SC WEEKLY /D MON,TUE,WED,THU,FRI /ST 09:00  C:/dev/app
+   ```
+
+4. **Dry-run it once by hand** before trusting the schedule — same code path the task will use:
+
+   ```powershell
+   atc run --schedule pr-triage
+   ```
+
+   Read the output: did it finish (`— done`), did anything get denied that the job actually needed (switch the preset if so), does the report look right?
+
+5. **Register it:**
+
+   ```powershell
+   atc schedule install
+   ```
+
+   Verify with `schtasks /Query /TN atc\pr-triage` (or Task Scheduler's UI, folder `atc`). To test the full pipeline without waiting for 09:00: `schtasks /Run /TN atc\pr-triage`.
+
+6. **That's it.** Each weekday at 09:00 the run fires, your hooks fire (add a `finished` toast so you notice), and the session lands on the board — adopted live if atc is open, on next start otherwise — ready to attach and continue.
+
+Maintenance: editing a schedule's **prompt/repo/preset** needs nothing (config is read at fire time); changing its **cron** or **name** needs `atc schedule install` again (it overwrites); removing one from config needs `atc schedule uninstall` *before* you delete it (or `schtasks /Delete /TN atc\<name>` after). If you move `atc.exe`, re-run `install` — the task records the absolute path.
+
 ## Security posture
 
 - Local-only: `atc` opens **zero listening ports** and makes no network calls of its own; all network traffic belongs to the Copilot runtime it supervises.
