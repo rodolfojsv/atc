@@ -15,6 +15,9 @@ type Decision int
 const (
 	Deny Decision = iota
 	ApproveOnce
+	// ApproveSession asks the supervisor to remember a session-scoped
+	// rule for similar requests; backends treat it like ApproveOnce.
+	ApproveSession
 	Cancel
 )
 
@@ -74,7 +77,10 @@ type SessionSpec struct {
 	// Approval is config.ApprovalPrompt or ApprovalAllowAll. Backends
 	// without runtime permission callbacks map it to their own native
 	// permission mechanism.
-	Approval     string
+	Approval string
+	// ReadOnly runs the session in the backend's plan/read-only mode:
+	// the agent can inspect but not modify anything.
+	ReadOnly     bool
 	OnEvent      func(Event)
 	OnPermission PermissionFunc
 }

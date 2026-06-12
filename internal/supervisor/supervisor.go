@@ -19,6 +19,7 @@ import (
 	"github.com/rodolfojsv/atc/internal/bus"
 	"github.com/rodolfojsv/atc/internal/config"
 	"github.com/rodolfojsv/atc/internal/policy"
+	"github.com/rodolfojsv/atc/internal/spend"
 	"github.com/rodolfojsv/atc/internal/wt"
 )
 
@@ -35,6 +36,7 @@ type Supervisor struct {
 	trees    wt.Manager
 	bus      *bus.Bus
 	store    store
+	ledger   *spend.Ledger
 
 	notifyMu      sync.Mutex
 	notify        func()
@@ -54,7 +56,21 @@ func New(cfg *config.Config, b *bus.Bus) *Supervisor {
 		trees:  wt.Manager{Root: cfg.WorktreeRoot},
 		bus:    b,
 		store:  defaultStore(),
+		ledger: spend.Open(spendPath()),
 	}
+}
+
+func spendPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".atc", "spend.jsonl")
+}
+
+// Spend returns the cumulative usage totals for today and this month.
+func (s *Supervisor) Spend() (today, month spend.Totals) {
+	return s.ledger.Today(), s.ledger.Month()
 }
 
 // Backends lists the available backend names, default first.
@@ -138,6 +154,7 @@ type NewSessionOptions struct {
 	Preset      string
 	Model       string // overrides preset model, then config model
 	Prompt      string // optional first prompt
+	ReadOnly    bool   // plan mode: the agent inspects but never modifies
 }
 
 // NewSession validates the target directory, registers a session
@@ -189,7 +206,7 @@ func (s *Supervisor) NewSession(opts NewSessionOptions) (*Session, error) {
 
 	sess := &Session{
 		Name: name, Repo: repo, Dir: repo, Backend: backendName,
-		Preset: presetName, Created: time.Now(),
+		Preset: presetName, ReadOnly: opts.ReadOnly, Created: time.Now(),
 		status: StatusStarting,
 	}
 	s.mu.Lock()
@@ -224,6 +241,7 @@ func (s *Supervisor) spec(sess *Session, model string) agent.SessionSpec {
 		WorkingDir:   dir,
 		Model:        model,
 		Approval:     s.cfg.Preset(sess.Preset).Approval,
+		ReadOnly:     sess.ReadOnly,
 		OnEvent:      func(e agent.Event) { s.handleEvent(sess, e) },
 		OnPermission: s.permissionFunc(sess),
 	}
@@ -231,6 +249,7 @@ func (s *Supervisor) spec(sess *Session, model string) agent.SessionSpec {
 
 func (s *Supervisor) launch(sess *Session, model, prompt string, useWorktree bool) {
 	if useWorktree {
+		baseBranch, baseCommit, _ := s.trees.Base(sess.Repo)
 		wtPath, branch, err := s.trees.Create(sess.Repo, sess.Name)
 		if err != nil {
 			sess.setError("worktree: " + err.Error())
@@ -240,6 +259,7 @@ func (s *Supervisor) launch(sess *Session, model, prompt string, useWorktree boo
 		}
 		sess.mu.Lock()
 		sess.Worktree, sess.Branch, sess.Dir = wtPath, branch, wtPath
+		sess.BaseBranch, sess.BaseCommit = baseBranch, baseCommit
 		sess.mu.Unlock()
 	}
 	spec := s.spec(sess, model)
@@ -298,7 +318,9 @@ func (s *Supervisor) ResumeAll() int {
 		sess := &Session{
 			Name: s.uniqueName(wt.Slug(sv.Name)), Repo: sv.Repo, Dir: sv.Dir,
 			Worktree: sv.Worktree, Branch: sv.Branch, Backend: backendName,
-			Preset: sv.Preset, Created: sv.Created, status: StatusStarting, id: sv.ID,
+			Preset: sv.Preset, ReadOnly: sv.ReadOnly, Created: sv.Created,
+			BaseBranch: sv.BaseBranch, BaseCommit: sv.BaseCommit,
+			status: StatusStarting, id: sv.ID,
 		}
 		s.mu.Lock()
 		s.sessions = append(s.sessions, sess)
@@ -387,8 +409,9 @@ func (s *Supervisor) persist() {
 			saved = append(saved, savedSession{
 				ID: sess.id, Name: sess.Name, Repo: sess.Repo, Dir: sess.Dir,
 				Worktree: sess.Worktree, Branch: sess.Branch, Backend: sess.Backend,
-				Preset: sess.Preset, Model: sess.usage.Model, Status: string(sess.status),
-				Created: sess.Created,
+				Preset: sess.Preset, Model: sess.usage.Model, ReadOnly: sess.ReadOnly,
+				BaseBranch: sess.BaseBranch, BaseCommit: sess.BaseCommit,
+				Status: string(sess.status), Created: sess.Created,
 			})
 		}
 		sess.mu.Unlock()
@@ -442,7 +465,9 @@ func (s *Supervisor) WatchStore(ctx context.Context, interval time.Duration) {
 			sess := &Session{
 				Name: s.uniqueName(wt.Slug(sv.Name)), Repo: sv.Repo, Dir: sv.Dir,
 				Worktree: sv.Worktree, Branch: sv.Branch, Backend: backendName,
-				Preset: sv.Preset, Created: sv.Created, status: StatusStarting, id: sv.ID,
+				Preset: sv.Preset, ReadOnly: sv.ReadOnly, Created: sv.Created,
+				BaseBranch: sv.BaseBranch, BaseCommit: sv.BaseCommit,
+				status: StatusStarting, id: sv.ID,
 			}
 			s.mu.Lock()
 			s.sessions = append(s.sessions, sess)
@@ -581,8 +606,43 @@ func (s *Supervisor) handleEvent(sess *Session, e agent.Event) {
 		sess.updateContext(e.CurrentTokens, e.TokenLimit)
 	case agent.EventUsage:
 		sess.addUsage(e)
+		s.ledger.Add(spend.Record{
+			Session: sess.Name, Backend: sess.Backend, Model: e.Model,
+			In: e.InputTokens, Out: e.OutputTokens,
+			NanoAiu: e.NanoAiu, CostUSD: e.CostUSD,
+		})
 	}
 	s.poke()
+}
+
+// Diff shows what the session's worktree changed relative to its base.
+func (s *Supervisor) Diff(sess *Session) (string, error) {
+	sess.mu.Lock()
+	dir, base := sess.Worktree, sess.BaseCommit
+	sess.mu.Unlock()
+	if dir == "" {
+		return "", errors.New("session has no worktree — it works directly in the repo")
+	}
+	return s.trees.Diff(dir, base)
+}
+
+// Merge commits the worktree's changes and merges its branch back into
+// the branch it was created from.
+func (s *Supervisor) Merge(sess *Session) error {
+	sess.mu.Lock()
+	repo, dir, branch, baseBranch := sess.Repo, sess.Worktree, sess.Branch, sess.BaseBranch
+	sess.mu.Unlock()
+	if dir == "" {
+		return errors.New("session has no worktree")
+	}
+	err := s.trees.Merge(repo, dir, branch, baseBranch, "atc: changes from session "+sess.Name)
+	if err != nil {
+		sess.appendEntry(EntryError, "merge: "+err.Error())
+	} else {
+		sess.appendEntry(EntrySystem, "merged "+branch+" into "+baseBranch)
+	}
+	s.poke()
+	return err
 }
 
 // permissionFunc runs on a backend goroutine for each permission
@@ -609,6 +669,11 @@ func (s *Supervisor) permissionFunc(sess *Session) agent.PermissionFunc {
 			s.poke()
 			return agent.ApproveOnce, ""
 		}
+		if sess.approvedByRule(req) {
+			sess.appendEntry(EntrySystem, "auto-approved (session rule): "+req.Summary)
+			s.poke()
+			return agent.ApproveOnce, ""
+		}
 
 		if s.headless {
 			sess.appendEntry(EntrySystem, "⛔ denied (headless run): "+req.Summary)
@@ -624,6 +689,11 @@ func (s *Supervisor) permissionFunc(sess *Session) agent.PermissionFunc {
 
 		ans := <-p.respond
 		sess.clearPending()
+		if ans.decision == agent.ApproveSession {
+			rule := ruleFor(req)
+			sess.addApproval(rule)
+			sess.appendEntry(EntrySystem, "session rule added: always allow "+rule.label())
+		}
 		s.publish(bus.PermissionResolved, sess, map[string]any{"kind": req.Kind, "summary": req.Summary, "decision": fmt.Sprintf("%d", ans.decision)})
 		s.poke()
 		if ans.decision == agent.Deny && ans.feedback == "" {

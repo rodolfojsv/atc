@@ -86,6 +86,80 @@ func pathExists(p string) bool {
 	return err == nil
 }
 
+// Base reports the repo's current branch and commit — recorded at
+// worktree creation so diffs and merges know the comparison point.
+func (m Manager) Base(repo string) (branch, commit string, err error) {
+	branch, err = git(repo, "rev-parse", "--abbrev-ref", "HEAD")
+	if err != nil {
+		return "", "", err
+	}
+	commit, err = git(repo, "rev-parse", "HEAD")
+	if err != nil {
+		return "", "", err
+	}
+	return branch, commit, nil
+}
+
+// Diff shows everything the session changed relative to its base
+// commit: tracked changes (committed or not) as a unified diff, plus a
+// listing of untracked files.
+func (m Manager) Diff(dir, baseCommit string) (string, error) {
+	target := "HEAD"
+	if baseCommit != "" {
+		target = baseCommit
+	}
+	diff, err := git(dir, "diff", target)
+	if err != nil {
+		return "", err
+	}
+	status, _ := git(dir, "status", "--porcelain")
+	var untracked []string
+	for _, line := range strings.Split(status, "\n") {
+		if strings.HasPrefix(line, "?? ") {
+			untracked = append(untracked, "  + "+strings.TrimPrefix(line, "?? "))
+		}
+	}
+	var b strings.Builder
+	if len(untracked) > 0 {
+		b.WriteString("New untracked files:\n" + strings.Join(untracked, "\n") + "\n\n")
+	}
+	if strings.TrimSpace(diff) == "" && len(untracked) == 0 {
+		return "(no changes)", nil
+	}
+	b.WriteString(diff)
+	return b.String(), nil
+}
+
+// Merge commits everything in the worktree (if dirty) and merges its
+// branch into baseBranch in the main repo. The repo must currently
+// have baseBranch checked out; conflicts abort the merge cleanly.
+func (m Manager) Merge(repo, dir, branch, baseBranch, message string) error {
+	status, err := git(dir, "status", "--porcelain")
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(status) != "" {
+		if _, err := git(dir, "add", "-A"); err != nil {
+			return err
+		}
+		if _, err := git(dir, "-c", "user.name=atc", "-c", "user.email=atc@localhost", "commit", "-m", message); err != nil {
+			return err
+		}
+	}
+	current, err := git(repo, "rev-parse", "--abbrev-ref", "HEAD")
+	if err != nil {
+		return err
+	}
+	if baseBranch != "" && current != baseBranch {
+		return fmt.Errorf("repo has %s checked out, session branched from %s — switch branches first", current, baseBranch)
+	}
+	if _, err := git(repo, "merge", "--no-edit", branch); err != nil {
+		_, _ = git(repo, "merge", "--abort")
+		return fmt.Errorf("merge failed (aborted cleanly): %w", err)
+	}
+	return nil
+}
+
 // Remove deletes the worktree and its branch. The branch delete is
 // best-effort: it fails legitimately when the branch has unmerged work,
 // and that work should survive the session.

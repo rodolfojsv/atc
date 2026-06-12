@@ -22,6 +22,7 @@ type sessionForm struct {
 	repoPick int
 	presets  []string
 	preset   int
+	readOnly bool
 	worktree bool
 	focus    int
 }
@@ -33,6 +34,7 @@ const (
 	rowRepo
 	rowPrompt
 	rowPreset
+	rowMode
 	rowWorktree
 	rowCount
 )
@@ -126,6 +128,8 @@ func (f *sessionForm) cycleAt(delta int) bool {
 		f.inputs[1].SetValue(f.repos[f.repoPick])
 	case rowPreset:
 		f.preset = cycle(f.preset, delta, len(f.presets))
+	case rowMode:
+		f.readOnly = !f.readOnly
 	case rowWorktree:
 		f.worktree = !f.worktree
 	default:
@@ -172,6 +176,7 @@ func (m *Model) submitForm() (tea.Model, tea.Cmd) {
 		Backend:     f.backends[f.backend],
 		Preset:      f.presets[f.preset],
 		UseWorktree: f.worktree,
+		ReadOnly:    f.readOnly,
 	}
 	if opts.Repo == "" {
 		m.flash = "repo/directory is required"
@@ -208,6 +213,11 @@ func (m *Model) viewForm() string {
 	row(rowRepo, "Repo", f.inputs[1].View())
 	row(rowPrompt, "Prompt", f.inputs[2].View())
 	row(rowPreset, "Preset", "◂ "+f.presets[f.preset]+" ▸")
+	modeLabel := "[ ] normal — agent may act (per approval policy)"
+	if f.readOnly {
+		modeLabel = "[x] read-only — plan mode, inspect but never modify"
+	}
+	row(rowMode, "Mode", modeLabel)
 	wtLabel := "[ ] run in repo directly"
 	if f.worktree {
 		wtLabel = "[x] fresh git worktree"

@@ -9,16 +9,16 @@ import (
 )
 
 var (
-	styleTitle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15")).Background(lipgloss.Color("25")).Padding(0, 1)
-	styleHeader  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("245"))
-	styleSel     = lipgloss.NewStyle().Background(lipgloss.Color("236"))
-	styleKeybar  = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
-	styleKey     = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true)
-	styleFlash   = lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Bold(true)
-	styleDim     = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
-	styleBanner  = lipgloss.NewStyle().Foreground(lipgloss.Color("15")).Background(lipgloss.Color("124")).Bold(true).Padding(0, 1)
-	styleModal   = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("214")).Padding(1, 2)
-	styleAuto    = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+	styleTitle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15")).Background(lipgloss.Color("25")).Padding(0, 1)
+	styleHeader = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("245"))
+	styleSel    = lipgloss.NewStyle().Background(lipgloss.Color("236"))
+	styleKeybar = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	styleKey    = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true)
+	styleFlash  = lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Bold(true)
+	styleDim    = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+	styleBanner = lipgloss.NewStyle().Foreground(lipgloss.Color("15")).Background(lipgloss.Color("124")).Bold(true).Padding(0, 1)
+	styleModal  = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("214")).Padding(1, 2)
+	styleAuto   = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
 
 	styleUser     = lipgloss.NewStyle().Foreground(lipgloss.Color("81")).Bold(true)
 	styleUserText = lipgloss.NewStyle().Foreground(lipgloss.Color("81"))
@@ -26,11 +26,11 @@ var (
 	styleInputBox        = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("240")).Padding(0, 1)
 	styleInputBoxFocused = styleInputBox.BorderForeground(lipgloss.Color("75"))
 
-	styleWorking  = lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
-	styleWaiting  = lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Bold(true)
-	styleDone     = lipgloss.NewStyle().Foreground(lipgloss.Color("78"))
-	styleErrSt    = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
-	styleIdle     = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	styleWorking = lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
+	styleWaiting = lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Bold(true)
+	styleDone    = lipgloss.NewStyle().Foreground(lipgloss.Color("78"))
+	styleErrSt   = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
+	styleIdle    = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
 )
 
 func statusLabel(st supervisor.Status) string {

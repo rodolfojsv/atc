@@ -37,6 +37,12 @@ type Config struct {
 	// WorktreeRoot is where per-session worktrees are created.
 	// Empty means ~/.atc/worktrees/<repo>/<session>.
 	WorktreeRoot string `json:"worktreeRoot,omitempty"`
+	// ExportDir is where session transcripts are exported as markdown
+	// (point it inside an Obsidian vault and exports land in the vault).
+	// Empty means ~/.atc/exports. AutoExport makes `atc run` export
+	// every completed session automatically.
+	ExportDir  string `json:"exportDir,omitempty"`
+	AutoExport bool   `json:"autoExport,omitempty"`
 	// Repos are the repositories you usually work with; the new-session
 	// form offers them as a picker. DefaultRepo pre-fills the repo field
 	// (falls back to the first of Repos).

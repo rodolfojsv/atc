@@ -8,6 +8,7 @@ import (
 
 	"github.com/rodolfojsv/atc/internal/bus"
 	"github.com/rodolfojsv/atc/internal/config"
+	"github.com/rodolfojsv/atc/internal/export"
 	"github.com/rodolfojsv/atc/internal/hooks"
 	"github.com/rodolfojsv/atc/internal/supervisor"
 )
@@ -29,6 +30,7 @@ func cmdRun(argv []string) int {
 	model := fs.String("model", "", "model override")
 	name := fs.String("name", "", "session name")
 	worktree := fs.Bool("worktree", false, "run in a fresh git worktree")
+	doExport := fs.Bool("export", false, "export the transcript as markdown on completion (or set autoExport in config)")
 	timeout := fs.Duration("timeout", 60*time.Minute, "abort the run after this long")
 	_ = fs.Parse(argv)
 
@@ -124,6 +126,13 @@ func cmdRun(argv []string) int {
 		fmt.Printf(" · $%.2f", v.Usage.CostUSD)
 	}
 	fmt.Println()
+	if *doExport || cfg.AutoExport {
+		if path, err := export.Write(cfg.ExportDir, v, sess.Transcript()); err == nil {
+			fmt.Println("exported →", path)
+		} else {
+			fmt.Fprintln(os.Stderr, "atc run: export:", err)
+		}
+	}
 	if v.Status == supervisor.StatusError {
 		fmt.Fprintln(os.Stderr, "atc run:", v.Err)
 		return 1

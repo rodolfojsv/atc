@@ -35,6 +35,8 @@ const (
 	modePerm
 	modeKill
 	modeQuit
+	modeDiff
+	modeMerge
 )
 
 type Model struct {
@@ -120,6 +122,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateKill(msg)
 		case modeQuit:
 			return m.updateQuit(msg)
+		case modeDiff:
+			return m.updateDiff(msg)
+		case modeMerge:
+			return m.updateMerge(msg)
 		}
 	}
 	return m, nil
@@ -134,7 +140,7 @@ func (m *Model) updateMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	switch m.mode {
-	case modeFocus:
+	case modeFocus, modeDiff:
 		var cmd tea.Cmd
 		m.vp, cmd = m.vp.Update(msg)
 		m.vpFollow = m.vp.AtBottom()
@@ -215,6 +221,14 @@ func (m *Model) updateBoard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.target = sess
 			m.mode = modeKill
 		}
+	case "d":
+		if sess := m.selected(); sess != nil {
+			return m.openDiff(sess)
+		}
+	case "e":
+		if sess := m.selected(); sess != nil {
+			return m.exportSession(sess)
+		}
 	case "q", "ctrl+c":
 		if m.sup.ActiveCount() > 0 {
 			m.mode = modeQuit
@@ -237,6 +251,9 @@ func (m *Model) updatePerm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.mode = modeBoard
 	case "n":
 		sess.Respond(agent.Deny, "denied by user in atc")
+		m.mode = modeBoard
+	case "s":
+		sess.Respond(agent.ApproveSession, "")
 		m.mode = modeBoard
 	case "a":
 		sess.SetAutoApprove(true)
@@ -301,6 +318,12 @@ func (m *Model) View() string {
 	case modeQuit:
 		return m.modal(fmt.Sprintf("%d active session(s) will be disconnected. Quit?", m.sup.ActiveCount()),
 			keybar("y", "quit", "esc", "cancel"))
+	case modeDiff:
+		return m.viewDiff()
+	case modeMerge:
+		v := m.target.View()
+		return m.modal(fmt.Sprintf("Commit all changes in %q and merge into %s?", m.target.Name, v.BaseBranch),
+			keybar("y", "merge", "esc", "cancel"))
 	}
 	return m.viewBoard()
 }
@@ -343,9 +366,16 @@ func (m *Model) viewBoard() string {
 			default:
 				detail = styleDim.Render(truncate(detail, m.width-70))
 			}
-			name := truncate(v.Name, nameW)
+			marker := ""
 			if v.AutoApprove {
-				name = styleAuto.Render(truncate(v.Name+" ⚡", nameW))
+				marker = " ⚡"
+			}
+			if v.ReadOnly {
+				marker += " 🔒"
+			}
+			name := truncate(v.Name+marker, nameW)
+			if v.AutoApprove {
+				name = styleAuto.Render(name)
 			}
 			row := fmt.Sprintf("  %-*s %-*s %s %*s %*s %*s  %s",
 				nameW, name, dirW, truncate(dir, dirW),
@@ -362,8 +392,10 @@ func (m *Model) viewBoard() string {
 	if m.flash != "" {
 		b.WriteString(styleFlash.Render("  "+m.flash) + "\n")
 	}
+	today, month := m.sup.Spend()
+	b.WriteString(styleDim.Render("  spend today "+spendLabel(today)+" · month "+spendLabel(month)) + "\n")
 	b.WriteString("\n" + keybar(
-		"enter", "attach", "n", "new", "a", "approve", "A", "auto⚡", "x", "abort", "K", "kill", "q", "quit"))
+		"enter", "attach", "n", "new", "a", "approve", "d", "diff", "e", "export", "A", "auto⚡", "x", "abort", "K", "kill", "q", "quit"))
 	return b.String()
 }
 
@@ -382,7 +414,7 @@ func (m *Model) viewPerm() string {
 	for _, d := range detail {
 		lines = append(lines, truncate(d, m.width-8))
 	}
-	lines = append(lines, "", keybar("y", "approve once", "a", "approve + auto⚡", "n", "deny", "esc", "back"))
+	lines = append(lines, "", keybar("y", "approve once", "s", "always (this kind, this session)", "a", "approve + auto⚡", "n", "deny", "esc", "back"))
 	return m.center(styleModal.Width(min(m.width-4, 100)).Render(strings.Join(lines, "\n")))
 }
 

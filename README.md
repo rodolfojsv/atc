@@ -35,7 +35,11 @@ Design priorities, in order:
 - **Session resume & adoption** — open sessions are recorded in `~/.atc/sessions.json`; the next `atc` run reattaches to them with transcripts restored, and a running board adopts sessions finished by other atc processes (scheduled `atc run` jobs) live. Killed sessions are forgotten. Agents don't keep *running* while atc is closed — for that, run atc inside tmux (e.g. under WSL).
 - **Attach / detach** — focus any session to watch its stream and send prompts; detach back to the board without interrupting it. Assistant replies render as **markdown** (headings, bold, code blocks — like Copilot CLI); your prompts are highlighted; tool calls and atc notices are dimmed one-liners (`⚙ bash · go test ./...`) so the analysis stays readable.
 - **Worktree-per-session** — one keypress starts an agent in a fresh git worktree; cleanup on close. Parallel agents never collide in the same checkout.
-- **Approval policy** — per-preset `prompt` (default) or `allow-all`, where allow-all is still gated by a deterministic deny-list (destructive commands, credential exfiltration, pipe-to-shell) checked *before* any auto-approval.
+- **Diff review & merge** — `d` shows everything a session changed (vs the commit it branched from, untracked files included); `m` commits and merges it back into the branch it came from, aborting cleanly on conflicts. Agents propose, you dispose.
+- **Read-only sessions** — the Mode toggle on the form runs the agent in the backend's plan mode (Copilot `plan` agent-mode / Claude Code `--permission-mode plan`): it can inspect but structurally cannot modify. Shown as 🔒 on the board. Ideal for triage/review schedules.
+- **Obsidian/markdown export** — `e` exports a session transcript as a markdown note with YAML frontmatter (tokens, cost, repo, branch); `atc run --export` (or `"autoExport": true`) does it for scheduled runs. Point `exportDir` inside your Obsidian vault and notes land in the vault.
+- **Spend tracking** — every usage event is appended to `~/.atc/spend.jsonl`; the board footer shows today's and this month's cumulative AIC/$ across all runs, including headless ones.
+- **Approval policy** — per-preset `prompt` (default) or `allow-all`, where allow-all is still gated by a deterministic deny-list (destructive commands, credential exfiltration, pipe-to-shell) checked *before* any auto-approval. The permission modal's `s` adds a session-scoped rule ("always allow `go` commands here") for anything between approve-once and full auto-approve.
 - **Hooks** — map events (`session-started`, `waiting-on-permission`, `finished`, `error`, `tool-call`) to commands in config. Built-in Windows toast notifications; sample hooks for Teams webhooks and tool-call audit logs.
 - **Usage panel** — per-session input/output token totals, **billed AI Credits** (AIC column — actual nano-AIU reported by the runtime per request; there is no fixed tokens→AIC rate, it varies by model multiplier and billing batches), and a context-fill gauge, powered by the SDK's `AssistantUsage` / `SessionUsageInfo` events.
 - **Scheduled prompts** — cron-style schedules that launch a session with a canned prompt and preset: nightly dependency audit, morning PR triage. Results flow through the same board, notifications, and hooks.
@@ -52,11 +56,11 @@ Design priorities, in order:
 
 ## Keys
 
-**Board** — `↑/↓` select · `enter` attach · `n` new session · `a` review permission · `A` toggle auto-approve (⚡, deny-list still applies) · `x` abort turn · `K` kill · `q` quit
+**Board** — `↑/↓`/wheel select · `enter` attach · `n` new session · `a` review permission · `d` diff (then `m` merge) · `e` export to markdown · `A` toggle auto-approve (⚡, deny-list still applies) · `x` abort turn · `K` kill · `q` quit
 
 **Focus** — type + `enter` send prompt · `ctrl+j` newline · `↑/↓` prompt history · `ctrl+y`/`ctrl+n` approve/deny pending permission · `ctrl+x` abort · `pgup/pgdn` scroll · `esc` back to board
 
-**Permission modal** — `y` approve once · `a` approve + auto-approve session · `n` deny · `esc` back
+**Permission modal** — `y` approve once · `s` always allow this kind for the session · `a` approve + auto-approve session · `n` deny · `esc` back
 
 ## Requirements
 
@@ -81,6 +85,8 @@ Note: real `config.json` must be plain JSON — the `//` comments below are illu
 ```jsonc
 {
   "worktreeRoot": "C:/dev/worktrees",
+  "exportDir": "C:/Users/me/Vault/atc",      // inside your Obsidian vault → exports land in the vault
+  "autoExport": true,                         // atc run exports every completed session
   "repos": ["C:/dev/app", "C:/dev/infra"],   // repo picker in the new-session form
   "presets": {
     "default": { "approval": "prompt" },

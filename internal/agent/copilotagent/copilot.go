@@ -40,7 +40,7 @@ func (b *Backend) NewSession(ctx context.Context, spec agent.SessionSpec) (agent
 		return nil, err
 	}
 	sdk.On(eventTranslator(spec.OnEvent))
-	return &session{sdk: sdk}, nil
+	return &session{sdk: sdk, readOnly: spec.ReadOnly}, nil
 }
 
 func (b *Backend) ResumeSession(ctx context.Context, spec agent.SessionSpec) (agent.Session, error) {
@@ -56,11 +56,12 @@ func (b *Backend) ResumeSession(ctx context.Context, spec agent.SessionSpec) (ag
 	}
 	// History is read before the live subscription is attached; a
 	// freshly resumed session emits nothing until prompted.
-	return &session{sdk: sdk, onEvent: spec.OnEvent}, nil
+	return &session{sdk: sdk, onEvent: spec.OnEvent, readOnly: spec.ReadOnly}, nil
 }
 
 type session struct {
-	sdk *copilot.Session
+	sdk      *copilot.Session
+	readOnly bool
 	// onEvent is held un-attached on resumed sessions until History()
 	// has been replayed; see attachLive.
 	onEvent func(agent.Event)
@@ -77,7 +78,11 @@ func (s *session) attachLive() {
 
 func (s *session) Send(ctx context.Context, prompt string) error {
 	s.attachLive()
-	_, err := s.sdk.Send(ctx, copilot.MessageOptions{Prompt: prompt})
+	opts := copilot.MessageOptions{Prompt: prompt}
+	if s.readOnly {
+		opts.AgentMode = copilot.AgentModePlan
+	}
+	_, err := s.sdk.Send(ctx, opts)
 	return err
 }
 
@@ -191,7 +196,7 @@ func permissionHandler(onPermission agent.PermissionFunc) copilot.PermissionHand
 	return func(req copilot.PermissionRequest, _ copilot.PermissionInvocation) (rpc.PermissionDecision, error) {
 		decision, feedback := onPermission(describeRequest(req))
 		switch decision {
-		case agent.ApproveOnce:
+		case agent.ApproveOnce, agent.ApproveSession:
 			return &rpc.PermissionDecisionApproveOnce{}, nil
 		case agent.Cancel:
 			return &rpc.PermissionDecisionCancelled{}, nil

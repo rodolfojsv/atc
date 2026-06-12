@@ -88,9 +88,12 @@ func (s *session) ensureProc() error {
 	if s.spec.Model != "" {
 		args = append(args, "--model", s.spec.Model)
 	}
-	if s.spec.Approval == config.ApprovalAllowAll {
+	switch {
+	case s.spec.ReadOnly:
+		args = append(args, "--permission-mode", "plan")
+	case s.spec.Approval == config.ApprovalAllowAll:
 		args = append(args, "--permission-mode", "bypassPermissions")
-	} else {
+	default:
 		args = append(args, "--permission-mode", "acceptEdits")
 	}
 

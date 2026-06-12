@@ -24,17 +24,20 @@ func defaultStore() store {
 }
 
 type savedSession struct {
-	ID       string    `json:"id"`
-	Name     string    `json:"name"`
-	Repo     string    `json:"repo"`
-	Dir      string    `json:"dir"`
-	Worktree string    `json:"worktree,omitempty"`
-	Branch   string    `json:"branch,omitempty"`
-	Backend  string    `json:"backend,omitempty"` // empty = copilot (pre-backend files)
-	Preset   string    `json:"preset,omitempty"`
-	Model    string    `json:"model,omitempty"`
-	Status   string    `json:"status,omitempty"` // session status at last persist
-	Created  time.Time `json:"created"`
+	ID         string    `json:"id"`
+	Name       string    `json:"name"`
+	Repo       string    `json:"repo"`
+	Dir        string    `json:"dir"`
+	Worktree   string    `json:"worktree,omitempty"`
+	Branch     string    `json:"branch,omitempty"`
+	Backend    string    `json:"backend,omitempty"` // empty = copilot (pre-backend files)
+	Preset     string    `json:"preset,omitempty"`
+	Model      string    `json:"model,omitempty"`
+	ReadOnly   bool      `json:"readOnly,omitempty"`
+	BaseBranch string    `json:"baseBranch,omitempty"`
+	BaseCommit string    `json:"baseCommit,omitempty"`
+	Status     string    `json:"status,omitempty"` // session status at last persist
+	Created    time.Time `json:"created"`
 }
 
 // settled reports whether the session finished its work — the signal a

@@ -12,7 +12,7 @@ type Status string
 
 const (
 	StatusStarting Status = "starting"
-	StatusIdle     Status = "idle"    // never prompted yet
+	StatusIdle     Status = "idle" // never prompted yet
 	StatusWorking  Status = "working"
 	StatusWaiting  Status = "waiting" // blocked on a permission request
 	StatusDone     Status = "done"    // finished a turn, awaiting next prompt
@@ -91,7 +91,13 @@ type Session struct {
 	Branch   string // worktree branch
 	Backend  string // "copilot" | "claude"
 	Preset   string
+	ReadOnly bool // backend plan mode: inspect but never modify
 	Created  time.Time
+
+	// BaseBranch/BaseCommit record where the worktree branched off,
+	// for diff review and merge-back.
+	BaseBranch string
+	BaseCommit string
 
 	id          string
 	status      Status
@@ -104,6 +110,7 @@ type Session struct {
 	autoApprove bool // user flipped this session to allow-all at runtime
 	everWorked  bool
 	history     []string // prompts sent, for arrow-up recall
+	approvals   []approvalRule
 
 	ag agent.Session
 }
@@ -111,12 +118,60 @@ type Session struct {
 // SessionView is a consistent snapshot for rendering the board.
 type SessionView struct {
 	Name, Dir, Repo, Worktree, Branch, Backend, Preset string
+	BaseBranch                                         string
 	Status                                             Status
 	Intent, Err, LastLine                              string
 	Usage                                              Usage
 	Pending                                            *PermissionView
 	AutoApprove                                        bool
+	ReadOnly                                           bool
 	Created                                            time.Time
+}
+
+// approvalRule is a session-scoped "always allow this" rule created by
+// the 's' answer in the permission modal.
+type approvalRule struct {
+	kind  string
+	match string // shell: first command word; mcp: server/tool; others: ""
+}
+
+func ruleFor(req agent.PermissionRequest) approvalRule {
+	r := approvalRule{kind: req.Kind}
+	switch req.Kind {
+	case "shell":
+		if f := strings.Fields(req.Command); len(f) > 0 {
+			r.match = f[0]
+		}
+	case "mcp":
+		r.match = req.Summary
+	}
+	return r
+}
+
+// Label describes the rule for the transcript.
+func (r approvalRule) label() string {
+	if r.match != "" {
+		return r.kind + " " + r.match
+	}
+	return "all " + r.kind + "s"
+}
+
+func (s *Session) addApproval(r approvalRule) {
+	s.mu.Lock()
+	s.approvals = append(s.approvals, r)
+	s.mu.Unlock()
+}
+
+func (s *Session) approvedByRule(req agent.PermissionRequest) bool {
+	want := ruleFor(req)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, r := range s.approvals {
+		if r == want {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Session) View() SessionView {
@@ -125,8 +180,8 @@ func (s *Session) View() SessionView {
 	v := SessionView{
 		Name: s.Name, Dir: s.Dir, Repo: s.Repo, Worktree: s.Worktree,
 		Branch: s.Branch, Backend: s.Backend, Preset: s.Preset, Status: s.status,
-		Intent: s.intent, Err: s.errMsg, Usage: s.usage,
-		AutoApprove: s.autoApprove, Created: s.Created,
+		BaseBranch: s.BaseBranch, Intent: s.intent, Err: s.errMsg, Usage: s.usage,
+		AutoApprove: s.autoApprove, ReadOnly: s.ReadOnly, Created: s.Created,
 	}
 	if s.pending != nil {
 		v.Pending = &PermissionView{Kind: s.pending.Kind, Summary: s.pending.Summary, Detail: append([]string(nil), s.pending.Detail...)}

@@ -1,7 +1,10 @@
 package wt
 
 import (
+	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -71,5 +74,64 @@ func TestCreateRejectsNonRepo(t *testing.T) {
 	m := Manager{Root: t.TempDir()}
 	if _, _, err := m.Create(t.TempDir(), "x"); err == nil {
 		t.Error("expected error for non-git directory")
+	}
+}
+
+func TestDiffAndMerge(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo := initRepo(t)
+	writeFile(t, repo, "a.txt", "original\n")
+	commit(t, repo, "add a.txt")
+
+	m := Manager{Root: t.TempDir()}
+	baseBranch, baseCommit, err := m.Base(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir, branch, err := m.Create(repo, "feat")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The agent edits a tracked file and adds a new one, no commit.
+	writeFile(t, dir, "a.txt", "changed\n")
+	writeFile(t, dir, "new.txt", "fresh\n")
+
+	diff, err := m.Diff(dir, baseCommit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(diff, "changed") || !strings.Contains(diff, "new.txt") {
+		t.Fatalf("diff missing changes:\n%s", diff)
+	}
+
+	if err := m.Merge(repo, dir, branch, baseBranch, "atc: test merge"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(repo, "a.txt"))
+	if err != nil || string(data) != "changed\n" {
+		t.Fatalf("merge did not land: %q %v", data, err)
+	}
+	if _, err := os.Stat(filepath.Join(repo, "new.txt")); err != nil {
+		t.Fatal("untracked file did not merge:", err)
+	}
+}
+
+func writeFile(t *testing.T, dir, name, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func commit(t *testing.T, repo, msg string) {
+	t.Helper()
+	for _, args := range [][]string{{"add", "-A"}, {"-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", msg}} {
+		cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v %s", args, err, out)
+		}
 	}
 }
