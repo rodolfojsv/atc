@@ -38,6 +38,15 @@ type savedSession struct {
 	BaseCommit string    `json:"baseCommit,omitempty"`
 	Status     string    `json:"status,omitempty"` // session status at last persist
 	Created    time.Time `json:"created"`
+
+	// Usage snapshot at last persist — restored on resume because the
+	// runtimes' own logs don't reliably persist usage events.
+	InTokens      int64   `json:"inTokens,omitempty"`
+	OutTokens     int64   `json:"outTokens,omitempty"`
+	NanoAiu       float64 `json:"nanoAiu,omitempty"`
+	CostUSD       float64 `json:"costUsd,omitempty"`
+	CurrentTokens int64   `json:"currentTokens,omitempty"`
+	TokenLimit    int64   `json:"tokenLimit,omitempty"`
 }
 
 // settled reports whether the session finished its work — the signal a
