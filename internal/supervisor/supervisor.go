@@ -72,6 +72,13 @@ func New(cfg *config.Config, b *bus.Bus) *Supervisor {
 	}
 }
 
+func firstNonEmpty(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
+}
+
 func spendPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -337,8 +344,8 @@ func (s *Supervisor) ResumeAll() int {
 		sess := &Session{
 			Name: s.uniqueName(wt.Slug(sv.Name)), Repo: sv.Repo, Dir: sv.Dir,
 			Worktree: sv.Worktree, Branch: sv.Branch, Backend: backendName,
-			Preset: sv.Preset, ReadOnly: sv.ReadOnly, Created: sv.Created,
-			BaseBranch: sv.BaseBranch, BaseCommit: sv.BaseCommit,
+			Preset: sv.Preset, ReadOnly: sv.ReadOnly, Model: sv.Model,
+			Created: sv.Created, BaseBranch: sv.BaseBranch, BaseCommit: sv.BaseCommit,
 			status: StatusStarting, id: sv.ID,
 		}
 		s.mu.Lock()
@@ -450,7 +457,7 @@ func (s *Supervisor) persist() {
 			saved = append(saved, savedSession{
 				ID: sess.id, Name: sess.Name, Repo: sess.Repo, Dir: sess.Dir,
 				Worktree: sess.Worktree, Branch: sess.Branch, Backend: sess.Backend,
-				Preset: sess.Preset, Model: sess.usage.Model, ReadOnly: sess.ReadOnly,
+				Preset: sess.Preset, Model: firstNonEmpty(sess.usage.Model, sess.Model), ReadOnly: sess.ReadOnly,
 				BaseBranch: sess.BaseBranch, BaseCommit: sess.BaseCommit,
 				Status: string(sess.status), Created: sess.Created,
 				InTokens: sess.usage.InputTokens, OutTokens: sess.usage.OutputTokens,
@@ -509,8 +516,8 @@ func (s *Supervisor) WatchStore(ctx context.Context, interval time.Duration) {
 			sess := &Session{
 				Name: s.uniqueName(wt.Slug(sv.Name)), Repo: sv.Repo, Dir: sv.Dir,
 				Worktree: sv.Worktree, Branch: sv.Branch, Backend: backendName,
-				Preset: sv.Preset, ReadOnly: sv.ReadOnly, Created: sv.Created,
-				BaseBranch: sv.BaseBranch, BaseCommit: sv.BaseCommit,
+				Preset: sv.Preset, ReadOnly: sv.ReadOnly, Model: sv.Model,
+				Created: sv.Created, BaseBranch: sv.BaseBranch, BaseCommit: sv.BaseCommit,
 				status: StatusStarting, id: sv.ID,
 			}
 			s.mu.Lock()

@@ -117,3 +117,16 @@ func TestPersistWritesUsageSnapshot(t *testing.T) {
 		t.Fatalf("persist did not snapshot usage: %+v", got)
 	}
 }
+
+func TestPersistKeepsConfiguredModelWithoutUsage(t *testing.T) {
+	st := store{path: filepath.Join(t.TempDir(), "sessions.json")}
+	s := New(testConfig(t), nil)
+	s.store = st
+	// Configured model, but no turn has run yet (usage.Model empty).
+	s.sessions = []*Session{{Name: "x", Repo: "/r", Dir: "/r", id: "m1", status: StatusIdle, Model: "gpt-5"}}
+	s.persist()
+	got := st.load()
+	if len(got) != 1 || got[0].Model != "gpt-5" {
+		t.Fatalf("configured model not persisted: %+v", got)
+	}
+}
