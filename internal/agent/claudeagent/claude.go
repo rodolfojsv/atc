@@ -137,6 +137,20 @@ func (s *session) Send(_ context.Context, prompt string) error {
 	return err
 }
 
+// SetModel records the new model and retires the current subprocess;
+// the next Send respawns with --resume and the new --model, so the
+// conversation continues uninterrupted.
+func (s *session) SetModel(_ context.Context, model string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.spec.Model = model
+	if s.cmd != nil && s.cmd.ProcessState == nil {
+		s.aborted = true // suppress the exit-error event from readLoop
+		_ = s.cmd.Process.Kill()
+	}
+	return nil
+}
+
 // Abort kills the subprocess; the CLI has no in-stream interrupt. The
 // conversation continues on the next Send via --resume.
 func (s *session) Abort(_ context.Context) error {

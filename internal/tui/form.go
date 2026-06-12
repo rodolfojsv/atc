@@ -30,6 +30,7 @@ type sessionForm struct {
 const (
 	rowName = iota
 	rowBackend
+	rowModel
 	rowRepoPick
 	rowRepo
 	rowPrompt
@@ -48,6 +49,8 @@ func inputForRow(row int) int {
 		return 1
 	case rowPrompt:
 		return 2
+	case rowModel:
+		return 3
 	}
 	return -1
 }
@@ -64,6 +67,11 @@ func newSessionForm(cfg *config.Config, backends []string) sessionForm {
 	prompt.Placeholder = "optional first prompt"
 	prompt.CharLimit = 0
 
+	model := textinput.New()
+	model.Placeholder = "backend default"
+	model.CharLimit = 64
+	model.SetValue(cfg.Model)
+
 	presets := []string{"default"}
 	for n := range cfg.Presets {
 		if n != "default" {
@@ -72,7 +80,7 @@ func newSessionForm(cfg *config.Config, backends []string) sessionForm {
 	}
 
 	f := sessionForm{
-		inputs:   []textinput.Model{name, repo, prompt},
+		inputs:   []textinput.Model{name, repo, prompt, model},
 		backends: backends,
 		repos:    cfg.Repos,
 		presets:  presets,
@@ -174,6 +182,7 @@ func (m *Model) submitForm() (tea.Model, tea.Cmd) {
 		Repo:        strings.TrimSpace(f.inputs[1].Value()),
 		Prompt:      strings.TrimSpace(f.inputs[2].Value()),
 		Backend:     f.backends[f.backend],
+		Model:       strings.TrimSpace(f.inputs[3].Value()),
 		Preset:      f.presets[f.preset],
 		UseWorktree: f.worktree,
 		ReadOnly:    f.readOnly,
@@ -207,6 +216,7 @@ func (m *Model) viewForm() string {
 
 	row(rowName, "Name", f.inputs[0].View())
 	row(rowBackend, "Backend", "◂ "+f.backends[f.backend]+" ▸")
+	row(rowModel, "Model", f.inputs[3].View())
 	if len(f.repos) > 0 {
 		row(rowRepoPick, "Pick", "◂ "+truncate(f.repos[f.repoPick], 50)+" ▸")
 	}

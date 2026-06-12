@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/charmbracelet/lipgloss"
 
@@ -100,6 +101,16 @@ func humanAIC(nanoAiu float64) string {
 	default:
 		return fmt.Sprintf("%.1f", aic)
 	}
+}
+
+// rightAlign joins left and right with padding so right lands at the
+// terminal's right edge (the bottom-right corner slot).
+func rightAlign(width int, left, right string) string {
+	pad := width - lipgloss.Width(left) - lipgloss.Width(right) - 1
+	if pad < 1 {
+		return left
+	}
+	return left + strings.Repeat(" ", pad) + right
 }
 
 func keybar(pairs ...string) string {

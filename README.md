@@ -58,7 +58,7 @@ Design priorities, in order:
 
 **Board** — `↑/↓`/wheel select · `enter` attach · `n` new session · `a` review permission · `d` diff (then `m` merge) · `e` export to markdown · `A` toggle auto-approve (⚡, deny-list still applies) · `x` abort turn · `K` kill · `q` quit
 
-**Focus** — type + `enter` send prompt · `ctrl+j` newline · `↑/↓` prompt history · `ctrl+y`/`ctrl+n` approve/deny pending permission · `ctrl+x` abort · `pgup/pgdn` scroll · `esc` back to board
+**Focus** — type + `enter` send prompt · `/model` show · `/model <name>` switch model mid-session · `ctrl+j` newline · `↑/↓` prompt history · `ctrl+y`/`ctrl+n` approve/deny pending permission · `ctrl+x` abort · `pgup/pgdn` scroll · `esc` back to board. The active model shows bottom-right.
 
 **Permission modal** — `y` approve once · `s` always allow this kind for the session · `a` approve + auto-approve session · `n` deny · `esc` back
 

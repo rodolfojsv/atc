@@ -178,6 +178,24 @@ func (m *Model) updateFocus(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.histIdx, m.histDraft = -1, ""
 		m.vpFollow = true
 		sup := m.sup
+		// /model mirrors the CLI habit: bare shows the current model,
+		// with an argument it switches for subsequent turns.
+		if rest, ok := strings.CutPrefix(text, "/model"); ok {
+			model := strings.TrimSpace(rest)
+			if model == "" {
+				cur := sess.View().Model
+				if cur == "" {
+					cur = "backend default"
+				}
+				return m, func() tea.Msg { return flashMsg{text: "model: " + cur + " — /model <name> to switch"} }
+			}
+			return m, func() tea.Msg {
+				if err := sup.SwitchModel(sess, model); err != nil {
+					return flashMsg{text: err.Error()}
+				}
+				return RefreshMsg{}
+			}
+		}
 		return m, func() tea.Msg {
 			if err := sup.Prompt(sess, text); err != nil {
 				return flashMsg{text: err.Error()}
@@ -286,9 +304,16 @@ func (m *Model) viewFocus() string {
 		box = styleInputBoxFocused
 	}
 	b.WriteString(box.Width(m.width-2).Render(m.input.View()) + "\n")
-	b.WriteString(keybar("esc", "board", "enter", "send", "ctrl+j", "newline", "ctrl+x", "abort", "wheel", "scroll"))
+	bottom := keybar("esc", "board", "enter", "send", "ctrl+j", "newline", "ctrl+x", "abort", "wheel", "scroll")
 	if m.flash != "" {
-		b.WriteString("  " + styleFlash.Render(m.flash))
+		bottom += "  " + styleFlash.Render(m.flash)
 	}
+	model := v.Model
+	if model == "" {
+		model = "model: default"
+	} else {
+		model = "model: " + model
+	}
+	b.WriteString(rightAlign(m.width, bottom, styleDim.Render(model)))
 	return b.String()
 }
