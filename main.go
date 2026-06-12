@@ -50,7 +50,7 @@ func main() {
 	defer sup.Stop()
 
 	m := tui.New(sup, cfg)
-	p := tea.NewProgram(m, tea.WithAltScreen())
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	sup.SetNotify(func() { p.Send(tui.RefreshMsg{}) })
 
 	// Reattach to sessions from the previous run (recorded in

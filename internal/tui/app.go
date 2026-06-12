@@ -84,6 +84,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case flashMsg:
 		m.flash = msg.text
 		return m, nil
+	case tea.MouseMsg:
+		return m.updateMouse(msg)
 	case tea.KeyMsg:
 		m.flash = ""
 		switch m.mode {
@@ -99,6 +101,31 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateKill(msg)
 		case modeQuit:
 			return m.updateQuit(msg)
+		}
+	}
+	return m, nil
+}
+
+// updateMouse handles wheel scrolling: the transcript in focus view,
+// the selection cursor on the board.
+func (m *Model) updateMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	wheelUp := msg.Button == tea.MouseButtonWheelUp
+	wheelDown := msg.Button == tea.MouseButtonWheelDown
+	if !wheelUp && !wheelDown {
+		return m, nil
+	}
+	switch m.mode {
+	case modeFocus:
+		var cmd tea.Cmd
+		m.vp, cmd = m.vp.Update(msg)
+		m.vpFollow = m.vp.AtBottom()
+		return m, cmd
+	case modeBoard:
+		if wheelUp && m.cursor > 0 {
+			m.cursor--
+		}
+		if wheelDown && m.cursor < len(m.sup.Sessions())-1 {
+			m.cursor++
 		}
 	}
 	return m, nil
