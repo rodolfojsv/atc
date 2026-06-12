@@ -275,6 +275,11 @@ func (m *Model) runSlashCommand(sess *supervisor.Session, text string) (tea.Mode
 			m.flash = "auto-approve off"
 		}
 		return m, nil
+	case "/skills":
+		for _, line := range m.skillsInventory() {
+			sup.Note(sess, line)
+		}
+		return m, nil
 	case "/help":
 		names := make([]string, len(slashCommands))
 		for i, c := range slashCommands {
@@ -282,6 +287,16 @@ func (m *Model) runSlashCommand(sess *supervisor.Session, text string) (tea.Mode
 		}
 		m.flash = strings.Join(names, " · ") + " — @ mentions a file"
 		return m, nil
+	}
+	// Claude sessions expand their repo's .claude/commands themselves —
+	// pass unrecognized commands through as the prompt.
+	if sess.View().Backend == "claude" {
+		return m, func() tea.Msg {
+			if err := sup.Prompt(sess, text); err != nil {
+				return flashMsg{text: err.Error()}
+			}
+			return RefreshMsg{}
+		}
 	}
 	m.flash = "unknown command " + cmd + " — /help lists them"
 	return m, nil
