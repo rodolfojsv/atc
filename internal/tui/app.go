@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/rodolfojsv/atc/internal/config"
@@ -46,6 +47,11 @@ type Model struct {
 	vp       viewport.Model
 	vpFollow bool
 	input    textinput.Model
+
+	// Markdown rendering for assistant transcript entries.
+	mdr     *glamour.TermRenderer
+	mdCache map[string]string
+	mdWidth int
 
 	form sessionForm
 }

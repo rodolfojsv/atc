@@ -4,8 +4,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/bubbles/viewport"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/glamour"
 	"github.com/github/copilot-sdk/go/rpc"
 	"github.com/muesli/reflow/wordwrap"
 
@@ -39,18 +40,76 @@ func (m *Model) layoutFocus() {
 		m.vp.Height = h
 	}
 	m.input.Width = m.width - 4
+
+	if m.mdWidth != m.width {
+		// Markdown rendering is width-dependent; rebuild the renderer
+		// and drop the cache on resize.
+		m.mdWidth = m.width
+		m.mdCache = map[string]string{}
+		r, err := glamour.NewTermRenderer(
+			glamour.WithAutoStyle(),
+			glamour.WithWordWrap(min(m.width-2, 110)),
+			glamour.WithEmoji(),
+		)
+		if err == nil {
+			m.mdr = r
+		}
+	}
+}
+
+// renderMarkdown renders assistant text via glamour, caching by content
+// (entries are immutable once complete).
+func (m *Model) renderMarkdown(text string) string {
+	if m.mdr == nil {
+		return wordwrap.String(text, m.vp.Width-1)
+	}
+	if out, ok := m.mdCache[text]; ok {
+		return out
+	}
+	out, err := m.mdr.Render(text)
+	if err != nil {
+		return wordwrap.String(text, m.vp.Width-1)
+	}
+	out = strings.Trim(out, "\n")
+	if len(m.mdCache) > 500 {
+		m.mdCache = map[string]string{}
+	}
+	m.mdCache[text] = out
+	return out
+}
+
+func (m *Model) renderEntry(e supervisor.Entry) string {
+	w := m.vp.Width - 1
+	switch e.Kind {
+	case supervisor.EntryUser:
+		return styleUser.Render("❯ ") + styleUserText.Render(wordwrap.String(e.Text, w-2)) + "\n"
+	case supervisor.EntryAssistant:
+		if e.Partial {
+			// Streaming text renders plain; it becomes markdown once the
+			// message completes.
+			return wordwrap.String(e.Text, w) + styleDim.Render(" ▍")
+		}
+		return m.renderMarkdown(e.Text) + "\n"
+	case supervisor.EntryTool:
+		return styleDim.Render(wordwrap.String("  ⚙ "+e.Text, w))
+	case supervisor.EntrySystem:
+		return styleDim.Render(wordwrap.String("  · "+e.Text, w))
+	case supervisor.EntryError:
+		return styleErrSt.Render(wordwrap.String("  ✗ "+e.Text, w))
+	}
+	return e.Text
 }
 
 func (m *Model) refreshViewport() {
 	if m.target == nil {
 		return
 	}
-	lines := m.target.Transcript()
-	wrapped := make([]string, 0, len(lines))
-	for _, l := range lines {
-		wrapped = append(wrapped, wordwrap.String(l, m.vp.Width-1))
+	entries := m.target.Transcript()
+	blocks := make([]string, 0, len(entries))
+	for _, e := range entries {
+		blocks = append(blocks, m.renderEntry(e))
 	}
-	m.vp.SetContent(strings.Join(wrapped, "\n"))
+	m.vp.SetContent(strings.Join(blocks, "\n"))
 	if m.vpFollow {
 		m.vp.GotoBottom()
 	}

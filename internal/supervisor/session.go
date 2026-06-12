@@ -13,13 +13,33 @@ type Status string
 
 const (
 	StatusStarting Status = "starting"
-	StatusIdle     Status = "idle"    // never prompted yet
+	StatusIdle     Status = "idle" // never prompted yet
 	StatusWorking  Status = "working"
 	StatusWaiting  Status = "waiting" // blocked on a permission request
 	StatusDone     Status = "done"    // finished a turn, awaiting next prompt
 	StatusError    Status = "error"
 	StatusClosed   Status = "closed"
 )
+
+// EntryKind classifies transcript entries so the UI can give the
+// assistant's analysis visual priority over tool noise.
+type EntryKind int
+
+const (
+	EntryUser      EntryKind = iota // a prompt the user sent
+	EntryAssistant                  // assistant text (markdown)
+	EntryTool                       // a tool/command invocation
+	EntrySystem                     // atc-side notices (starting, approvals…)
+	EntryError                      // failures of any origin
+)
+
+// Entry is one transcript block. Partial marks an assistant message
+// still streaming in.
+type Entry struct {
+	Kind    EntryKind
+	Text    string
+	Partial bool
+}
 
 // Usage accumulates token and cost numbers from SDK usage events.
 type Usage struct {
@@ -48,7 +68,7 @@ type PermissionView struct {
 	Detail  []string
 }
 
-const maxTranscriptLines = 5000
+const maxTranscriptEntries = 1500
 
 type Session struct {
 	mu sync.Mutex
@@ -68,7 +88,7 @@ type Session struct {
 	status      Status
 	intent      string // short activity description from assistant.intent
 	errMsg      string
-	transcript  []string
+	transcript  []Entry
 	streamBuf   string // in-flight assistant message (deltas)
 	usage       Usage
 	pending     *Permission
@@ -105,14 +125,14 @@ func (s *Session) View() SessionView {
 	return v
 }
 
-// Transcript returns a copy of the transcript including any in-flight
-// streamed text.
-func (s *Session) Transcript() []string {
+// Transcript returns a copy of the transcript; an in-flight assistant
+// message appears as a final Partial entry.
+func (s *Session) Transcript() []Entry {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := append([]string(nil), s.transcript...)
+	out := append([]Entry(nil), s.transcript...)
 	if s.streamBuf != "" {
-		out = append(out, strings.Split(s.streamBuf, "\n")...)
+		out = append(out, Entry{Kind: EntryAssistant, Text: s.streamBuf, Partial: true})
 	}
 	return out
 }
@@ -163,8 +183,12 @@ func (s *Session) lastLineLocked() string {
 		}
 	}
 	for i := len(s.transcript) - 1; i >= 0; i-- {
-		if strings.TrimSpace(s.transcript[i]) != "" {
-			return s.transcript[i]
+		text := strings.TrimRight(s.transcript[i].Text, "\n")
+		if j := strings.LastIndexByte(text, '\n'); j >= 0 {
+			text = text[j+1:]
+		}
+		if strings.TrimSpace(text) != "" {
+			return text
 		}
 	}
 	return ""
@@ -189,6 +213,7 @@ func (s *Session) setError(msg string) {
 	s.mu.Lock()
 	s.status = StatusError
 	s.errMsg = msg
+	s.transcript = append(s.transcript, Entry{Kind: EntryError, Text: msg})
 	s.mu.Unlock()
 }
 
@@ -207,26 +232,25 @@ func (s *Session) finishMessage(content string) {
 	if content == "" {
 		return
 	}
-	s.transcript = append(s.transcript, strings.Split(strings.TrimRight(content, "\n"), "\n")...)
-	s.transcript = append(s.transcript, "")
+	s.transcript = append(s.transcript, Entry{Kind: EntryAssistant, Text: strings.TrimRight(content, "\n")})
 	s.trimLocked()
 }
 
-func (s *Session) appendLine(line string) {
+func (s *Session) appendEntry(kind EntryKind, text string) {
 	s.mu.Lock()
 	// Flush any in-flight stream first so ordering stays sane.
 	if s.streamBuf != "" {
-		s.transcript = append(s.transcript, strings.Split(strings.TrimRight(s.streamBuf, "\n"), "\n")...)
+		s.transcript = append(s.transcript, Entry{Kind: EntryAssistant, Text: strings.TrimRight(s.streamBuf, "\n")})
 		s.streamBuf = ""
 	}
-	s.transcript = append(s.transcript, line)
+	s.transcript = append(s.transcript, Entry{Kind: kind, Text: text})
 	s.trimLocked()
 	s.mu.Unlock()
 }
 
 func (s *Session) trimLocked() {
-	if n := len(s.transcript); n > maxTranscriptLines {
-		s.transcript = s.transcript[n-maxTranscriptLines:]
+	if n := len(s.transcript); n > maxTranscriptEntries {
+		s.transcript = s.transcript[n-maxTranscriptEntries:]
 	}
 }
 

@@ -32,7 +32,7 @@ Design priorities, in order:
 
 - **Session board** — live status per agent: idle / working / **waiting on permission** / done / error, with per-session token usage and context-window fill.
 - **Session resume** — open sessions are recorded in `~/.atc/sessions.json`; the next `atc` run reattaches to them (the Copilot runtime persists the conversations; killed sessions are forgotten). Agents don't keep *running* while atc is closed — for that, run atc inside tmux (e.g. under WSL).
-- **Attach / detach** — focus any session to watch its stream and send prompts; detach back to the board without interrupting it.
+- **Attach / detach** — focus any session to watch its stream and send prompts; detach back to the board without interrupting it. Assistant replies render as **markdown** (headings, bold, code blocks — like Copilot CLI); your prompts are highlighted; tool calls and atc notices are dimmed one-liners (`⚙ bash · go test ./...`) so the analysis stays readable.
 - **Worktree-per-session** — one keypress starts an agent in a fresh git worktree; cleanup on close. Parallel agents never collide in the same checkout.
 - **Approval policy** — per-preset `prompt` (default) or `allow-all`, where allow-all is still gated by a deterministic deny-list (destructive commands, credential exfiltration, pipe-to-shell) checked *before* any auto-approval.
 - **Hooks** — map events (`session-started`, `waiting-on-permission`, `finished`, `error`, `tool-call`) to commands in config. Built-in Windows toast notifications; sample hooks for Teams webhooks and tool-call audit logs.

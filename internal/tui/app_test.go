@@ -67,3 +67,19 @@ func TestFormSubmitRequiresRepo(t *testing.T) {
 		t.Error("submit without repo should stay on form with a flash message")
 	}
 }
+
+func TestTranscriptRendering(t *testing.T) {
+	m := testModel(t)
+	md := m.renderEntry(supervisor.Entry{Kind: supervisor.EntryAssistant, Text: "# Findings\n\nThe bug is in **main.go**."})
+	if !strings.Contains(md, "Findings") || !strings.Contains(md, "main.go") {
+		t.Errorf("markdown entry lost content:\n%s", md)
+	}
+	tool := m.renderEntry(supervisor.Entry{Kind: supervisor.EntryTool, Text: "bash · go test ./..."})
+	if !strings.Contains(tool, "go test ./...") {
+		t.Errorf("tool entry lost content:\n%s", tool)
+	}
+	user := m.renderEntry(supervisor.Entry{Kind: supervisor.EntryUser, Text: "fix the bug"})
+	if !strings.Contains(user, "fix the bug") || !strings.Contains(user, "❯") {
+		t.Errorf("user entry malformed:\n%s", user)
+	}
+}

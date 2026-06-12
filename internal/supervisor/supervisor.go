@@ -181,7 +181,7 @@ func (s *Supervisor) launch(sess *Session, model, prompt string, useWorktree boo
 	sess.mu.Lock()
 	dir := sess.Dir
 	sess.mu.Unlock()
-	sess.appendLine("▶ starting agent in " + dir)
+	sess.appendEntry(EntrySystem, "starting agent in "+dir)
 	s.poke()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -215,7 +215,7 @@ func (s *Supervisor) launch(sess *Session, model, prompt string, useWorktree boo
 
 	if prompt != "" {
 		if err := s.Prompt(sess, prompt); err != nil {
-			sess.appendLine("✗ failed to send prompt: " + err.Error())
+			sess.appendEntry(EntryError, "failed to send prompt: "+err.Error())
 			s.poke()
 		}
 	}
@@ -264,7 +264,7 @@ func (s *Supervisor) resume(sess *Session, sv savedSession) {
 	sess.status = StatusDone
 	sess.everWorked = true
 	sess.mu.Unlock()
-	sess.appendLine("↻ resumed from previous run — earlier transcript lives in the Copilot session log")
+	sess.appendEntry(EntrySystem, "resumed from previous run — earlier transcript lives in the Copilot session log")
 	sdkSess.On(func(ev copilot.SessionEvent) { s.handleEvent(sess, ev) })
 	s.persist()
 	s.poke()
@@ -294,7 +294,7 @@ func (s *Supervisor) Prompt(sess *Session, text string) error {
 	if sdk == nil {
 		return errors.New("session is still starting")
 	}
-	sess.appendLine("» " + text)
+	sess.appendEntry(EntryUser, text)
 	sess.setStatus(StatusWorking)
 	s.poke()
 	_, err := sdk.Send(context.Background(), copilot.MessageOptions{Prompt: text})
@@ -332,7 +332,7 @@ func (s *Supervisor) Kill(sess *Session, removeWorktree bool) {
 	sess.mu.Unlock()
 	if removeWorktree && worktree != "" {
 		if err := s.trees.Remove(repo, worktree, branch); err != nil {
-			sess.appendLine("✗ worktree cleanup: " + err.Error())
+			sess.appendEntry(EntryError, "worktree cleanup: "+err.Error())
 		}
 	}
 	s.mu.Lock()
@@ -379,15 +379,15 @@ func (s *Supervisor) handleEvent(sess *Session, ev copilot.SessionEvent) {
 	case *rpc.AssistantMessageData:
 		sess.finishMessage(d.Content)
 	case *rpc.ToolExecutionStartData:
-		sess.appendLine("⚙ " + d.ToolName + summarizeArgs(d.Arguments))
+		sess.appendEntry(EntryTool, toolSummary(d.ToolName, d.Arguments))
 		s.publish(bus.ToolCall, sess, map[string]any{"tool": d.ToolName})
 	case *rpc.ToolExecutionCompleteData:
 		if !d.Success {
-			msg := "⚙ " + d.ToolCallID + " failed"
+			msg := "tool call failed"
 			if d.Error != nil && d.Error.Message != "" {
-				msg = "⚙ tool failed: " + d.Error.Message
+				msg = "tool failed: " + d.Error.Message
 			}
-			sess.appendLine(msg)
+			sess.appendEntry(EntryError, msg)
 		}
 	case *rpc.SessionIdleData:
 		sess.mu.Lock()
@@ -433,18 +433,18 @@ func (s *Supervisor) permissionHandler(sess *Session) copilot.PermissionHandlerF
 		verdict, reason := policy.Evaluate(approval, req)
 		switch verdict {
 		case policy.Deny:
-			sess.appendLine("⛔ denied (" + reason + "): " + summary)
+			sess.appendEntry(EntrySystem, "⛔ denied ("+reason+"): "+summary)
 			s.poke()
 			return &rpc.PermissionDecisionReject{Feedback: copilot.String("blocked by atc deny-list: " + reason)}, nil
 		case policy.Allow:
-			sess.appendLine("✓ auto-approved: " + summary)
+			sess.appendEntry(EntrySystem, "auto-approved: "+summary)
 			s.poke()
 			return &rpc.PermissionDecisionApproveOnce{}, nil
 		}
 
 		p := &Permission{Kind: kind, Summary: summary, Detail: detail, respond: make(chan rpc.PermissionDecision, 1)}
 		sess.setPending(p)
-		sess.appendLine("⚠ permission requested: " + summary)
+		sess.appendEntry(EntrySystem, "permission requested: "+summary)
 		s.publish(bus.WaitingOnPermission, sess, map[string]any{"kind": kind, "summary": summary})
 		s.poke()
 
@@ -502,15 +502,23 @@ func describeRequest(req copilot.PermissionRequest) (kind, summary string, detai
 	}
 }
 
-func summarizeArgs(args any) string {
-	if args == nil {
-		return ""
+// toolSummary turns a tool invocation into a short human line like
+// "bash · go test ./..." instead of raw JSON arguments.
+func toolSummary(name string, args any) string {
+	m, ok := args.(map[string]any)
+	if !ok {
+		return name
 	}
-	b, err := json.Marshal(args)
-	if err != nil {
-		return ""
+	for _, k := range []string{"command", "cmd", "path", "file_path", "filePath", "absolute_path", "pattern", "query", "url", "description"} {
+		if v, ok := m[k].(string); ok && strings.TrimSpace(v) != "" {
+			v = strings.TrimSpace(v)
+			if i := strings.IndexByte(v, '\n'); i >= 0 {
+				v = v[:i] + " …"
+			}
+			return name + " · " + truncate(v, 90)
+		}
 	}
-	return " " + truncate(string(b), 100)
+	return name
 }
 
 func truncate(s string, n int) string {
