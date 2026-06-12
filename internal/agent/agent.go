@@ -51,6 +51,18 @@ const (
 	EventUsage
 )
 
+var eventTypeNames = [...]string{
+	"turn_start", "intent", "text_delta", "message", "user_message",
+	"tool_start", "tool_failed", "idle", "error", "context", "usage",
+}
+
+func (t EventType) String() string {
+	if int(t) < len(eventTypeNames) {
+		return eventTypeNames[t]
+	}
+	return "unknown"
+}
+
 // Event is the normalized stream a session emits, and the unit of
 // transcript history replay.
 type Event struct {

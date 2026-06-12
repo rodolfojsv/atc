@@ -175,6 +175,18 @@ Notes for both:
 
 Maintenance: editing a schedule's **prompt/repo/preset** needs nothing (config is read at fire time); changing its **cron** or **name** needs `atc schedule install` again (it overwrites); removing one from config needs `atc schedule uninstall` *before* you delete it (or `schtasks /Delete /TN atc\<name>` after). If you move `atc.exe`, re-run `install` — the task records the absolute path.
 
+## Diagnostics
+
+atc writes no logs by default. When something misbehaves, enable the diagnostic log:
+
+```json
+{ "logLevel": "info", "logFile": "D:/logs/atc.log" }
+```
+
+or one-off: `atc --debug` / `atc run --debug`. Levels: `info` (session, permission, store, and scheduler lifecycle) or `debug` (additionally one line per backend event — a frozen session shows exactly when events stopped). `logFile` defaults to `~/.atc/atc.log`; the file is JSONL (grep-able), rotates at 5 MB (previous kept as `.old`), and records **metadata only — never prompts or transcript content**. At `debug` level the Copilot runtime's own diagnostics are also enabled (they land in the Copilot CLI's log location). Turn it back off (`"logLevel": "off"` or remove the key) once things are stable.
+
+Permission lifecycle entries are the most useful: every request logs `permission.enqueued` (with queue depth) and `permission.answered` (with the decision and *who* decided — user, session-rule, allow-all, deny-list, or headless).
+
 ## Security posture
 
 - Local-only: `atc` opens **zero listening ports** and makes no network calls of its own; all network traffic belongs to the Copilot runtime it supervises.

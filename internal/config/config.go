@@ -37,6 +37,13 @@ type Config struct {
 	// WorktreeRoot is where per-session worktrees are created.
 	// Empty means ~/.atc/worktrees/<repo>/<session>.
 	WorktreeRoot string `json:"worktreeRoot,omitempty"`
+	// LogLevel enables the diagnostic log: "off" (default), "info"
+	// (session/permission/store lifecycle), or "debug" (+ every backend
+	// event). LogFile overrides the location (default ~/.atc/atc.log) —
+	// set it to wherever suits the machine. Metadata only, never
+	// transcript content.
+	LogLevel string `json:"logLevel,omitempty"`
+	LogFile  string `json:"logFile,omitempty"`
 	// ExportDir is where session transcripts are exported as markdown
 	// (point it inside an Obsidian vault and exports land in the vault).
 	// Empty means ~/.atc/exports. AutoExport makes `atc run` export

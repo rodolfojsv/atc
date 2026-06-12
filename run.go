@@ -31,6 +31,7 @@ func cmdRun(argv []string) int {
 	name := fs.String("name", "", "session name")
 	worktree := fs.Bool("worktree", false, "run in a fresh git worktree")
 	doExport := fs.Bool("export", false, "export the transcript as markdown on completion (or set autoExport in config)")
+	debugFlag := fs.Bool("debug", false, "diagnostic log at debug level (overrides config logLevel)")
 	timeout := fs.Duration("timeout", 60*time.Minute, "abort the run after this long")
 	_ = fs.Parse(argv)
 
@@ -38,6 +39,9 @@ func cmdRun(argv []string) int {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "atc run:", err)
 		return 1
+	}
+	if *debugFlag {
+		cfg.LogLevel = "debug"
 	}
 
 	opts := supervisor.NewSessionOptions{

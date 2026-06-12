@@ -19,9 +19,16 @@ type Backend struct {
 }
 
 // New creates the backend; the underlying CLI server process is
-// spawned lazily on the first session.
-func New() *Backend {
-	return &Backend{client: copilot.NewClient(nil)}
+// spawned lazily on the first session. sdkLogLevel, when non-empty,
+// enables the Copilot runtime's own diagnostics ("info", "debug", …) —
+// invaluable for hangs inside the runtime that atc only sees as
+// "events stopped".
+func New(sdkLogLevel string) *Backend {
+	var opts *copilot.ClientOptions
+	if sdkLogLevel != "" {
+		opts = &copilot.ClientOptions{LogLevel: sdkLogLevel}
+	}
+	return &Backend{client: copilot.NewClient(opts)}
 }
 
 func (b *Backend) Name() string { return "copilot" }
