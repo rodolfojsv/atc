@@ -338,11 +338,14 @@ func (s *session) History(_ context.Context) []agent.Event {
 	defer f.Close()
 
 	type historyLine struct {
-		Type    string `json:"type"`
-		IsMeta  bool   `json:"isMeta"`
+		Type    string  `json:"type"`
+		IsMeta  bool    `json:"isMeta"`
+		CostUSD float64 `json:"costUSD"` // present in some Claude Code versions
 		Message *struct {
 			Role    string          `json:"role"`
+			Model   string          `json:"model"`
 			Content json.RawMessage `json:"content"`
+			Usage   *usageBlock     `json:"usage"`
 		} `json:"message"`
 	}
 
@@ -376,6 +379,17 @@ func (s *session) History(_ context.Context) []agent.Event {
 			}
 		case "assistant":
 			out = append(out, messageEvents(line.Message.Content)...)
+			// Each assistant entry is one API call; replaying its usage
+			// restores the session's token/cost totals after a resume.
+			if u := line.Message.Usage; u != nil && (u.InputTokens > 0 || u.OutputTokens > 0) {
+				out = append(out, agent.Event{
+					Type:         agent.EventUsage,
+					InputTokens:  u.InputTokens,
+					OutputTokens: u.OutputTokens,
+					CostUSD:      line.CostUSD,
+					Model:        line.Message.Model,
+				})
+			}
 		}
 	}
 	return out
