@@ -96,3 +96,29 @@ func TestHumanAIC(t *testing.T) {
 		}
 	}
 }
+
+func TestInputDisplayLinesGrowsWithWrapAndNewlines(t *testing.T) {
+	m := testModel(t)
+	m.layoutFocus()
+	w := m.input.Width()
+	if w <= 0 {
+		t.Fatal("input width not set")
+	}
+
+	m.input.SetValue("short")
+	if got := m.inputDisplayLines(); got != 1 {
+		t.Errorf("short prompt: want 1 line, got %d", got)
+	}
+
+	// One logical line wider than the box must count as 2+ display rows.
+	m.input.SetValue(strings.Repeat("x", w+5))
+	if got := m.inputDisplayLines(); got < 2 {
+		t.Errorf("wrapped prompt: want >=2 lines, got %d", got)
+	}
+
+	// Wrapped line plus an explicit newline (the ctrl+j case).
+	m.input.SetValue(strings.Repeat("x", w+5) + "\nsecond")
+	if got := m.inputDisplayLines(); got < 3 {
+		t.Errorf("wrapped + newline: want >=3 lines, got %d", got)
+	}
+}

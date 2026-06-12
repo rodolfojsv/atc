@@ -7,6 +7,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/reflow/wordwrap"
 
 	"github.com/rodolfojsv/atc/internal/agent"
@@ -45,15 +46,41 @@ func (m *Model) layoutFocus() {
 	}
 }
 
+// inputDisplayLines counts the rows the prompt actually occupies on
+// screen: logical lines plus soft-wrap overflow. The textarea's own
+// LineCount() reports only logical lines, which understates the height
+// of wrapped paragraphs and made earlier lines scroll out of view.
+func (m *Model) inputDisplayLines() int {
+	w := m.input.Width()
+	if w <= 0 {
+		return 1
+	}
+	total := 0
+	for _, line := range strings.Split(m.input.Value(), "\n") {
+		lw := lipgloss.Width(line)
+		rows := (lw + w - 1) / w
+		// A line ending exactly at the boundary still wraps the cursor
+		// onto the next row; +1 keeps that row visible while typing.
+		if lw > 0 && lw%w == 0 {
+			rows++
+		}
+		if rows < 1 {
+			rows = 1
+		}
+		total += rows
+	}
+	if total < 1 {
+		total = 1
+	}
+	return total
+}
+
 // syncFocusLayout grows the prompt box with its content (a long prompt
 // wraps into a paragraph) and gives the viewport the remaining height.
 // Chrome around them: title, permission banner slot, keybar, and the
 // input box border (2 lines).
 func (m *Model) syncFocusLayout() {
-	lines := m.input.LineCount()
-	if lines < 1 {
-		lines = 1
-	}
+	lines := m.inputDisplayLines()
 	if lines > maxInputLines {
 		lines = maxInputLines
 	}
