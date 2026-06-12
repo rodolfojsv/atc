@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 
@@ -268,7 +269,11 @@ func (m *Model) viewFocus() string {
 	b.WriteString(m.vp.View() + "\n")
 
 	if v.Pending != nil {
-		b.WriteString(styleBanner.Render("⚠ "+truncate(v.Pending.Summary, m.width-30)) +
+		summary := v.Pending.Summary
+		if v.PendingCount > 1 {
+			summary = fmt.Sprintf("%s (+%d queued)", summary, v.PendingCount-1)
+		}
+		b.WriteString(styleBanner.Render("⚠ "+truncate(summary, m.width-30)) +
 			" " + keybar("ctrl+y", "approve", "ctrl+n", "deny") + "\n")
 	} else if v.Status == supervisor.StatusError {
 		b.WriteString(styleErrSt.Render("✗ "+truncate(v.Err, m.width-4)) + "\n")

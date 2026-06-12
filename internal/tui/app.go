@@ -247,15 +247,15 @@ func (m *Model) updatePerm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	switch msg.String() {
+	// After answering, stay in the modal: if more requests are queued
+	// the next one surfaces here; when the queue empties, the refresh
+	// guard returns to the board.
 	case "y":
 		sess.Respond(agent.ApproveOnce, "")
-		m.mode = modeBoard
 	case "n":
 		sess.Respond(agent.Deny, "denied by user in atc")
-		m.mode = modeBoard
 	case "s":
 		sess.Respond(agent.ApproveSession, "")
-		m.mode = modeBoard
 	case "a":
 		sess.SetAutoApprove(true)
 		m.flash = sess.Name + ": auto-approve ON (deny-list still applies)"
@@ -408,8 +408,12 @@ func (m *Model) viewPerm() string {
 	if v.Pending == nil {
 		return m.viewBoard()
 	}
+	banner := "⚠ permission request — " + m.target.Name + " (" + v.Pending.Kind + ")"
+	if v.PendingCount > 1 {
+		banner += fmt.Sprintf("  ·  %d more queued", v.PendingCount-1)
+	}
 	var lines []string
-	lines = append(lines, styleBanner.Render("⚠ permission request — "+m.target.Name+" ("+v.Pending.Kind+")"), "")
+	lines = append(lines, styleBanner.Render(banner), "")
 	max := m.height - 10
 	detail := v.Pending.Detail
 	if len(detail) > max && max > 0 {

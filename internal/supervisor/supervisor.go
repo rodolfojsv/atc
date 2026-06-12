@@ -18,6 +18,7 @@ import (
 	"github.com/rodolfojsv/atc/internal/agent/copilotagent"
 	"github.com/rodolfojsv/atc/internal/bus"
 	"github.com/rodolfojsv/atc/internal/config"
+	"github.com/rodolfojsv/atc/internal/logx"
 	"github.com/rodolfojsv/atc/internal/policy"
 	"github.com/rodolfojsv/atc/internal/spend"
 	"github.com/rodolfojsv/atc/internal/wt"
@@ -37,6 +38,7 @@ type Supervisor struct {
 	bus      *bus.Bus
 	store    store
 	ledger   *spend.Ledger
+	log      *logx.Logger
 
 	notifyMu      sync.Mutex
 	notify        func()
@@ -46,10 +48,19 @@ type Supervisor struct {
 }
 
 func New(cfg *config.Config, b *bus.Bus) *Supervisor {
+	level := logx.ParseLevel(cfg.LogLevel)
+	log := logx.Open(cfg.LogFile, level)
+	// Pass the runtime's own diagnostics through at debug level; they
+	// land in the Copilot CLI's log location, not ours.
+	sdkLogLevel := ""
+	if level >= logx.Debug {
+		sdkLogLevel = "debug"
+	}
+	log.Log(logx.Info, "atc.start", map[string]any{"logLevel": cfg.LogLevel})
 	return &Supervisor{
 		cfg: cfg,
 		backends: map[string]agent.Backend{
-			"copilot": copilotagent.New(),
+			"copilot": copilotagent.New(sdkLogLevel),
 			"claude":  claudeagent.New(),
 		},
 		killed: map[string]bool{},
@@ -57,6 +68,7 @@ func New(cfg *config.Config, b *bus.Bus) *Supervisor {
 		bus:    b,
 		store:  defaultStore(),
 		ledger: spend.Open(spendPath()),
+		log:    log,
 	}
 }
 
@@ -263,6 +275,11 @@ func (s *Supervisor) launch(sess *Session, model, prompt string, useWorktree boo
 		sess.mu.Unlock()
 	}
 	spec := s.spec(sess, model)
+	s.log.Log(logx.Info, "session.launch", map[string]any{
+		"session": sess.Name, "backend": sess.Backend, "model": model,
+		"dir": spec.WorkingDir, "approval": spec.Approval, "readOnly": spec.ReadOnly,
+		"worktree": useWorktree,
+	})
 	sess.appendEntry(EntrySystem, "starting "+sess.Backend+" agent in "+spec.WorkingDir)
 	if sess.Backend == "claude" && spec.Approval != config.ApprovalAllowAll {
 		sess.appendEntry(EntrySystem, "claude backend has no runtime permission prompts; 'prompt' maps to permission-mode acceptEdits (other tools are denied headlessly)")
@@ -279,6 +296,7 @@ func (s *Supervisor) launch(sess *Session, model, prompt string, useWorktree boo
 	defer cancel()
 	ag, err := backend.NewSession(ctx, spec)
 	if err != nil {
+		s.log.Log(logx.Info, "session.launch_failed", map[string]any{"session": sess.Name, "error": err.Error()})
 		sess.setError(fmt.Sprintf("failed to start: %v", err))
 		s.publish(bus.Error, sess, map[string]any{"error": err.Error()})
 		s.poke()
@@ -292,6 +310,7 @@ func (s *Supervisor) launch(sess *Session, model, prompt string, useWorktree boo
 		sess.status = StatusIdle
 	}
 	sess.mu.Unlock()
+	s.log.Log(logx.Info, "session.started", map[string]any{"session": sess.Name, "id": ag.ID()})
 
 	s.persist()
 	s.publish(bus.SessionStarted, sess, map[string]any{"dir": spec.WorkingDir, "model": model, "backend": sess.Backend})
@@ -346,6 +365,7 @@ func (s *Supervisor) resume(sess *Session, sv savedSession) {
 	defer cancel()
 	ag, err := backend.ResumeSession(ctx, spec)
 	if err != nil {
+		s.log.Log(logx.Info, "session.resume_failed", map[string]any{"session": sess.Name, "id": sv.ID, "error": err.Error()})
 		sess.setError(fmt.Sprintf("resume failed: %v (K to discard)", err))
 		s.poke()
 		return
@@ -358,6 +378,7 @@ func (s *Supervisor) resume(sess *Session, sv savedSession) {
 	sess.mu.Unlock()
 
 	restored := s.replayHistory(sess, ag.History(context.Background()))
+	s.log.Log(logx.Info, "session.resumed", map[string]any{"session": sess.Name, "id": sv.ID, "restored": restored})
 	if restored > 0 {
 		sess.appendEntry(EntrySystem, fmt.Sprintf("— resumed; %d earlier events restored —", restored))
 	} else {
@@ -472,6 +493,7 @@ func (s *Supervisor) WatchStore(ctx context.Context, interval time.Duration) {
 			s.mu.Lock()
 			s.sessions = append(s.sessions, sess)
 			s.mu.Unlock()
+			s.log.Log(logx.Info, "session.adopted", map[string]any{"session": sess.Name, "id": sv.ID, "status": sv.Status})
 			s.publish(bus.SessionAdopted, sess, map[string]any{"status": sv.Status})
 			go s.resume(sess, sv)
 			s.poke()
@@ -499,19 +521,21 @@ func (s *Supervisor) Prompt(sess *Session, text string) error {
 
 // Abort cancels the session's current turn.
 func (s *Supervisor) Abort(sess *Session) {
+	s.log.Log(logx.Info, "session.abort", map[string]any{"session": sess.Name})
 	if ag := sess.agentSession(); ag != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		_ = ag.Abort(ctx)
 	}
 	// Unblock a waiting permission handler, if any.
-	sess.Respond(agent.Cancel, "")
+	sess.RespondAll(agent.Cancel, "")
 }
 
 // Kill tears a session down, forgets it in the resume store, and
 // optionally removes its worktree.
 func (s *Supervisor) Kill(sess *Session, removeWorktree bool) {
-	sess.Respond(agent.Cancel, "")
+	s.log.Log(logx.Info, "session.kill", map[string]any{"session": sess.Name, "removeWorktree": removeWorktree})
+	sess.RespondAll(agent.Cancel, "")
 	if ag := sess.agentSession(); ag != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		_ = ag.Abort(ctx)
@@ -550,7 +574,7 @@ func (s *Supervisor) Kill(sess *Session, removeWorktree bool) {
 func (s *Supervisor) Stop() {
 	s.persist()
 	for _, sess := range s.Sessions() {
-		sess.Respond(agent.Cancel, "")
+		sess.RespondAll(agent.Cancel, "")
 		if ag := sess.agentSession(); ag != nil {
 			_ = ag.Close()
 		}
@@ -569,6 +593,12 @@ func (s *Supervisor) publish(typ string, sess *Session, data map[string]any) {
 
 func (s *Supervisor) handleEvent(sess *Session, e agent.Event) {
 	sess.touch()
+	if e.Type == agent.EventError {
+		s.log.Log(logx.Info, "session.error", map[string]any{"session": sess.Name, "errType": e.ErrType, "message": e.Text})
+	} else if s.log.Enabled(logx.Debug) && e.Type != agent.EventTextDelta {
+		// Deltas would flood the log; everything else is one line each.
+		s.log.Log(logx.Debug, "event."+e.Type.String(), map[string]any{"session": sess.Name})
+	}
 	switch e.Type {
 	case agent.EventTurnStart:
 		sess.setStatus(StatusWorking)
@@ -659,37 +689,51 @@ func (s *Supervisor) permissionFunc(sess *Session) agent.PermissionFunc {
 			approval = config.ApprovalAllowAll
 		}
 
+		plog := func(answer, via string) {
+			s.log.Log(logx.Info, "permission.answered", map[string]any{
+				"session": sess.Name, "kind": req.Kind, "summary": agent.Truncate(req.Summary, 80),
+				"answer": answer, "via": via,
+			})
+		}
 		verdict, reason := policy.Evaluate(approval, req)
 		switch verdict {
 		case policy.Deny:
+			plog("deny", "deny-list: "+reason)
 			sess.appendEntry(EntrySystem, "⛔ denied ("+reason+"): "+req.Summary)
 			s.poke()
 			return agent.Deny, "blocked by atc deny-list: " + reason
 		case policy.Allow:
+			plog("approve", "allow-all")
 			sess.appendEntry(EntrySystem, "auto-approved: "+req.Summary)
 			s.poke()
 			return agent.ApproveOnce, ""
 		}
 		if sess.approvedByRule(req) {
+			plog("approve", "session-rule")
 			sess.appendEntry(EntrySystem, "auto-approved (session rule): "+req.Summary)
 			s.poke()
 			return agent.ApproveOnce, ""
 		}
 
 		if s.headless {
+			plog("deny", "headless")
 			sess.appendEntry(EntrySystem, "⛔ denied (headless run): "+req.Summary)
 			s.poke()
 			return agent.Deny, "headless run (atc run): not pre-approved by the preset; use an allow-all preset for unattended runs"
 		}
 
 		p := &Permission{Kind: req.Kind, Summary: req.Summary, Detail: req.Detail, respond: make(chan permissionAnswer, 1)}
-		sess.setPending(p)
+		sess.enqueuePending(p)
+		s.log.Log(logx.Info, "permission.enqueued", map[string]any{
+			"session": sess.Name, "kind": req.Kind, "summary": agent.Truncate(req.Summary, 80),
+			"queued": sess.View().PendingCount,
+		})
 		sess.appendEntry(EntrySystem, "permission requested: "+req.Summary)
 		s.publish(bus.WaitingOnPermission, sess, map[string]any{"kind": req.Kind, "summary": req.Summary})
 		s.poke()
 
 		ans := <-p.respond
-		sess.clearPending()
+		plog([...]string{"deny", "approve", "approve-session", "cancel"}[ans.decision], "user")
 		if ans.decision == agent.ApproveSession {
 			rule := ruleFor(req)
 			sess.addApproval(rule)

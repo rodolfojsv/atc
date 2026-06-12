@@ -106,8 +106,8 @@ type Session struct {
 	transcript  []Entry
 	streamBuf   string // in-flight assistant message (deltas)
 	usage       Usage
-	pending     *Permission
-	autoApprove bool // user flipped this session to allow-all at runtime
+	pending     []*Permission // FIFO queue; index 0 is surfaced in the UI
+	autoApprove bool          // user flipped this session to allow-all at runtime
 	everWorked  bool
 	lastEvent   time.Time // last backend event; exposes stalls
 	history     []string  // prompts sent, for arrow-up recall
@@ -124,6 +124,7 @@ type SessionView struct {
 	Intent, Err, LastLine                              string
 	Usage                                              Usage
 	Pending                                            *PermissionView
+	PendingCount                                       int // total queued (incl. the surfaced one)
 	AutoApprove                                        bool
 	ReadOnly                                           bool
 	Created                                            time.Time
@@ -185,8 +186,10 @@ func (s *Session) View() SessionView {
 		BaseBranch: s.BaseBranch, Intent: s.intent, Err: s.errMsg, Usage: s.usage,
 		AutoApprove: s.autoApprove, ReadOnly: s.ReadOnly, Created: s.Created,
 	}
-	if s.pending != nil {
-		v.Pending = &PermissionView{Kind: s.pending.Kind, Summary: s.pending.Summary, Detail: append([]string(nil), s.pending.Detail...)}
+	if len(s.pending) > 0 {
+		head := s.pending[0]
+		v.Pending = &PermissionView{Kind: head.Kind, Summary: head.Summary, Detail: append([]string(nil), head.Detail...)}
+		v.PendingCount = len(s.pending)
 	}
 	v.LastLine = s.lastLineLocked()
 	if !s.lastEvent.IsZero() {
@@ -213,16 +216,37 @@ func (s *Session) Transcript() []Entry {
 	return out
 }
 
-// Respond resolves the pending permission request, if any.
+// Respond resolves the currently surfaced (head) permission request,
+// if any, popping it synchronously so a rapid second Respond reaches
+// the next request instead of re-hitting an answered one.
 func (s *Session) Respond(decision agent.Decision, feedback string) {
 	s.mu.Lock()
-	p := s.pending
+	var p *Permission
+	if len(s.pending) > 0 {
+		p = s.pending[0]
+		s.pending = s.pending[1:]
+		if len(s.pending) == 0 && s.status == StatusWaiting {
+			s.status = StatusWorking
+		}
+	}
 	s.mu.Unlock()
 	if p != nil {
-		select {
-		case p.respond <- permissionAnswer{decision: decision, feedback: feedback}:
-		default: // already answered
-		}
+		p.respond <- permissionAnswer{decision: decision, feedback: feedback}
+	}
+}
+
+// RespondAll resolves every queued permission request — used by
+// auto-approve, kill, and shutdown so no handler is left blocked.
+func (s *Session) RespondAll(decision agent.Decision, feedback string) {
+	s.mu.Lock()
+	ps := s.pending
+	s.pending = nil
+	if s.status == StatusWaiting {
+		s.status = StatusWorking
+	}
+	s.mu.Unlock()
+	for _, p := range ps {
+		p.respond <- permissionAnswer{decision: decision, feedback: feedback}
 	}
 }
 
@@ -233,7 +257,7 @@ func (s *Session) SetAutoApprove(on bool) {
 	s.autoApprove = on
 	s.mu.Unlock()
 	if on {
-		s.Respond(agent.ApproveOnce, "")
+		s.RespondAll(agent.ApproveOnce, "")
 	}
 }
 
@@ -346,19 +370,10 @@ func (s *Session) trimLocked() {
 	}
 }
 
-func (s *Session) setPending(p *Permission) {
+func (s *Session) enqueuePending(p *Permission) {
 	s.mu.Lock()
-	s.pending = p
+	s.pending = append(s.pending, p)
 	s.status = StatusWaiting
-	s.mu.Unlock()
-}
-
-func (s *Session) clearPending() {
-	s.mu.Lock()
-	s.pending = nil
-	if s.status == StatusWaiting {
-		s.status = StatusWorking
-	}
 	s.mu.Unlock()
 }
 

@@ -73,6 +73,7 @@ func cmdTUI(argv []string) int {
 	fs := flag.NewFlagSet("atc", flag.ExitOnError)
 	configPath := fs.String("config", "", "config file (default: OS config dir /atc/config.json)")
 	showVersion := fs.Bool("version", false, "print version and exit")
+	debugFlag := fs.Bool("debug", false, "diagnostic log at debug level (overrides config logLevel)")
 	_ = fs.Parse(argv)
 
 	if *showVersion {
@@ -92,6 +93,9 @@ func cmdTUI(argv []string) int {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "atc:", err)
 		return 1
+	}
+	if *debugFlag {
+		cfg.LogLevel = "debug"
 	}
 
 	b := bus.New()
