@@ -74,7 +74,7 @@ func humanTokens(n int64) string {
 // Credits for Copilot sessions, estimated dollars for Claude Code.
 func humanCost(u supervisor.Usage) string {
 	if u.NanoAiu > 0 {
-		return humanAIC(u.NanoAiu)
+		return humanAIC(u.NanoAiu) + " aic"
 	}
 	if u.CostUSD > 0 {
 		if u.CostUSD < 10 {

@@ -261,11 +261,7 @@ func (m *Model) viewFocus() string {
 		b.WriteString(styleDim.Render("  ·  ctx " + humanTokens(v.Usage.CurrentTokens) + "/" + humanTokens(v.Usage.TokenLimit)))
 	}
 	if cost := humanCost(v.Usage); cost != "—" {
-		unit := " AIC"
-		if v.Usage.NanoAiu == 0 {
-			unit = "" // dollar figures carry their own $ sign
-		}
-		b.WriteString(styleDim.Render("  ·  " + cost + unit))
+		b.WriteString(styleDim.Render("  ·  " + cost))
 	}
 	b.WriteString(styleDim.Render("  ·  " + v.Backend))
 	b.WriteString("\n")

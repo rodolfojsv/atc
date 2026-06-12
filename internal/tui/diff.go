@@ -108,7 +108,7 @@ func (m *Model) exportSession(sess *supervisor.Session) (tea.Model, tea.Cmd) {
 func spendLabel(t spend.Totals) string {
 	parts := []string{}
 	if t.NanoAiu > 0 {
-		parts = append(parts, humanAIC(t.NanoAiu)+" AIC")
+		parts = append(parts, humanAIC(t.NanoAiu)+" aic")
 	}
 	if t.CostUSD > 0 {
 		parts = append(parts, humanCost(supervisor.Usage{CostUSD: t.CostUSD}))

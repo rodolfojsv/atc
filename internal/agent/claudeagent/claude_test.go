@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -119,5 +120,53 @@ func TestLiveSmoke(t *testing.T) {
 	}
 	if users < 2 {
 		t.Errorf("expected ≥2 user messages in history, got %d", users)
+	}
+}
+
+func TestHistoryRestoresUsage(t *testing.T) {
+	cfgDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", cfgDir)
+	workDir := "/home/u/proj"
+	s := &session{id: "hist-1", spec: agent.SessionSpec{WorkingDir: workDir}}
+
+	path, err := s.transcriptPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lines := []string{
+		`{"type":"user","message":{"role":"user","content":"hello"}}`,
+		`{"type":"assistant","costUSD":0.012,"message":{"role":"assistant","model":"claude-haiku-4-5","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":120,"output_tokens":40}}}`,
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"more"}],"usage":{"input_tokens":200,"output_tokens":60}}}`,
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var in, out int64
+	var cost float64
+	users, msgs := 0, 0
+	for _, e := range s.History(context.Background()) {
+		switch e.Type {
+		case agent.EventUserMessage:
+			users++
+		case agent.EventMessage:
+			msgs++
+		case agent.EventUsage:
+			in += e.InputTokens
+			out += e.OutputTokens
+			cost += e.CostUSD
+		}
+	}
+	if users != 1 || msgs != 2 {
+		t.Errorf("chat replay wrong: %d users, %d msgs", users, msgs)
+	}
+	if in != 320 || out != 100 {
+		t.Errorf("token totals not restored: %d in, %d out", in, out)
+	}
+	if cost != 0.012 {
+		t.Errorf("cost not restored: %v", cost)
 	}
 }
