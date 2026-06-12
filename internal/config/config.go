@@ -19,6 +19,7 @@ const (
 type Preset struct {
 	Approval string `json:"approval,omitempty"`
 	Model    string `json:"model,omitempty"`
+	Backend  string `json:"backend,omitempty"` // "copilot" (default) or "claude"
 }
 
 // Schedule launches a session with a canned prompt on a cron expression

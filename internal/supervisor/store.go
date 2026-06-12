@@ -30,6 +30,7 @@ type savedSession struct {
 	Dir      string    `json:"dir"`
 	Worktree string    `json:"worktree,omitempty"`
 	Branch   string    `json:"branch,omitempty"`
+	Backend  string    `json:"backend,omitempty"` // empty = copilot (pre-backend files)
 	Preset   string    `json:"preset,omitempty"`
 	Model    string    `json:"model,omitempty"`
 	Created  time.Time `json:"created"`

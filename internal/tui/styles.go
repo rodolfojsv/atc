@@ -67,6 +67,21 @@ func humanTokens(n int64) string {
 	}
 }
 
+// humanCost picks the backend-appropriate cost figure: billed AI
+// Credits for Copilot sessions, estimated dollars for Claude Code.
+func humanCost(u supervisor.Usage) string {
+	if u.NanoAiu > 0 {
+		return humanAIC(u.NanoAiu)
+	}
+	if u.CostUSD > 0 {
+		if u.CostUSD < 10 {
+			return fmt.Sprintf("$%.2f", u.CostUSD)
+		}
+		return fmt.Sprintf("$%.1f", u.CostUSD)
+	}
+	return "—"
+}
+
 // humanAIC formats accumulated nano-AIU as AI Credits. There is no
 // fixed tokens→AIC rate (it depends on model multiplier and billing
 // batches), so this shows what the runtime actually billed.

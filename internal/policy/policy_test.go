@@ -3,13 +3,12 @@ package policy
 import (
 	"testing"
 
-	"github.com/github/copilot-sdk/go/rpc"
-
+	"github.com/rodolfojsv/atc/internal/agent"
 	"github.com/rodolfojsv/atc/internal/config"
 )
 
-func shell(cmd string) rpc.PermissionRequest {
-	return &rpc.PermissionRequestShell{FullCommandText: cmd}
+func shell(cmd string) agent.PermissionRequest {
+	return agent.PermissionRequest{Kind: "shell", Command: cmd}
 }
 
 func TestDenyListBlocksUnderAllowAll(t *testing.T) {
@@ -70,13 +69,13 @@ func TestPromptModeAsks(t *testing.T) {
 }
 
 func TestPathRules(t *testing.T) {
-	if v, _ := Evaluate(config.ApprovalAllowAll, &rpc.PermissionRequestRead{Path: "/home/u/.ssh/id_ed25519"}); v != Deny {
+	if v, _ := Evaluate(config.ApprovalAllowAll, agent.PermissionRequest{Kind: "read", Path: "/home/u/.ssh/id_ed25519"}); v != Deny {
 		t.Error("expected Deny reading a private key")
 	}
-	if v, _ := Evaluate(config.ApprovalAllowAll, &rpc.PermissionRequestWrite{FileName: "/etc/passwd"}); v != Deny {
+	if v, _ := Evaluate(config.ApprovalAllowAll, agent.PermissionRequest{Kind: "write", Path: "/etc/passwd"}); v != Deny {
 		t.Error("expected Deny writing /etc/passwd")
 	}
-	if v, _ := Evaluate(config.ApprovalAllowAll, &rpc.PermissionRequestWrite{FileName: "main.go"}); v != Allow {
+	if v, _ := Evaluate(config.ApprovalAllowAll, agent.PermissionRequest{Kind: "write", Path: "main.go"}); v != Allow {
 		t.Error("expected Allow writing main.go")
 	}
 }

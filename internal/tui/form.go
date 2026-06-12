@@ -10,12 +10,15 @@ import (
 	"github.com/rodolfojsv/atc/internal/supervisor"
 )
 
-// sessionForm collects options for a new session. Rows: name, repo
-// picker (only when repos are configured), repo path, prompt, preset,
-// worktree toggle. Enter submits from anywhere; tab/↑↓ navigate.
+// sessionForm collects options for a new session. Rows: name, backend,
+// repo picker (only when repos are configured), repo path, prompt,
+// preset, worktree toggle. Enter submits from anywhere; tab/↑↓
+// navigate; ←→/space cycle pickers.
 type sessionForm struct {
 	inputs   []textinput.Model // name, repo, prompt
-	repos    []string          // configured repo picker choices
+	backends []string
+	backend  int
+	repos    []string // configured repo picker choices
 	repoPick int
 	presets  []string
 	preset   int
@@ -25,6 +28,7 @@ type sessionForm struct {
 
 const (
 	rowName = iota
+	rowBackend
 	rowRepoPick
 	rowRepo
 	rowPrompt
@@ -46,7 +50,7 @@ func inputForRow(row int) int {
 	return -1
 }
 
-func newSessionForm(cfg *config.Config) sessionForm {
+func newSessionForm(cfg *config.Config, backends []string) sessionForm {
 	name := textinput.New()
 	name.Placeholder = "auto"
 	name.CharLimit = 48
@@ -67,6 +71,7 @@ func newSessionForm(cfg *config.Config) sessionForm {
 
 	f := sessionForm{
 		inputs:   []textinput.Model{name, repo, prompt},
+		backends: backends,
 		repos:    cfg.Repos,
 		presets:  presets,
 		worktree: true,
@@ -88,7 +93,7 @@ func (f *sessionForm) setFocus(row int) tea.Cmd {
 		if row > f.focus || (f.focus == rowCount-1 && row == rowRepoPick) {
 			row = rowRepo
 		} else {
-			row = rowName
+			row = rowBackend
 		}
 	}
 	f.focus = row
@@ -105,9 +110,28 @@ func (f *sessionForm) setFocus(row int) tea.Cmd {
 	return nil
 }
 
-// cycle moves a picker selection by delta and returns the new index.
+// cycle moves a picker selection by delta within n choices.
 func cycle(current, delta, n int) int {
 	return ((current+delta)%n + n) % n
+}
+
+// cycleAt handles ←→/space on whichever picker row has focus; reports
+// whether the key was consumed.
+func (f *sessionForm) cycleAt(delta int) bool {
+	switch f.focus {
+	case rowBackend:
+		f.backend = cycle(f.backend, delta, len(f.backends))
+	case rowRepoPick:
+		f.repoPick = cycle(f.repoPick, delta, len(f.repos))
+		f.inputs[1].SetValue(f.repos[f.repoPick])
+	case rowPreset:
+		f.preset = cycle(f.preset, delta, len(f.presets))
+	case rowWorktree:
+		f.worktree = !f.worktree
+	default:
+		return false
+	}
+	return true
 }
 
 func (m *Model) updateForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -120,34 +144,12 @@ func (m *Model) updateForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, f.setFocus(f.focus + 1)
 	case "shift+tab", "up":
 		return m, f.setFocus(f.focus - 1)
-	case "left", "right":
-		delta := 1
-		if msg.String() == "left" {
-			delta = -1
-		}
-		switch f.focus {
-		case rowRepoPick:
-			f.repoPick = cycle(f.repoPick, delta, len(f.repos))
-			f.inputs[1].SetValue(f.repos[f.repoPick])
-			return m, nil
-		case rowPreset:
-			f.preset = cycle(f.preset, delta, len(f.presets))
-			return m, nil
-		case rowWorktree:
-			f.worktree = !f.worktree
+	case "left":
+		if f.cycleAt(-1) {
 			return m, nil
 		}
-	case " ":
-		switch f.focus {
-		case rowRepoPick:
-			f.repoPick = cycle(f.repoPick, 1, len(f.repos))
-			f.inputs[1].SetValue(f.repos[f.repoPick])
-			return m, nil
-		case rowPreset:
-			f.preset = cycle(f.preset, 1, len(f.presets))
-			return m, nil
-		case rowWorktree:
-			f.worktree = !f.worktree
+	case "right", " ":
+		if f.cycleAt(1) {
 			return m, nil
 		}
 	case "enter", "ctrl+s":
@@ -167,6 +169,7 @@ func (m *Model) submitForm() (tea.Model, tea.Cmd) {
 		Name:        strings.TrimSpace(f.inputs[0].Value()),
 		Repo:        strings.TrimSpace(f.inputs[1].Value()),
 		Prompt:      strings.TrimSpace(f.inputs[2].Value()),
+		Backend:     f.backends[f.backend],
 		Preset:      f.presets[f.preset],
 		UseWorktree: f.worktree,
 	}
@@ -198,6 +201,7 @@ func (m *Model) viewForm() string {
 	}
 
 	row(rowName, "Name", f.inputs[0].View())
+	row(rowBackend, "Backend", "◂ "+f.backends[f.backend]+" ▸")
 	if len(f.repos) > 0 {
 		row(rowRepoPick, "Pick", "◂ "+truncate(f.repos[f.repoPick], 50)+" ▸")
 	}

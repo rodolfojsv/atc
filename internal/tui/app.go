@@ -16,6 +16,7 @@ import (
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/rodolfojsv/atc/internal/agent"
 	"github.com/rodolfojsv/atc/internal/config"
 	"github.com/rodolfojsv/atc/internal/supervisor"
 )
@@ -179,7 +180,7 @@ func (m *Model) updateBoard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.input.Focus()
 		}
 	case "n":
-		m.form = newSessionForm(m.cfg)
+		m.form = newSessionForm(m.cfg, m.sup.Backends())
 		m.mode = modeNew
 		return m, textinput.Blink
 	case "a":
@@ -225,10 +226,10 @@ func (m *Model) updatePerm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	switch msg.String() {
 	case "y":
-		sess.Respond(approveOnce())
+		sess.Respond(agent.ApproveOnce, "")
 		m.mode = modeBoard
 	case "n":
-		sess.Respond(reject("denied by user in atc"))
+		sess.Respond(agent.Deny, "denied by user in atc")
 		m.mode = modeBoard
 	case "a":
 		sess.SetAutoApprove(true)
@@ -306,9 +307,9 @@ func (m *Model) viewBoard() string {
 	if len(sessions) == 0 {
 		b.WriteString(styleDim.Render("  no sessions — press ") + styleKey.Render("[n]") + styleDim.Render(" to launch an agent") + "\n")
 	} else {
-		nameW, dirW, tokW, aicW, ctxW := 18, 22, 12, 6, 5
+		nameW, dirW, tokW, costW, ctxW := 18, 22, 12, 6, 5
 		header := fmt.Sprintf("  %-*s %-*s %-*s %*s %*s %*s  %s",
-			nameW, "SESSION", dirW, "DIR", statusWidth, "STATUS", tokW, "TOKENS", aicW, "AIC", ctxW, "CTX", "DETAIL")
+			nameW, "SESSION", dirW, "DIR", statusWidth, "STATUS", tokW, "TOKENS", costW, "COST", ctxW, "CTX", "DETAIL")
 		b.WriteString(styleHeader.Render(header) + "\n")
 		for i, sess := range sessions {
 			v := sess.View()
@@ -342,7 +343,7 @@ func (m *Model) viewBoard() string {
 			row := fmt.Sprintf("  %-*s %-*s %s %*s %*s %*s  %s",
 				nameW, name, dirW, truncate(dir, dirW),
 				padANSI(statusLabel(v.Status), statusWidth),
-				tokW, tokens, aicW, humanAIC(v.Usage.NanoAiu), ctxW, ctx, detail)
+				tokW, tokens, costW, humanCost(v.Usage), ctxW, ctx, detail)
 			if i == m.cursor {
 				row = styleSel.Render("▸") + row[1:]
 			}

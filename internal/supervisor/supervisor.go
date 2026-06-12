@@ -1,33 +1,35 @@
-// Package supervisor owns the Copilot SDK client and the set of live
-// agent sessions: spawning (optionally in a fresh git worktree),
-// resuming previous sessions, prompting, permission flow, usage
-// accounting, and teardown.
+// Package supervisor owns the set of live agent sessions across
+// backends (GitHub Copilot, Claude Code): spawning (optionally in a
+// fresh git worktree), resuming previous sessions, prompting,
+// permission flow, usage accounting, and teardown.
 package supervisor
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
-	copilot "github.com/github/copilot-sdk/go"
-	"github.com/github/copilot-sdk/go/rpc"
-
+	"github.com/rodolfojsv/atc/internal/agent"
+	"github.com/rodolfojsv/atc/internal/agent/claudeagent"
+	"github.com/rodolfojsv/atc/internal/agent/copilotagent"
 	"github.com/rodolfojsv/atc/internal/bus"
 	"github.com/rodolfojsv/atc/internal/config"
 	"github.com/rodolfojsv/atc/internal/policy"
 	"github.com/rodolfojsv/atc/internal/wt"
 )
 
+// DefaultBackend is used when neither the session nor its preset names
+// one.
+const DefaultBackend = "copilot"
+
 type Supervisor struct {
 	mu       sync.Mutex
 	cfg      *config.Config
-	client   *copilot.Client
+	backends map[string]agent.Backend
 	sessions []*Session
 	trees    wt.Manager
 	bus      *bus.Bus
@@ -40,12 +42,37 @@ type Supervisor struct {
 
 func New(cfg *config.Config, b *bus.Bus) *Supervisor {
 	return &Supervisor{
-		cfg:    cfg,
-		client: copilot.NewClient(nil),
-		trees:  wt.Manager{Root: cfg.WorktreeRoot},
-		bus:    b,
-		store:  defaultStore(),
+		cfg: cfg,
+		backends: map[string]agent.Backend{
+			"copilot": copilotagent.New(),
+			"claude":  claudeagent.New(),
+		},
+		trees: wt.Manager{Root: cfg.WorktreeRoot},
+		bus:   b,
+		store: defaultStore(),
 	}
+}
+
+// Backends lists the available backend names, default first.
+func (s *Supervisor) Backends() []string {
+	names := []string{DefaultBackend}
+	for n := range s.backends {
+		if n != DefaultBackend {
+			names = append(names, n)
+		}
+	}
+	return names
+}
+
+func (s *Supervisor) backend(name string) (agent.Backend, error) {
+	if name == "" {
+		name = DefaultBackend
+	}
+	b, ok := s.backends[name]
+	if !ok {
+		return nil, fmt.Errorf("unknown backend %q", name)
+	}
+	return b, nil
 }
 
 // SetNotify registers the UI wake-up callback (e.g. tea.Program.Send).
@@ -96,6 +123,7 @@ type NewSessionOptions struct {
 	Name        string
 	Repo        string // repo or plain directory the agent runs in
 	UseWorktree bool
+	Backend     string // "copilot" (default) or "claude"
 	Preset      string
 	Model       string // overrides preset model, then config model
 	Prompt      string // optional first prompt
@@ -117,17 +145,29 @@ func (s *Supervisor) NewSession(opts NewSessionOptions) (*Session, error) {
 		return nil, fmt.Errorf("%s is not a directory", repo)
 	}
 
+	presetName := opts.Preset
+	if presetName == "" {
+		presetName = "default"
+	}
+	preset := s.cfg.Preset(presetName)
+
+	backendName := opts.Backend
+	if backendName == "" {
+		backendName = preset.Backend
+	}
+	if backendName == "" {
+		backendName = DefaultBackend
+	}
+	if _, err := s.backend(backendName); err != nil {
+		return nil, err
+	}
+
 	name := wt.Slug(opts.Name)
 	if opts.Name == "" {
 		name = fmt.Sprintf("session-%s", time.Now().Format("1504-05"))
 	}
 	name = s.uniqueName(name)
 
-	presetName := opts.Preset
-	if presetName == "" {
-		presetName = "default"
-	}
-	preset := s.cfg.Preset(presetName)
 	model := opts.Model
 	if model == "" {
 		model = preset.Model
@@ -137,7 +177,7 @@ func (s *Supervisor) NewSession(opts NewSessionOptions) (*Session, error) {
 	}
 
 	sess := &Session{
-		Name: name, Repo: repo, Dir: repo,
+		Name: name, Repo: repo, Dir: repo, Backend: backendName,
 		Preset: presetName, Created: time.Now(),
 		status: StatusStarting,
 	}
@@ -165,6 +205,19 @@ func (s *Supervisor) uniqueName(name string) string {
 	}
 }
 
+func (s *Supervisor) spec(sess *Session, model string) agent.SessionSpec {
+	sess.mu.Lock()
+	dir := sess.Dir
+	sess.mu.Unlock()
+	return agent.SessionSpec{
+		WorkingDir:   dir,
+		Model:        model,
+		Approval:     s.cfg.Preset(sess.Preset).Approval,
+		OnEvent:      func(e agent.Event) { s.handleEvent(sess, e) },
+		OnPermission: s.permissionFunc(sess),
+	}
+}
+
 func (s *Supervisor) launch(sess *Session, model, prompt string, useWorktree bool) {
 	if useWorktree {
 		wtPath, branch, err := s.trees.Create(sess.Repo, sess.Name)
@@ -178,21 +231,22 @@ func (s *Supervisor) launch(sess *Session, model, prompt string, useWorktree boo
 		sess.Worktree, sess.Branch, sess.Dir = wtPath, branch, wtPath
 		sess.mu.Unlock()
 	}
-	sess.mu.Lock()
-	dir := sess.Dir
-	sess.mu.Unlock()
-	sess.appendEntry(EntrySystem, "starting agent in "+dir)
+	spec := s.spec(sess, model)
+	sess.appendEntry(EntrySystem, "starting "+sess.Backend+" agent in "+spec.WorkingDir)
+	if sess.Backend == "claude" && spec.Approval != config.ApprovalAllowAll {
+		sess.appendEntry(EntrySystem, "claude backend has no runtime permission prompts; 'prompt' maps to permission-mode acceptEdits (other tools are denied headlessly)")
+	}
 	s.poke()
 
+	backend, err := s.backend(sess.Backend)
+	if err != nil {
+		sess.setError(err.Error())
+		s.poke()
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	sdkSess, err := s.client.CreateSession(ctx, &copilot.SessionConfig{
-		Model:               model,
-		WorkingDirectory:    dir,
-		ClientName:          "atc",
-		Streaming:           copilot.Bool(true),
-		OnPermissionRequest: s.permissionHandler(sess),
-	})
+	ag, err := backend.NewSession(ctx, spec)
 	if err != nil {
 		sess.setError(fmt.Sprintf("failed to start: %v", err))
 		s.publish(bus.Error, sess, map[string]any{"error": err.Error()})
@@ -201,16 +255,15 @@ func (s *Supervisor) launch(sess *Session, model, prompt string, useWorktree boo
 	}
 
 	sess.mu.Lock()
-	sess.sdk = sdkSess
-	sess.id = sdkSess.SessionID
+	sess.ag = ag
+	sess.id = ag.ID()
 	if sess.status == StatusStarting {
 		sess.status = StatusIdle
 	}
 	sess.mu.Unlock()
 
-	sdkSess.On(func(ev copilot.SessionEvent) { s.handleEvent(sess, ev) })
 	s.persist()
-	s.publish(bus.SessionStarted, sess, map[string]any{"dir": dir, "model": model})
+	s.publish(bus.SessionStarted, sess, map[string]any{"dir": spec.WorkingDir, "model": model, "backend": sess.Backend})
 	s.poke()
 
 	if prompt != "" {
@@ -227,10 +280,14 @@ func (s *Supervisor) launch(sess *Session, model, prompt string, useWorktree boo
 func (s *Supervisor) ResumeAll() int {
 	saved := s.store.load()
 	for _, sv := range saved {
+		backendName := sv.Backend
+		if backendName == "" {
+			backendName = DefaultBackend
+		}
 		sess := &Session{
 			Name: s.uniqueName(wt.Slug(sv.Name)), Repo: sv.Repo, Dir: sv.Dir,
-			Worktree: sv.Worktree, Branch: sv.Branch, Preset: sv.Preset,
-			Created: sv.Created, status: StatusStarting, id: sv.ID,
+			Worktree: sv.Worktree, Branch: sv.Branch, Backend: backendName,
+			Preset: sv.Preset, Created: sv.Created, status: StatusStarting, id: sv.ID,
 		}
 		s.mu.Lock()
 		s.sessions = append(s.sessions, sess)
@@ -244,87 +301,63 @@ func (s *Supervisor) ResumeAll() int {
 }
 
 func (s *Supervisor) resume(sess *Session, sv savedSession) {
+	backend, err := s.backend(sess.Backend)
+	if err != nil {
+		sess.setError(err.Error() + " (K to discard)")
+		s.poke()
+		return
+	}
+	spec := s.spec(sess, sv.Model)
+	spec.SessionID = sv.ID
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	sdkSess, err := s.client.ResumeSession(ctx, sv.ID, &copilot.ResumeSessionConfig{
-		ClientName:          "atc",
-		WorkingDirectory:    sv.Dir,
-		Model:               sv.Model,
-		Streaming:           copilot.Bool(true),
-		OnPermissionRequest: s.permissionHandler(sess),
-	})
+	ag, err := backend.ResumeSession(ctx, spec)
 	if err != nil {
 		sess.setError(fmt.Sprintf("resume failed: %v (K to discard)", err))
 		s.poke()
 		return
 	}
 	sess.mu.Lock()
-	sess.sdk = sdkSess
-	sess.id = sdkSess.SessionID
+	sess.ag = ag
+	sess.id = ag.ID()
 	sess.status = StatusDone
 	sess.everWorked = true
 	sess.mu.Unlock()
-	// Replay history before subscribing to live events; a freshly
-	// resumed session emits nothing until prompted, so the gap is safe.
-	restored := s.loadHistory(sess, sdkSess)
+
+	restored := s.replayHistory(sess, ag.History(context.Background()))
 	if restored > 0 {
 		sess.appendEntry(EntrySystem, fmt.Sprintf("— resumed; %d earlier events restored —", restored))
 	} else {
 		sess.appendEntry(EntrySystem, "resumed from previous run (no earlier transcript available)")
 	}
-	sdkSess.On(func(ev copilot.SessionEvent) { s.handleEvent(sess, ev) })
 	s.persist()
 	s.poke()
 }
 
-// loadHistory replays the session's persisted event log into the
-// transcript, restoring chat text, prompt history for ↑-recall, and
-// usage totals. The event-log API is experimental SDK surface, so any
-// failure just leaves the transcript empty rather than failing the
-// resume. Returns how many events were restored.
-func (s *Supervisor) loadHistory(sess *Session, sdkSess *copilot.Session) int {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	scope := rpc.EventsAgentScopePrimary // skip sub-agent chatter
-	max := int64(500)
-	var cursor *string
-	restored, total := 0, 0
-	for total < 10_000 { // hard cap, generous for any real session
-		res, err := sdkSess.RPC.EventLog.Read(ctx, &rpc.EventLogReadRequest{
-			AgentScope: &scope,
-			Cursor:     cursor,
-			Max:        &max,
-		})
-		if err != nil || res == nil {
-			return restored
+// replayHistory feeds persisted events back into the transcript,
+// restoring chat text, ↑-recall history, and usage totals.
+func (s *Supervisor) replayHistory(sess *Session, events []agent.Event) int {
+	restored := 0
+	for _, e := range events {
+		switch e.Type {
+		case agent.EventUserMessage:
+			sess.appendEntry(EntryUser, e.Text)
+			sess.addHistory(e.Text)
+			restored++
+		case agent.EventMessage:
+			sess.finishMessage(e.Text)
+			restored++
+		case agent.EventToolStart:
+			sess.appendEntry(EntryTool, e.Text)
+			restored++
+		case agent.EventToolFailed:
+			sess.appendEntry(EntryError, e.Text)
+			restored++
+		case agent.EventContext:
+			sess.updateContext(e.CurrentTokens, e.TokenLimit)
+		case agent.EventUsage:
+			sess.addUsage(e)
 		}
-		for _, ev := range res.Events {
-			total++
-			if ev.AgentID != nil {
-				continue
-			}
-			switch d := ev.Data.(type) {
-			case *rpc.UserMessageData:
-				sess.appendEntry(EntryUser, d.Content)
-				sess.addHistory(d.Content)
-				restored++
-			case *rpc.AssistantMessageData:
-				sess.finishMessage(d.Content)
-				restored++
-			case *rpc.ToolExecutionStartData:
-				sess.appendEntry(EntryTool, toolSummary(d.ToolName, d.Arguments))
-				restored++
-			case *rpc.SessionUsageInfoData:
-				sess.updateContext(d.CurrentTokens, d.TokenLimit)
-			case *rpc.AssistantUsageData:
-				sess.addUsage(d)
-			}
-		}
-		if !res.HasMore {
-			return restored
-		}
-		cursor = &res.Cursor
 	}
 	return restored
 }
@@ -338,7 +371,7 @@ func (s *Supervisor) persist() {
 		if sess.id != "" && sess.status != StatusClosed {
 			saved = append(saved, savedSession{
 				ID: sess.id, Name: sess.Name, Repo: sess.Repo, Dir: sess.Dir,
-				Worktree: sess.Worktree, Branch: sess.Branch,
+				Worktree: sess.Worktree, Branch: sess.Branch, Backend: sess.Backend,
 				Preset: sess.Preset, Model: sess.usage.Model, Created: sess.Created,
 			})
 		}
@@ -349,15 +382,15 @@ func (s *Supervisor) persist() {
 
 // Prompt sends a user message to the session.
 func (s *Supervisor) Prompt(sess *Session, text string) error {
-	sdk := sess.sdkSession()
-	if sdk == nil {
+	ag := sess.agentSession()
+	if ag == nil {
 		return errors.New("session is still starting")
 	}
 	sess.appendEntry(EntryUser, text)
 	sess.addHistory(text)
 	sess.setStatus(StatusWorking)
 	s.poke()
-	_, err := sdk.Send(context.Background(), copilot.MessageOptions{Prompt: text})
+	err := ag.Send(context.Background(), text)
 	if err != nil {
 		sess.setError(fmt.Sprintf("send failed: %v", err))
 		s.poke()
@@ -367,24 +400,24 @@ func (s *Supervisor) Prompt(sess *Session, text string) error {
 
 // Abort cancels the session's current turn.
 func (s *Supervisor) Abort(sess *Session) {
-	if sdk := sess.sdkSession(); sdk != nil {
+	if ag := sess.agentSession(); ag != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		_ = sdk.Abort(ctx)
+		_ = ag.Abort(ctx)
 	}
 	// Unblock a waiting permission handler, if any.
-	sess.Respond(&rpc.PermissionDecisionCancelled{})
+	sess.Respond(agent.Cancel, "")
 }
 
 // Kill tears a session down, forgets it in the resume store, and
 // optionally removes its worktree.
 func (s *Supervisor) Kill(sess *Session, removeWorktree bool) {
-	sess.Respond(&rpc.PermissionDecisionCancelled{})
-	if sdk := sess.sdkSession(); sdk != nil {
+	sess.Respond(agent.Cancel, "")
+	if ag := sess.agentSession(); ag != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		_ = sdk.Abort(ctx)
+		_ = ag.Abort(ctx)
 		cancel()
-		_ = sdk.Disconnect()
+		_ = ag.Close()
 	}
 	sess.setStatus(StatusClosed)
 	sess.mu.Lock()
@@ -413,12 +446,14 @@ func (s *Supervisor) Kill(sess *Session, removeWorktree bool) {
 func (s *Supervisor) Stop() {
 	s.persist()
 	for _, sess := range s.Sessions() {
-		sess.Respond(&rpc.PermissionDecisionCancelled{})
-		if sdk := sess.sdkSession(); sdk != nil {
-			_ = sdk.Disconnect()
+		sess.Respond(agent.Cancel, "")
+		if ag := sess.agentSession(); ag != nil {
+			_ = ag.Close()
 		}
 	}
-	_ = s.client.Stop()
+	for _, b := range s.backends {
+		_ = b.Stop()
+	}
 }
 
 func (s *Supervisor) publish(typ string, sess *Session, data map[string]any) {
@@ -428,28 +463,24 @@ func (s *Supervisor) publish(typ string, sess *Session, data map[string]any) {
 	s.bus.Publish(bus.Event{Type: typ, SessionID: id, SessionName: sess.Name, Data: data})
 }
 
-func (s *Supervisor) handleEvent(sess *Session, ev copilot.SessionEvent) {
-	switch d := ev.Data.(type) {
-	case *rpc.AssistantTurnStartData:
+func (s *Supervisor) handleEvent(sess *Session, e agent.Event) {
+	switch e.Type {
+	case agent.EventTurnStart:
 		sess.setStatus(StatusWorking)
-	case *rpc.AssistantIntentData:
-		sess.setIntent(d.Intent)
-	case *rpc.AssistantMessageDeltaData:
-		sess.appendStream(d.DeltaContent)
-	case *rpc.AssistantMessageData:
-		sess.finishMessage(d.Content)
-	case *rpc.ToolExecutionStartData:
-		sess.appendEntry(EntryTool, toolSummary(d.ToolName, d.Arguments))
-		s.publish(bus.ToolCall, sess, map[string]any{"tool": d.ToolName})
-	case *rpc.ToolExecutionCompleteData:
-		if !d.Success {
-			msg := "tool call failed"
-			if d.Error != nil && d.Error.Message != "" {
-				msg = "tool failed: " + d.Error.Message
-			}
-			sess.appendEntry(EntryError, msg)
-		}
-	case *rpc.SessionIdleData:
+	case agent.EventIntent:
+		sess.setIntent(e.Text)
+	case agent.EventTextDelta:
+		sess.appendStream(e.Text)
+	case agent.EventMessage:
+		sess.finishMessage(e.Text)
+	case agent.EventUserMessage:
+		sess.appendEntry(EntryUser, e.Text)
+	case agent.EventToolStart:
+		sess.appendEntry(EntryTool, e.Text)
+		s.publish(bus.ToolCall, sess, map[string]any{"tool": e.Text})
+	case agent.EventToolFailed:
+		sess.appendEntry(EntryError, e.Text)
+	case agent.EventIdle:
 		sess.mu.Lock()
 		worked := sess.everWorked
 		closedOrErr := sess.status == StatusClosed || sess.status == StatusError
@@ -464,24 +495,22 @@ func (s *Supervisor) handleEvent(sess *Session, ev copilot.SessionEvent) {
 		if worked && !closedOrErr {
 			s.publish(bus.Finished, sess, map[string]any{"lastLine": sess.View().LastLine})
 		}
-	case *rpc.SessionErrorData:
-		sess.setError(fmt.Sprintf("%s: %s", d.ErrorType, d.Message))
-		s.publish(bus.Error, sess, map[string]any{"errorType": d.ErrorType, "message": d.Message})
-	case *rpc.SessionUsageInfoData:
-		sess.updateContext(d.CurrentTokens, d.TokenLimit)
-	case *rpc.AssistantUsageData:
-		sess.addUsage(d)
+	case agent.EventError:
+		sess.setError(fmt.Sprintf("%s: %s", e.ErrType, e.Text))
+		s.publish(bus.Error, sess, map[string]any{"errorType": e.ErrType, "message": e.Text})
+	case agent.EventContext:
+		sess.updateContext(e.CurrentTokens, e.TokenLimit)
+	case agent.EventUsage:
+		sess.addUsage(e)
 	}
 	s.poke()
 }
 
-// permissionHandler runs on an SDK goroutine for each permission
+// permissionFunc runs on a backend goroutine for each permission
 // request: deny-list first, then auto-approval, then block until the
 // human answers through the UI.
-func (s *Supervisor) permissionHandler(sess *Session) copilot.PermissionHandlerFunc {
-	return func(req copilot.PermissionRequest, _ copilot.PermissionInvocation) (rpc.PermissionDecision, error) {
-		kind, summary, detail := describeRequest(req)
-
+func (s *Supervisor) permissionFunc(sess *Session) agent.PermissionFunc {
+	return func(req agent.PermissionRequest) (agent.Decision, string) {
 		sess.mu.Lock()
 		auto := sess.autoApprove
 		sess.mu.Unlock()
@@ -493,97 +522,28 @@ func (s *Supervisor) permissionHandler(sess *Session) copilot.PermissionHandlerF
 		verdict, reason := policy.Evaluate(approval, req)
 		switch verdict {
 		case policy.Deny:
-			sess.appendEntry(EntrySystem, "⛔ denied ("+reason+"): "+summary)
+			sess.appendEntry(EntrySystem, "⛔ denied ("+reason+"): "+req.Summary)
 			s.poke()
-			return &rpc.PermissionDecisionReject{Feedback: copilot.String("blocked by atc deny-list: " + reason)}, nil
+			return agent.Deny, "blocked by atc deny-list: " + reason
 		case policy.Allow:
-			sess.appendEntry(EntrySystem, "auto-approved: "+summary)
+			sess.appendEntry(EntrySystem, "auto-approved: "+req.Summary)
 			s.poke()
-			return &rpc.PermissionDecisionApproveOnce{}, nil
+			return agent.ApproveOnce, ""
 		}
 
-		p := &Permission{Kind: kind, Summary: summary, Detail: detail, respond: make(chan rpc.PermissionDecision, 1)}
+		p := &Permission{Kind: req.Kind, Summary: req.Summary, Detail: req.Detail, respond: make(chan permissionAnswer, 1)}
 		sess.setPending(p)
-		sess.appendEntry(EntrySystem, "permission requested: "+summary)
-		s.publish(bus.WaitingOnPermission, sess, map[string]any{"kind": kind, "summary": summary})
+		sess.appendEntry(EntrySystem, "permission requested: "+req.Summary)
+		s.publish(bus.WaitingOnPermission, sess, map[string]any{"kind": req.Kind, "summary": req.Summary})
 		s.poke()
 
-		decision := <-p.respond
+		ans := <-p.respond
 		sess.clearPending()
-		s.publish(bus.PermissionResolved, sess, map[string]any{"kind": kind, "summary": summary, "decision": fmt.Sprintf("%T", decision)})
+		s.publish(bus.PermissionResolved, sess, map[string]any{"kind": req.Kind, "summary": req.Summary, "decision": fmt.Sprintf("%d", ans.decision)})
 		s.poke()
-		return decision, nil
+		if ans.decision == agent.Deny && ans.feedback == "" {
+			ans.feedback = "denied by user in atc"
+		}
+		return ans.decision, ans.feedback
 	}
-}
-
-func describeRequest(req copilot.PermissionRequest) (kind, summary string, detail []string) {
-	switch r := req.(type) {
-	case *rpc.PermissionRequestShell:
-		detail = []string{"Command:", "  " + r.FullCommandText}
-		if r.Intention != "" {
-			detail = append(detail, "", "Intention: "+r.Intention)
-		}
-		if r.Warning != nil && *r.Warning != "" {
-			detail = append(detail, "", "⚠ "+*r.Warning)
-		}
-		return "shell", "run: " + truncate(r.FullCommandText, 80), detail
-	case *rpc.PermissionRequestWrite:
-		detail = []string{"File: " + r.FileName}
-		if r.Intention != "" {
-			detail = append(detail, "Intention: "+r.Intention)
-		}
-		if r.Diff != "" {
-			detail = append(detail, "", "Diff:")
-			detail = append(detail, strings.Split(truncate(r.Diff, 4000), "\n")...)
-		}
-		return "write", "write: " + r.FileName, detail
-	case *rpc.PermissionRequestRead:
-		detail = []string{"Path: " + r.Path}
-		if r.Intention != "" {
-			detail = append(detail, "Intention: "+r.Intention)
-		}
-		return "read", "read: " + r.Path, detail
-	case *rpc.PermissionRequestURL:
-		detail = []string{"URL: " + r.URL}
-		if r.Intention != "" {
-			detail = append(detail, "Intention: "+r.Intention)
-		}
-		return "url", "fetch: " + r.URL, detail
-	case *rpc.PermissionRequestMCP:
-		detail = []string{"MCP server: " + r.ServerName, "Tool: " + r.ToolName}
-		if r.Args != nil {
-			if b, err := json.Marshal(r.Args); err == nil {
-				detail = append(detail, "Args: "+truncate(string(b), 500))
-			}
-		}
-		return "mcp", "mcp: " + r.ServerName + "/" + r.ToolName, detail
-	default:
-		return string(req.Kind()), string(req.Kind()) + " request", []string{fmt.Sprintf("%+v", req)}
-	}
-}
-
-// toolSummary turns a tool invocation into a short human line like
-// "bash · go test ./..." instead of raw JSON arguments.
-func toolSummary(name string, args any) string {
-	m, ok := args.(map[string]any)
-	if !ok {
-		return name
-	}
-	for _, k := range []string{"command", "cmd", "path", "file_path", "filePath", "absolute_path", "pattern", "query", "url", "description"} {
-		if v, ok := m[k].(string); ok && strings.TrimSpace(v) != "" {
-			v = strings.TrimSpace(v)
-			if i := strings.IndexByte(v, '\n'); i >= 0 {
-				v = v[:i] + " …"
-			}
-			return name + " · " + truncate(v, 90)
-		}
-	}
-	return name
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "…"
 }

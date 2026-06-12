@@ -7,8 +7,7 @@ package policy
 import (
 	"regexp"
 
-	"github.com/github/copilot-sdk/go/rpc"
-
+	"github.com/rodolfojsv/atc/internal/agent"
 	"github.com/rodolfojsv/atc/internal/config"
 )
 
@@ -67,7 +66,7 @@ var pathDeny = []rule{
 
 // Evaluate applies the deny-list, then the preset's approval mode.
 // A non-empty reason accompanies Deny.
-func Evaluate(approval string, req rpc.PermissionRequest) (Verdict, string) {
+func Evaluate(approval string, req agent.PermissionRequest) (Verdict, string) {
 	if reason := denied(req); reason != "" {
 		return Deny, reason
 	}
@@ -77,14 +76,16 @@ func Evaluate(approval string, req rpc.PermissionRequest) (Verdict, string) {
 	return Ask, ""
 }
 
-func denied(req rpc.PermissionRequest) string {
-	switch r := req.(type) {
-	case *rpc.PermissionRequestShell:
-		return matchRules(shellDeny, r.FullCommandText)
-	case *rpc.PermissionRequestWrite:
-		return matchRules(pathDeny, r.FileName)
-	case *rpc.PermissionRequestRead:
-		return matchRules(pathDeny, r.Path)
+func denied(req agent.PermissionRequest) string {
+	if req.Command != "" {
+		if reason := matchRules(shellDeny, req.Command); reason != "" {
+			return reason
+		}
+	}
+	if req.Path != "" {
+		if reason := matchRules(pathDeny, req.Path); reason != "" {
+			return reason
+		}
 	}
 	return ""
 }

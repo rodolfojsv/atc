@@ -1,0 +1,123 @@
+package claudeagent
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/rodolfojsv/atc/internal/agent"
+	"github.com/rodolfojsv/atc/internal/config"
+)
+
+func TestMessageEventsStringContent(t *testing.T) {
+	events := messageEvents(json.RawMessage(`"plain answer"`))
+	if len(events) != 1 || events[0].Type != agent.EventMessage || events[0].Text != "plain answer" {
+		t.Fatalf("unexpected: %+v", events)
+	}
+}
+
+func TestMessageEventsBlocks(t *testing.T) {
+	raw := json.RawMessage(`[
+		{"type":"text","text":"I'll check the file."},
+		{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"go test ./..."}},
+		{"type":"text","text":"Done."}
+	]`)
+	events := messageEvents(raw)
+	if len(events) != 3 {
+		t.Fatalf("want 3 events, got %+v", events)
+	}
+	if events[1].Type != agent.EventToolStart || !strings.Contains(events[1].Text, "go test ./...") {
+		t.Errorf("tool event malformed: %+v", events[1])
+	}
+}
+
+func TestTranscriptPathEncoding(t *testing.T) {
+	s := &session{id: "abc-123", spec: agent.SessionSpec{WorkingDir: "/home/u/my proj"}}
+	t.Setenv("CLAUDE_CONFIG_DIR", "/cfg")
+	p, err := s.transcriptPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "/cfg/projects/-home-u-my-proj/abc-123.jsonl"
+	if p != want {
+		t.Errorf("got %q, want %q", p, want)
+	}
+}
+
+// TestLiveSmoke drives a real `claude` subprocess end to end. Opt-in
+// (spends a small amount of usage): ATC_CLAUDE_SMOKE=1 go test ./internal/agent/claudeagent/
+func TestLiveSmoke(t *testing.T) {
+	if os.Getenv("ATC_CLAUDE_SMOKE") != "1" {
+		t.Skip("set ATC_CLAUDE_SMOKE=1 to run the live claude smoke test")
+	}
+	done := make(chan agent.Event, 1)
+	var text strings.Builder
+	spec := agent.SessionSpec{
+		WorkingDir: t.TempDir(),
+		Model:      "haiku",
+		Approval:   config.ApprovalPrompt,
+		OnEvent: func(e agent.Event) {
+			switch e.Type {
+			case agent.EventMessage:
+				text.WriteString(e.Text)
+			case agent.EventIdle, agent.EventError:
+				select {
+				case done <- e:
+				default:
+				}
+			}
+		},
+	}
+	sess, err := New().NewSession(context.Background(), spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+
+	if err := sess.Send(context.Background(), "Reply with exactly the word OK and nothing else."); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case e := <-done:
+		if e.Type == agent.EventError {
+			t.Fatalf("session error: %s %s", e.ErrType, e.Text)
+		}
+	case <-time.After(120 * time.Second):
+		t.Fatal("timed out waiting for result")
+	}
+	if !strings.Contains(text.String(), "OK") {
+		t.Errorf("expected OK in response, got %q", text.String())
+	}
+	t.Logf("response: %q  session: %s", text.String(), sess.ID())
+
+	// Second turn exercises process reuse on the same conversation.
+	text.Reset()
+	if err := sess.Send(context.Background(), "Now reply with exactly the word SECOND and nothing else."); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case e := <-done:
+		if e.Type == agent.EventError {
+			t.Fatalf("second turn error: %s %s", e.ErrType, e.Text)
+		}
+	case <-time.After(120 * time.Second):
+		t.Fatal("timed out on second turn")
+	}
+	if !strings.Contains(text.String(), "SECOND") {
+		t.Errorf("expected SECOND, got %q", text.String())
+	}
+
+	// History should replay both prompts from the on-disk transcript.
+	users := 0
+	for _, e := range sess.History(context.Background()) {
+		if e.Type == agent.EventUserMessage {
+			users++
+		}
+	}
+	if users < 2 {
+		t.Errorf("expected ≥2 user messages in history, got %d", users)
+	}
+}

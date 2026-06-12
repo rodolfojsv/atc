@@ -7,19 +7,11 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
-	"github.com/github/copilot-sdk/go/rpc"
 	"github.com/muesli/reflow/wordwrap"
 
+	"github.com/rodolfojsv/atc/internal/agent"
 	"github.com/rodolfojsv/atc/internal/supervisor"
 )
-
-func approveOnce() rpc.PermissionDecision {
-	return &rpc.PermissionDecisionApproveOnce{}
-}
-
-func reject(feedback string) rpc.PermissionDecision {
-	return &rpc.PermissionDecisionReject{Feedback: &feedback}
-}
 
 // maxInputLines caps how far the prompt box grows before it scrolls
 // internally.
@@ -167,10 +159,10 @@ func (m *Model) updateFocus(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		sup := m.sup
 		return m, func() tea.Msg { sup.Abort(sess); return RefreshMsg{} }
 	case "ctrl+y":
-		sess.Respond(approveOnce())
+		sess.Respond(agent.ApproveOnce, "")
 		return m, nil
 	case "ctrl+n":
-		sess.Respond(reject("denied by user in atc"))
+		sess.Respond(agent.Deny, "denied by user in atc")
 		return m, nil
 	case "pgup", "pgdown", "home", "end", "ctrl+u", "ctrl+d":
 		var cmd tea.Cmd
@@ -240,9 +232,14 @@ func (m *Model) viewFocus() string {
 	if v.Usage.TokenLimit > 0 {
 		b.WriteString(styleDim.Render("  ·  ctx " + humanTokens(v.Usage.CurrentTokens) + "/" + humanTokens(v.Usage.TokenLimit)))
 	}
-	if v.Usage.NanoAiu > 0 {
-		b.WriteString(styleDim.Render("  ·  " + humanAIC(v.Usage.NanoAiu) + " AIC"))
+	if cost := humanCost(v.Usage); cost != "—" {
+		unit := " AIC"
+		if v.Usage.NanoAiu == 0 {
+			unit = "" // dollar figures carry their own $ sign
+		}
+		b.WriteString(styleDim.Render("  ·  " + cost + unit))
 	}
+	b.WriteString(styleDim.Render("  ·  " + v.Backend))
 	b.WriteString("\n")
 	b.WriteString(m.vp.View() + "\n")
 

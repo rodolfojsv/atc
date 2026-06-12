@@ -5,15 +5,14 @@ import (
 	"sync"
 	"time"
 
-	copilot "github.com/github/copilot-sdk/go"
-	"github.com/github/copilot-sdk/go/rpc"
+	"github.com/rodolfojsv/atc/internal/agent"
 )
 
 type Status string
 
 const (
 	StatusStarting Status = "starting"
-	StatusIdle     Status = "idle" // never prompted yet
+	StatusIdle     Status = "idle"    // never prompted yet
 	StatusWorking  Status = "working"
 	StatusWaiting  Status = "waiting" // blocked on a permission request
 	StatusDone     Status = "done"    // finished a turn, awaiting next prompt
@@ -41,25 +40,30 @@ type Entry struct {
 	Partial bool
 }
 
-// Usage accumulates token and cost numbers from SDK usage events.
+// Usage accumulates token and cost numbers from backend usage events.
 type Usage struct {
 	InputTokens   int64
 	OutputTokens  int64
 	CurrentTokens int64 // context window fill
 	TokenLimit    int64
-	Cost          float64 // sum of per-call billing multipliers (experimental SDK field)
-	NanoAiu       float64 // actual billed AI credits, in nano-AIU (internal SDK field; 0 when unavailable)
+	CostUSD       float64 // estimated dollars (Claude Code)
+	NanoAiu       float64 // billed AI credits ×1e-9 (Copilot; 0 when unavailable)
 	Model         string
 }
 
-// Permission is a pending approval surfaced to the UI. The SDK's
-// permission handler goroutine blocks on respond until the user (or a
+type permissionAnswer struct {
+	decision agent.Decision
+	feedback string
+}
+
+// Permission is a pending approval surfaced to the UI. The backend's
+// permission goroutine blocks on respond until the user (or a
 // kill/shutdown path) answers exactly once.
 type Permission struct {
 	Kind    string
 	Summary string   // one line for the board
 	Detail  []string // full text for the modal
-	respond chan rpc.PermissionDecision
+	respond chan permissionAnswer
 }
 
 // PermissionView is the UI-safe copy of a pending permission.
@@ -69,25 +73,29 @@ type PermissionView struct {
 	Detail  []string
 }
 
-const maxTranscriptEntries = 1500
+const (
+	maxTranscriptEntries = 1500
+	maxHistory           = 100
+)
 
 type Session struct {
 	mu sync.Mutex
 
-	// Name, Repo, Preset and Created are immutable after creation.
-	// Dir/Worktree/Branch are set once by the launch goroutine (under
-	// mu) when a worktree is created.
+	// Name, Repo, Backend, Preset and Created are immutable after
+	// creation. Dir/Worktree/Branch are set once by the launch
+	// goroutine (under mu) when a worktree is created.
 	Name     string
 	Repo     string // original repo path
 	Dir      string // directory the agent runs in (worktree if one was made)
 	Worktree string // worktree path, "" if none
 	Branch   string // worktree branch
+	Backend  string // "copilot" | "claude"
 	Preset   string
 	Created  time.Time
 
 	id          string
 	status      Status
-	intent      string // short activity description from assistant.intent
+	intent      string // short activity description from intent events
 	errMsg      string
 	transcript  []Entry
 	streamBuf   string // in-flight assistant message (deltas)
@@ -97,18 +105,18 @@ type Session struct {
 	everWorked  bool
 	history     []string // prompts sent, for arrow-up recall
 
-	sdk *copilot.Session
+	ag agent.Session
 }
 
 // SessionView is a consistent snapshot for rendering the board.
 type SessionView struct {
-	Name, Dir, Repo, Worktree, Branch, Preset string
-	Status                                    Status
-	Intent, Err, LastLine                     string
-	Usage                                     Usage
-	Pending                                   *PermissionView
-	AutoApprove                               bool
-	Created                                   time.Time
+	Name, Dir, Repo, Worktree, Branch, Backend, Preset string
+	Status                                             Status
+	Intent, Err, LastLine                              string
+	Usage                                              Usage
+	Pending                                            *PermissionView
+	AutoApprove                                        bool
+	Created                                            time.Time
 }
 
 func (s *Session) View() SessionView {
@@ -116,7 +124,7 @@ func (s *Session) View() SessionView {
 	defer s.mu.Unlock()
 	v := SessionView{
 		Name: s.Name, Dir: s.Dir, Repo: s.Repo, Worktree: s.Worktree,
-		Branch: s.Branch, Preset: s.Preset, Status: s.status,
+		Branch: s.Branch, Backend: s.Backend, Preset: s.Preset, Status: s.status,
 		Intent: s.intent, Err: s.errMsg, Usage: s.usage,
 		AutoApprove: s.autoApprove, Created: s.Created,
 	}
@@ -140,13 +148,13 @@ func (s *Session) Transcript() []Entry {
 }
 
 // Respond resolves the pending permission request, if any.
-func (s *Session) Respond(decision rpc.PermissionDecision) {
+func (s *Session) Respond(decision agent.Decision, feedback string) {
 	s.mu.Lock()
 	p := s.pending
 	s.mu.Unlock()
 	if p != nil {
 		select {
-		case p.respond <- decision:
+		case p.respond <- permissionAnswer{decision: decision, feedback: feedback}:
 		default: // already answered
 		}
 	}
@@ -159,7 +167,7 @@ func (s *Session) SetAutoApprove(on bool) {
 	s.autoApprove = on
 	s.mu.Unlock()
 	if on {
-		s.Respond(&rpc.PermissionDecisionApproveOnce{})
+		s.Respond(agent.ApproveOnce, "")
 	}
 }
 
@@ -175,6 +183,22 @@ func (s *Session) Active() bool {
 		return false
 	}
 	return true
+}
+
+func (s *Session) addHistory(text string) {
+	s.mu.Lock()
+	s.history = append(s.history, text)
+	if n := len(s.history); n > maxHistory {
+		s.history = s.history[n-maxHistory:]
+	}
+	s.mu.Unlock()
+}
+
+// History returns the prompts sent to this session, oldest first.
+func (s *Session) History() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.history...)
 }
 
 func (s *Session) lastLineLocked() string {
@@ -226,7 +250,7 @@ func (s *Session) appendStream(delta string) {
 }
 
 // finishMessage replaces the streamed buffer with the authoritative
-// full message content from assistant.message.
+// full message content.
 func (s *Session) finishMessage(content string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -272,28 +296,10 @@ func (s *Session) clearPending() {
 	s.mu.Unlock()
 }
 
-const maxHistory = 100
-
-func (s *Session) addHistory(text string) {
-	s.mu.Lock()
-	s.history = append(s.history, text)
-	if n := len(s.history); n > maxHistory {
-		s.history = s.history[n-maxHistory:]
-	}
-	s.mu.Unlock()
-}
-
-// History returns the prompts sent to this session, oldest first.
-func (s *Session) History() []string {
+func (s *Session) agentSession() agent.Session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return append([]string(nil), s.history...)
-}
-
-func (s *Session) sdkSession() *copilot.Session {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.sdk
+	return s.ag
 }
 
 func (s *Session) updateContext(current, limit int64) {
@@ -303,20 +309,14 @@ func (s *Session) updateContext(current, limit int64) {
 	s.mu.Unlock()
 }
 
-func (s *Session) addUsage(d *rpc.AssistantUsageData) {
+func (s *Session) addUsage(e agent.Event) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if d.InputTokens != nil {
-		s.usage.InputTokens += *d.InputTokens
+	s.usage.InputTokens += e.InputTokens
+	s.usage.OutputTokens += e.OutputTokens
+	s.usage.CostUSD += e.CostUSD
+	s.usage.NanoAiu += e.NanoAiu
+	if e.Model != "" {
+		s.usage.Model = e.Model
 	}
-	if d.OutputTokens != nil {
-		s.usage.OutputTokens += *d.OutputTokens
-	}
-	if d.Cost != nil {
-		s.usage.Cost += *d.Cost
-	}
-	if d.CopilotUsage != nil {
-		s.usage.NanoAiu += d.CopilotUsage.TotalNanoAiu
-	}
-	s.usage.Model = d.Model
 }

@@ -31,6 +31,7 @@ Design priorities, in order:
 ## Features
 
 - **Session board** — live status per agent: idle / working / **waiting on permission** / done / error, with per-session token usage and context-window fill.
+- **Two backends** — each session runs on **GitHub Copilot** (default, via the Copilot SDK) or **Claude Code** (via `claude` in headless stream-JSON mode); pick per session in the form or per preset (`"backend": "claude"`). Caveat: Claude's CLI has no runtime permission callback, so atc's interactive approval flow applies to Copilot sessions only — for Claude, `prompt` maps to Claude Code's `acceptEdits` permission mode and `allow-all` to `bypassPermissions`, and Claude Code's own settings.json rules still apply.
 - **Session resume** — open sessions are recorded in `~/.atc/sessions.json`; the next `atc` run reattaches to them (the Copilot runtime persists the conversations; killed sessions are forgotten). Agents don't keep *running* while atc is closed — for that, run atc inside tmux (e.g. under WSL).
 - **Attach / detach** — focus any session to watch its stream and send prompts; detach back to the board without interrupting it. Assistant replies render as **markdown** (headings, bold, code blocks — like Copilot CLI); your prompts are highlighted; tool calls and atc notices are dimmed one-liners (`⚙ bash · go test ./...`) so the analysis stays readable.
 - **Worktree-per-session** — one keypress starts an agent in a fresh git worktree; cleanup on close. Parallel agents never collide in the same checkout.
@@ -61,6 +62,7 @@ Design priorities, in order:
 
 - A GitHub Copilot subscription (any tier — `atc` uses your existing seat and meters exactly like Copilot CLI)
 - [Copilot CLI](https://github.com/github/copilot-cli) installed, on PATH, and logged in (`atc` drives it via the SDK; your stored login is reused)
+- Optional: [Claude Code](https://claude.com/claude-code) installed and logged in, for `backend: claude` sessions
 - Git (for worktree management)
 - Windows 10/11 (primary target — Windows Terminal recommended), Linux/macOS expected to work via Bubble Tea but untested for now
 
@@ -82,7 +84,8 @@ Note: real `config.json` must be plain JSON — the `//` comments below are illu
   "repos": ["C:/dev/app", "C:/dev/infra"],   // repo picker in the new-session form
   "presets": {
     "default": { "approval": "prompt" },
-    "scratch": { "approval": "allow-all" }   // deny-list still applies
+    "scratch": { "approval": "allow-all" },  // deny-list still applies
+    "claude":  { "backend": "claude" }        // Claude Code sessions
   },
   "hooks": {
     "waiting-on-permission": ["powershell", "-File", "hooks/toast.ps1"],
