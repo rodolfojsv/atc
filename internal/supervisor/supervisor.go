@@ -505,13 +505,13 @@ func (s *Supervisor) Abort(sess *Session) {
 		_ = ag.Abort(ctx)
 	}
 	// Unblock a waiting permission handler, if any.
-	sess.Respond(agent.Cancel, "")
+	sess.RespondAll(agent.Cancel, "")
 }
 
 // Kill tears a session down, forgets it in the resume store, and
 // optionally removes its worktree.
 func (s *Supervisor) Kill(sess *Session, removeWorktree bool) {
-	sess.Respond(agent.Cancel, "")
+	sess.RespondAll(agent.Cancel, "")
 	if ag := sess.agentSession(); ag != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		_ = ag.Abort(ctx)
@@ -550,7 +550,7 @@ func (s *Supervisor) Kill(sess *Session, removeWorktree bool) {
 func (s *Supervisor) Stop() {
 	s.persist()
 	for _, sess := range s.Sessions() {
-		sess.Respond(agent.Cancel, "")
+		sess.RespondAll(agent.Cancel, "")
 		if ag := sess.agentSession(); ag != nil {
 			_ = ag.Close()
 		}
@@ -683,13 +683,12 @@ func (s *Supervisor) permissionFunc(sess *Session) agent.PermissionFunc {
 		}
 
 		p := &Permission{Kind: req.Kind, Summary: req.Summary, Detail: req.Detail, respond: make(chan permissionAnswer, 1)}
-		sess.setPending(p)
+		sess.enqueuePending(p)
 		sess.appendEntry(EntrySystem, "permission requested: "+req.Summary)
 		s.publish(bus.WaitingOnPermission, sess, map[string]any{"kind": req.Kind, "summary": req.Summary})
 		s.poke()
 
 		ans := <-p.respond
-		sess.clearPending()
 		if ans.decision == agent.ApproveSession {
 			rule := ruleFor(req)
 			sess.addApproval(rule)
