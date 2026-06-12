@@ -89,11 +89,22 @@ Note: real `config.json` must be plain JSON — the `//` comments below are illu
     "finished": ["powershell", "-File", "hooks/teams-webhook.ps1"]
   },
   "schedules": [
-    { "cron": "0 9 * * 1-5", "preset": "default", "repo": "C:/dev/app",
+    { "name": "pr-triage", "cron": "0 9 * * 1-5", "preset": "default", "repo": "C:/dev/app",
+      "worktree": false,
       "prompt": "Triage open PRs assigned to me and summarize what needs my attention." }
   ]
 }
 ```
+
+## Scheduled prompts
+
+Each entry in `schedules` launches a **new session** (named after the schedule, like the `n` form had been filled in) whenever its cron expression matches. The session shows up on the board and flows through the same usage tracking, notifications, and hooks as a manual one.
+
+- **Cron syntax** — standard 5 fields (`minute hour day-of-month month day-of-week`) supporting `*`, steps (`*/15`), ranges (`1-5`), and lists (`8,18`); day-of-week `0` and `7` are both Sunday. `0 9 * * 1-5` = weekdays 09:00 · `*/30 * * * *` = every half hour · `0 8 1 * *` = monthly.
+- **atc must be running at the firing minute** — the scheduler is in-process (checked once per minute); there's no OS-level registration. A missed minute is skipped, never run late. To fire with the window closed, keep atc detached in tmux (e.g. under WSL).
+- **Config is read at startup** — restart atc after editing schedules.
+- **Choose the preset deliberately** — a `prompt`-mode scheduled session blocks at ⚠ WAITING on its first permission until you approve. For unattended runs use an `allow-all` preset (deny-list still applies), ideally with `"worktree": true` so it can't touch your main checkout.
+- **Every firing spends Copilot credits** — sanity-check the cadence before leaving an aggressive schedule running.
 
 ## Security posture
 
