@@ -31,6 +31,7 @@ type Supervisor struct {
 	cfg      *config.Config
 	backends map[string]agent.Backend
 	sessions []*Session
+	killed   map[string]bool // session IDs killed here; never re-adopt from disk
 	trees    wt.Manager
 	bus      *bus.Bus
 	store    store
@@ -38,6 +39,8 @@ type Supervisor struct {
 	notifyMu      sync.Mutex
 	notify        func()
 	notifyPending bool
+
+	headless bool
 }
 
 func New(cfg *config.Config, b *bus.Bus) *Supervisor {
@@ -47,9 +50,10 @@ func New(cfg *config.Config, b *bus.Bus) *Supervisor {
 			"copilot": copilotagent.New(),
 			"claude":  claudeagent.New(),
 		},
-		trees: wt.Manager{Root: cfg.WorktreeRoot},
-		bus:   b,
-		store: defaultStore(),
+		killed: map[string]bool{},
+		trees:  wt.Manager{Root: cfg.WorktreeRoot},
+		bus:    b,
+		store:  defaultStore(),
 	}
 }
 
@@ -73,6 +77,13 @@ func (s *Supervisor) backend(name string) (agent.Backend, error) {
 		return nil, fmt.Errorf("unknown backend %q", name)
 	}
 	return b, nil
+}
+
+// SetHeadless marks this supervisor as running without a UI (atc run):
+// permission requests that would normally wait for a human are denied
+// with an explanatory message instead of blocking forever.
+func (s *Supervisor) SetHeadless(on bool) {
+	s.headless = on
 }
 
 // SetNotify registers the UI wake-up callback (e.g. tea.Program.Send).
@@ -362,22 +373,85 @@ func (s *Supervisor) replayHistory(sess *Session, events []agent.Event) int {
 	return restored
 }
 
-// persist snapshots resumable sessions to disk. Best-effort: a failed
+// persist snapshots resumable sessions to disk, merging with entries
+// written by other atc processes (a Task Scheduler `atc run` writes
+// here too) so neither side clobbers the other. Best-effort: a failed
 // write only costs resume-on-restart, never a running session.
 func (s *Supervisor) persist() {
 	var saved []savedSession
+	mine := map[string]bool{}
 	for _, sess := range s.Sessions() {
 		sess.mu.Lock()
 		if sess.id != "" && sess.status != StatusClosed {
+			mine[sess.id] = true
 			saved = append(saved, savedSession{
 				ID: sess.id, Name: sess.Name, Repo: sess.Repo, Dir: sess.Dir,
 				Worktree: sess.Worktree, Branch: sess.Branch, Backend: sess.Backend,
-				Preset: sess.Preset, Model: sess.usage.Model, Created: sess.Created,
+				Preset: sess.Preset, Model: sess.usage.Model, Status: string(sess.status),
+				Created: sess.Created,
 			})
 		}
 		sess.mu.Unlock()
 	}
+	s.mu.Lock()
+	killed := s.killed
+	s.mu.Unlock()
+	for _, sv := range s.store.load() {
+		if !mine[sv.ID] && !killed[sv.ID] {
+			saved = append(saved, sv)
+		}
+	}
 	_ = s.store.save(saved)
+}
+
+// WatchStore polls the session store and adopts settled sessions that
+// another atc process wrote — e.g. a scheduled `atc run` that finished
+// while this TUI was open. The adopted session appears on the board
+// with its transcript restored, ready to continue interactively.
+func (s *Supervisor) WatchStore(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		known := map[string]bool{}
+		for _, sess := range s.Sessions() {
+			sess.mu.Lock()
+			if sess.id != "" {
+				known[sess.id] = true
+			}
+			sess.mu.Unlock()
+		}
+		s.mu.Lock()
+		for id := range s.killed {
+			known[id] = true
+		}
+		s.mu.Unlock()
+
+		for _, sv := range s.store.load() {
+			if sv.ID == "" || known[sv.ID] || !sv.settled() {
+				continue
+			}
+			backendName := sv.Backend
+			if backendName == "" {
+				backendName = DefaultBackend
+			}
+			sess := &Session{
+				Name: s.uniqueName(wt.Slug(sv.Name)), Repo: sv.Repo, Dir: sv.Dir,
+				Worktree: sv.Worktree, Branch: sv.Branch, Backend: backendName,
+				Preset: sv.Preset, Created: sv.Created, status: StatusStarting, id: sv.ID,
+			}
+			s.mu.Lock()
+			s.sessions = append(s.sessions, sess)
+			s.mu.Unlock()
+			s.publish(bus.SessionAdopted, sess, map[string]any{"status": sv.Status})
+			go s.resume(sess, sv)
+			s.poke()
+		}
+	}
 }
 
 // Prompt sends a user message to the session.
@@ -421,8 +495,13 @@ func (s *Supervisor) Kill(sess *Session, removeWorktree bool) {
 	}
 	sess.setStatus(StatusClosed)
 	sess.mu.Lock()
-	repo, worktree, branch := sess.Repo, sess.Worktree, sess.Branch
+	repo, worktree, branch, id := sess.Repo, sess.Worktree, sess.Branch, sess.id
 	sess.mu.Unlock()
+	if id != "" {
+		s.mu.Lock()
+		s.killed[id] = true
+		s.mu.Unlock()
+	}
 	if removeWorktree && worktree != "" {
 		if err := s.trees.Remove(repo, worktree, branch); err != nil {
 			sess.appendEntry(EntryError, "worktree cleanup: "+err.Error())
@@ -529,6 +608,12 @@ func (s *Supervisor) permissionFunc(sess *Session) agent.PermissionFunc {
 			sess.appendEntry(EntrySystem, "auto-approved: "+req.Summary)
 			s.poke()
 			return agent.ApproveOnce, ""
+		}
+
+		if s.headless {
+			sess.appendEntry(EntrySystem, "⛔ denied (headless run): "+req.Summary)
+			s.poke()
+			return agent.Deny, "headless run (atc run): not pre-approved by the preset; use an allow-all preset for unattended runs"
 		}
 
 		p := &Permission{Kind: req.Kind, Summary: req.Summary, Detail: req.Detail, respond: make(chan permissionAnswer, 1)}

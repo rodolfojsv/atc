@@ -33,7 +33,16 @@ type savedSession struct {
 	Backend  string    `json:"backend,omitempty"` // empty = copilot (pre-backend files)
 	Preset   string    `json:"preset,omitempty"`
 	Model    string    `json:"model,omitempty"`
+	Status   string    `json:"status,omitempty"` // session status at last persist
 	Created  time.Time `json:"created"`
+}
+
+// settled reports whether the session finished its work — the signal a
+// running TUI uses to adopt sessions written by another atc process
+// (e.g. a Task Scheduler `atc run`). Empty status means a pre-status
+// file; treat as settled.
+func (sv savedSession) settled() bool {
+	return sv.Status == "" || sv.Status == "done" || sv.Status == "error"
 }
 
 // load returns the saved sessions; any read/parse problem just means
@@ -53,6 +62,8 @@ func (st store) load() []savedSession {
 	return out
 }
 
+// save writes atomically (temp file + rename) — a TUI and a headless
+// `atc run` may both touch this file.
 func (st store) save(sessions []savedSession) error {
 	if st.path == "" {
 		return nil
@@ -64,5 +75,9 @@ func (st store) save(sessions []savedSession) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(st.path, data, 0o644)
+	tmp := st.path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, st.path)
 }

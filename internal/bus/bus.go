@@ -19,6 +19,9 @@ const (
 	Error               = "error"
 	ToolCall            = "tool-call"
 	SessionClosed       = "session-closed"
+	// SessionAdopted fires when a running TUI picks up a session that
+	// another atc process (e.g. a scheduled `atc run`) completed.
+	SessionAdopted = "session-adopted"
 )
 
 type Event struct {

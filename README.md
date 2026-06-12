@@ -32,7 +32,7 @@ Design priorities, in order:
 
 - **Session board** — live status per agent: idle / working / **waiting on permission** / done / error, with per-session token usage and context-window fill.
 - **Two backends** — each session runs on **GitHub Copilot** (default, via the Copilot SDK) or **Claude Code** (via `claude` in headless stream-JSON mode); pick per session in the form or per preset (`"backend": "claude"`). Caveat: Claude's CLI has no runtime permission callback, so atc's interactive approval flow applies to Copilot sessions only — for Claude, `prompt` maps to Claude Code's `acceptEdits` permission mode and `allow-all` to `bypassPermissions`, and Claude Code's own settings.json rules still apply.
-- **Session resume** — open sessions are recorded in `~/.atc/sessions.json`; the next `atc` run reattaches to them (the Copilot runtime persists the conversations; killed sessions are forgotten). Agents don't keep *running* while atc is closed — for that, run atc inside tmux (e.g. under WSL).
+- **Session resume & adoption** — open sessions are recorded in `~/.atc/sessions.json`; the next `atc` run reattaches to them with transcripts restored, and a running board adopts sessions finished by other atc processes (scheduled `atc run` jobs) live. Killed sessions are forgotten. Agents don't keep *running* while atc is closed — for that, run atc inside tmux (e.g. under WSL).
 - **Attach / detach** — focus any session to watch its stream and send prompts; detach back to the board without interrupting it. Assistant replies render as **markdown** (headings, bold, code blocks — like Copilot CLI); your prompts are highlighted; tool calls and atc notices are dimmed one-liners (`⚙ bash · go test ./...`) so the analysis stays readable.
 - **Worktree-per-session** — one keypress starts an agent in a fresh git worktree; cleanup on close. Parallel agents never collide in the same checkout.
 - **Approval policy** — per-preset `prompt` (default) or `allow-all`, where allow-all is still gated by a deterministic deny-list (destructive commands, credential exfiltration, pipe-to-shell) checked *before* any auto-approval.
@@ -101,13 +101,25 @@ Note: real `config.json` must be plain JSON — the `//` comments below are illu
 
 ## Scheduled prompts
 
-Each entry in `schedules` launches a **new session** (named after the schedule, like the `n` form had been filled in) whenever its cron expression matches. The session shows up on the board and flows through the same usage tracking, notifications, and hooks as a manual one.
+Each entry in `schedules` launches a **new session** with that prompt. There are two engines for the timing — pick per your setup:
 
-- **Cron syntax** — standard 5 fields (`minute hour day-of-month month day-of-week`) supporting `*`, steps (`*/15`), ranges (`1-5`), and lists (`8,18`); day-of-week `0` and `7` are both Sunday. `0 9 * * 1-5` = weekdays 09:00 · `*/30 * * * *` = every half hour · `0 8 1 * *` = monthly.
-- **atc must be running at the firing minute** — the scheduler is in-process (checked once per minute); there's no OS-level registration. A missed minute is skipped, never run late. To fire with the window closed, keep atc detached in tmux (e.g. under WSL).
-- **Config is read at startup** — restart atc after editing schedules.
-- **Choose the preset deliberately** — a `prompt`-mode scheduled session blocks at ⚠ WAITING on its first permission until you approve. For unattended runs use an `allow-all` preset (deny-list still applies), ideally with `"worktree": true` so it can't touch your main checkout.
-- **Every firing spends Copilot credits** — sanity-check the cadence before leaving an aggressive schedule running.
+**1. Windows Task Scheduler (recommended on Windows — fires even when atc is closed):**
+
+```powershell
+atc schedule install     # registers each named schedule as task atc\<name>
+atc schedule list        # shows the cron → schtasks translation
+atc schedule uninstall   # removes the tasks
+```
+
+Each task runs `atc run --schedule <name>` — a **one-shot headless session**: the transcript streams to stdout, your hooks fire (toasts work — tasks run in your desktop session), and the session is recorded in `~/.atc/sessions.json`. **A running atc board adopts it live within seconds of it finishing; otherwise it appears on the next atc start — either way with the full transcript, ready to continue interactively.** Repo/prompt/preset are read from config at fire time, so editing a schedule never requires re-registering. Translatable crons: daily (`0 9 * * *`), weekly (`0 9 * * 1-5`), monthly (`0 8 1 * *`), every-N-minutes (`*/30 * * * *`).
+
+`atc run` also works standalone: `atc run --repo C:/dev/app --preset unattended --worktree --prompt "..."`. Exit codes: 0 done, 1 error, 2 timeout (`--timeout`, default 60m).
+
+**2. In-process scheduler (atc must be open at the firing minute):** the same `schedules` entries fire inside a running atc — useful when atc lives in a tmux session anyway (e.g. under WSL). Checked once per minute; missed minutes are skipped; config is read at startup.
+
+Notes for both:
+- **Headless/scheduled sessions can't answer permission prompts.** In `atc run`, anything the preset doesn't pre-approve is denied with an explanatory message; in-process scheduled sessions block at ⚠ WAITING instead. For unattended work use an `allow-all` preset (deny-list still applies), ideally with `"worktree": true` so it can't touch your main checkout. For look-don't-touch jobs (PR triage that only reports), say so in the prompt — and the run still lands as a session you can continue interactively to apply anything it suggested.
+- **Every firing spends credits** — sanity-check the cadence before leaving an aggressive schedule running.
 
 ## Security posture
 

@@ -1,5 +1,11 @@
-// atc — agent traffic control: a terminal manager for parallel GitHub
-// Copilot agent sessions. See README.md.
+// atc — agent traffic control: a terminal manager for parallel AI
+// agent sessions (GitHub Copilot, Claude Code). See README.md.
+//
+// Usage:
+//
+//	atc                  the TUI (default)
+//	atc run …            one headless session, for Task Scheduler/cron
+//	atc schedule …       register config schedules with Windows Task Scheduler
 package main
 
 import (
@@ -8,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -22,25 +29,41 @@ import (
 var version = "0.1.0-dev"
 
 func main() {
-	configPath := flag.String("config", "", "config file (default: OS config dir /atc/config.json)")
-	showVersion := flag.Bool("version", false, "print version and exit")
-	flag.Parse()
+	args := os.Args[1:]
+	if len(args) > 0 {
+		switch args[0] {
+		case "run":
+			os.Exit(cmdRun(args[1:]))
+		case "schedule":
+			os.Exit(cmdSchedule(args[1:]))
+		}
+	}
+	os.Exit(cmdTUI(args))
+}
+
+func cmdTUI(argv []string) int {
+	fs := flag.NewFlagSet("atc", flag.ExitOnError)
+	configPath := fs.String("config", "", "config file (default: OS config dir /atc/config.json)")
+	showVersion := fs.Bool("version", false, "print version and exit")
+	_ = fs.Parse(argv)
 
 	if *showVersion {
 		fmt.Println("atc", version)
-		return
+		return 0
 	}
 
-	if _, err := exec.LookPath("copilot"); err != nil {
-		fmt.Fprintln(os.Stderr, "atc: the `copilot` CLI was not found on PATH.")
-		fmt.Fprintln(os.Stderr, "Install it and log in first: https://github.com/github/copilot-cli")
-		os.Exit(1)
+	_, copilotErr := exec.LookPath("copilot")
+	_, claudeErr := exec.LookPath("claude")
+	if copilotErr != nil && claudeErr != nil {
+		fmt.Fprintln(os.Stderr, "atc: neither `copilot` nor `claude` was found on PATH; install at least one backend CLI.")
+		fmt.Fprintln(os.Stderr, "Copilot: https://github.com/github/copilot-cli · Claude Code: https://claude.com/claude-code")
+		return 1
 	}
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "atc:", err)
-		os.Exit(1)
+		return 1
 	}
 
 	b := bus.New()
@@ -59,15 +82,20 @@ func main() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// Adopt sessions other atc processes finish while we're open —
+	// e.g. Task Scheduler `atc run` jobs land on the board live.
+	go sup.WatchStore(ctx, 3*time.Second)
 	if err := startSchedules(ctx, cfg, sup); err != nil {
 		fmt.Fprintln(os.Stderr, "atc:", err)
-		os.Exit(1)
+		return 1
 	}
 
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "atc:", err)
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }
 
 func startSchedules(ctx context.Context, cfg *config.Config, sup *supervisor.Supervisor) error {
