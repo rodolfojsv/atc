@@ -204,20 +204,49 @@ func (m *Model) repoCommands() []string {
 	return out
 }
 
-// skillsInventory describes the repo's agent assets for /skills.
+// skillsInventory describes the repo's agent assets for /skills:
+// Copilot's .github layout (agents/, skills/, instructions/,
+// copilot-instructions.md) and Claude's .claude layout (skills/,
+// commands/), plus shared instruction files. Everything listed is
+// loaded by the respective agent itself; atc only surfaces it.
 func (m *Model) skillsInventory() []string {
 	if m.target == nil {
 		return nil
 	}
 	dir := m.target.View().Dir
 	var out []string
-	skills, _ := filepath.Glob(filepath.Join(dir, ".claude", "skills", "*", "SKILL.md"))
-	for _, s := range skills {
-		out = append(out, "skill: "+filepath.Base(filepath.Dir(s))+" (.claude/skills — model-invoked when relevant)")
+
+	// Copilot: .github/skills (SKILL.md folders or flat .md files)
+	for _, s := range globAll(
+		filepath.Join(dir, ".github", "skills", "*", "SKILL.md"),
+		filepath.Join(dir, ".github", "skills", "*.md"),
+	) {
+		name := filepath.Base(filepath.Dir(s))
+		if filepath.Base(s) != "SKILL.md" {
+			name = strings.TrimSuffix(filepath.Base(s), ".md")
+		}
+		out = append(out, "skill: "+name+" (.github/skills — copilot, model-invoked when relevant)")
+	}
+	// Copilot: custom agents
+	for _, a := range globAll(filepath.Join(dir, ".github", "agents", "*.md")) {
+		out = append(out, "agent: "+strings.TrimSuffix(filepath.Base(a), ".md")+" (.github/agents — copilot custom agent)")
+	}
+	// Copilot: scoped instruction files
+	for _, i := range globAll(
+		filepath.Join(dir, ".github", "instructions", "*.instructions.md"),
+		filepath.Join(dir, ".github", "instructions", "*.md"),
+	) {
+		out = append(out, "instructions: "+filepath.Base(i)+" (.github/instructions — copilot)")
+	}
+
+	// Claude: skills and commands
+	for _, s := range globAll(filepath.Join(dir, ".claude", "skills", "*", "SKILL.md")) {
+		out = append(out, "skill: "+filepath.Base(filepath.Dir(s))+" (.claude/skills — claude, model-invoked when relevant)")
 	}
 	for _, c := range m.repoCommands() {
 		out = append(out, "command: "+c+" (.claude/commands — type it in a claude session)")
 	}
+
 	for _, probe := range []struct{ path, label string }{
 		{filepath.Join(dir, ".github", "copilot-instructions.md"), "copilot instructions: .github/copilot-instructions.md (loaded automatically)"},
 		{filepath.Join(dir, "AGENTS.md"), "agent instructions: AGENTS.md (loaded automatically)"},
@@ -228,8 +257,26 @@ func (m *Model) skillsInventory() []string {
 		}
 	}
 	if len(out) == 0 {
-		out = []string{"no skills, commands, or instruction files found in " + dir}
+		out = []string{"no skills, agents, commands, or instruction files found in " + dir}
 	}
+	return out
+}
+
+// globAll concatenates glob results, deduplicating across patterns
+// (a flat .md pattern can re-match files a folder pattern found).
+func globAll(patterns ...string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, p := range patterns {
+		matches, _ := filepath.Glob(p)
+		for _, x := range matches {
+			if !seen[x] {
+				seen[x] = true
+				out = append(out, x)
+			}
+		}
+	}
+	sort.Strings(out)
 	return out
 }
 

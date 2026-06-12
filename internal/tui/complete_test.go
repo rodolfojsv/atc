@@ -1,10 +1,14 @@
 package tui
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/rodolfojsv/atc/internal/supervisor"
 )
 
 func keyRunes(s string) tea.KeyMsg {
@@ -57,5 +61,37 @@ func TestAtMentionCompletion(t *testing.T) {
 	items := fuzzyFilter(m.fileList, "pol", 6)
 	if len(items) == 0 || items[0] != "internal/policy/policy.go" {
 		t.Errorf("mention filter: %v", items)
+	}
+}
+
+func TestSkillsInventoryCoversBothLayouts(t *testing.T) {
+	dir := t.TempDir()
+	for _, p := range []string{
+		".github/skills/deploy-check/SKILL.md",
+		".github/agents/reviewer.md",
+		".github/instructions/go.instructions.md",
+		".github/copilot-instructions.md",
+		".claude/skills/audit/SKILL.md",
+		".claude/commands/triage.md",
+	} {
+		full := filepath.Join(dir, filepath.FromSlash(p))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m := testModel(t)
+	sess, err := m.sup.NewSession(supervisor.NewSessionOptions{Repo: dir, UseWorktree: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.target = sess
+	inv := strings.Join(m.skillsInventory(), "\n")
+	for _, want := range []string{"deploy-check", "reviewer", "go.instructions.md", "copilot-instructions.md", "audit", "/triage"} {
+		if !strings.Contains(inv, want) {
+			t.Errorf("inventory missing %q:\n%s", want, inv)
+		}
 	}
 }
