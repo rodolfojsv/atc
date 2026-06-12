@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textarea"
@@ -356,6 +357,9 @@ func (m *Model) viewBoard() string {
 				ctx = fmt.Sprintf("%d%%", v.Usage.CurrentTokens*100/v.Usage.TokenLimit)
 			}
 			detail := v.Intent
+			if v.Status == supervisor.StatusWorking && v.SinceEvent > 2*time.Minute {
+				detail = "⚠ no events for " + v.SinceEvent.Truncate(time.Minute).String() + " — x to abort, or restart atc to reattach"
+			}
 			switch {
 			case v.Pending != nil:
 				detail = styleWaiting.Render(truncate(v.Pending.Summary, m.width-70))

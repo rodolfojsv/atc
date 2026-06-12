@@ -109,7 +109,8 @@ type Session struct {
 	pending     *Permission
 	autoApprove bool // user flipped this session to allow-all at runtime
 	everWorked  bool
-	history     []string // prompts sent, for arrow-up recall
+	lastEvent   time.Time // last backend event; exposes stalls
+	history     []string  // prompts sent, for arrow-up recall
 	approvals   []approvalRule
 
 	ag agent.Session
@@ -126,6 +127,7 @@ type SessionView struct {
 	AutoApprove                                        bool
 	ReadOnly                                           bool
 	Created                                            time.Time
+	SinceEvent                                         time.Duration // time since the last backend event (0 = none yet)
 }
 
 // approvalRule is a session-scoped "always allow this" rule created by
@@ -187,7 +189,16 @@ func (s *Session) View() SessionView {
 		v.Pending = &PermissionView{Kind: s.pending.Kind, Summary: s.pending.Summary, Detail: append([]string(nil), s.pending.Detail...)}
 	}
 	v.LastLine = s.lastLineLocked()
+	if !s.lastEvent.IsZero() {
+		v.SinceEvent = time.Since(s.lastEvent)
+	}
 	return v
+}
+
+func (s *Session) touch() {
+	s.mu.Lock()
+	s.lastEvent = time.Now()
+	s.mu.Unlock()
 }
 
 // Transcript returns a copy of the transcript; an in-flight assistant
