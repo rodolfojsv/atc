@@ -337,7 +337,7 @@ func (m *Model) viewBoard() string {
 	if len(sessions) == 0 {
 		b.WriteString(styleDim.Render("  no sessions — press ") + styleKey.Render("[n]") + styleDim.Render(" to launch an agent") + "\n")
 	} else {
-		nameW, dirW, tokW, costW, ctxW := 18, 22, 12, 6, 5
+		nameW, dirW, tokW, costW, ctxW := 18, 22, 12, 9, 5
 		header := fmt.Sprintf("  %-*s %-*s %-*s %*s %*s %*s  %s",
 			nameW, "SESSION", dirW, "DIR", statusWidth, "STATUS", tokW, "TOKENS", costW, "COST", ctxW, "CTX", "DETAIL")
 		b.WriteString(styleHeader.Render(header) + "\n")
