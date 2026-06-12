@@ -83,3 +83,16 @@ func TestTranscriptRendering(t *testing.T) {
 		t.Errorf("user entry malformed:\n%s", user)
 	}
 }
+
+func TestHumanAIC(t *testing.T) {
+	for in, want := range map[float64]string{
+		0:       "—",
+		5e6:     "<0.01", // 0.005 AIC
+		4.2e8:   "0.42",
+		1.25e10: "12.5",
+	} {
+		if got := humanAIC(in); got != want {
+			t.Errorf("humanAIC(%v) = %q, want %q", in, got, want)
+		}
+	}
+}

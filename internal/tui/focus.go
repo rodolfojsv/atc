@@ -154,6 +154,7 @@ func (m *Model) updateFocus(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.input.Reset()
 		m.syncFocusLayout()
+		m.histIdx, m.histDraft = -1, ""
 		m.vpFollow = true
 		sup := m.sup
 		return m, func() tea.Msg {
@@ -176,11 +177,54 @@ func (m *Model) updateFocus(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.vp, cmd = m.vp.Update(msg)
 		m.vpFollow = m.vp.AtBottom()
 		return m, cmd
+	case "up", "down":
+		if m.historyNav(sess, msg.String()) {
+			return m, nil
+		}
 	}
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
 	m.syncFocusLayout()
 	return m, cmd
+}
+
+// historyNav recalls previous prompts shell-style: ↑ on the first line
+// of the prompt box walks back through what you've sent (stashing the
+// current draft), ↓ on the last line walks forward and finally restores
+// the draft. Reports false when the key should move the cursor instead.
+func (m *Model) historyNav(sess *supervisor.Session, dir string) bool {
+	hist := sess.History()
+	if dir == "up" {
+		if m.input.Line() != 0 {
+			return false
+		}
+		if len(hist) == 0 {
+			return true // first line, nothing to recall: don't move
+		}
+		if m.histIdx == -1 {
+			m.histDraft = m.input.Value()
+			m.histIdx = len(hist)
+		}
+		if m.histIdx > 0 {
+			m.histIdx--
+			m.input.SetValue(hist[m.histIdx])
+			m.syncFocusLayout()
+		}
+		return true
+	}
+	if m.histIdx == -1 || m.input.Line() != m.input.LineCount()-1 {
+		return false
+	}
+	m.histIdx++
+	if m.histIdx >= len(hist) {
+		m.histIdx = -1
+		m.input.SetValue(m.histDraft)
+		m.histDraft = ""
+	} else {
+		m.input.SetValue(hist[m.histIdx])
+	}
+	m.syncFocusLayout()
+	return true
 }
 
 func (m *Model) viewFocus() string {
@@ -195,6 +239,9 @@ func (m *Model) viewFocus() string {
 	b.WriteString(styleTitle.Render("atc") + title + statusLabel(v.Status))
 	if v.Usage.TokenLimit > 0 {
 		b.WriteString(styleDim.Render("  ·  ctx " + humanTokens(v.Usage.CurrentTokens) + "/" + humanTokens(v.Usage.TokenLimit)))
+	}
+	if v.Usage.NanoAiu > 0 {
+		b.WriteString(styleDim.Render("  ·  " + humanAIC(v.Usage.NanoAiu) + " AIC"))
 	}
 	b.WriteString("\n")
 	b.WriteString(m.vp.View() + "\n")

@@ -67,6 +67,23 @@ func humanTokens(n int64) string {
 	}
 }
 
+// humanAIC formats accumulated nano-AIU as AI Credits. There is no
+// fixed tokens→AIC rate (it depends on model multiplier and billing
+// batches), so this shows what the runtime actually billed.
+func humanAIC(nanoAiu float64) string {
+	aic := nanoAiu / 1e9
+	switch {
+	case aic == 0:
+		return "—"
+	case aic < 0.01:
+		return "<0.01"
+	case aic < 10:
+		return fmt.Sprintf("%.2f", aic)
+	default:
+		return fmt.Sprintf("%.1f", aic)
+	}
+}
+
 func keybar(pairs ...string) string {
 	out := ""
 	for i := 0; i+1 < len(pairs); i += 2 {

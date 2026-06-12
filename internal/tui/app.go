@@ -55,6 +55,10 @@ type Model struct {
 	mdCache map[string]string
 	mdWidth int
 
+	// Prompt history recall (↑/↓ in the focus prompt box).
+	histIdx   int // index into the focused session's history; -1 = not browsing
+	histDraft string
+
 	form sessionForm
 }
 
@@ -67,7 +71,7 @@ func New(sup *supervisor.Supervisor, cfg *config.Config) *Model {
 	// Enter is reserved for sending; ctrl+j inserts a manual newline.
 	// Long prompts soft-wrap into a growing paragraph either way.
 	input.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("ctrl+j"))
-	return &Model{sup: sup, cfg: cfg, vpFollow: true, input: input}
+	return &Model{sup: sup, cfg: cfg, vpFollow: true, input: input, histIdx: -1}
 }
 
 func (m *Model) Init() tea.Cmd { return nil }
@@ -169,6 +173,7 @@ func (m *Model) updateBoard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.target = sess
 			m.mode = modeFocus
 			m.vpFollow = true
+			m.histIdx, m.histDraft = -1, ""
 			m.layoutFocus()
 			m.refreshViewport()
 			return m, m.input.Focus()
@@ -301,9 +306,9 @@ func (m *Model) viewBoard() string {
 	if len(sessions) == 0 {
 		b.WriteString(styleDim.Render("  no sessions — press ") + styleKey.Render("[n]") + styleDim.Render(" to launch an agent") + "\n")
 	} else {
-		nameW, dirW, tokW, ctxW := 18, 22, 12, 5
-		header := fmt.Sprintf("  %-*s %-*s %-*s %*s %*s  %s",
-			nameW, "SESSION", dirW, "DIR", statusWidth, "STATUS", tokW, "TOKENS", ctxW, "CTX", "DETAIL")
+		nameW, dirW, tokW, aicW, ctxW := 18, 22, 12, 6, 5
+		header := fmt.Sprintf("  %-*s %-*s %-*s %*s %*s %*s  %s",
+			nameW, "SESSION", dirW, "DIR", statusWidth, "STATUS", tokW, "TOKENS", aicW, "AIC", ctxW, "CTX", "DETAIL")
 		b.WriteString(styleHeader.Render(header) + "\n")
 		for i, sess := range sessions {
 			v := sess.View()
@@ -334,10 +339,10 @@ func (m *Model) viewBoard() string {
 			if v.AutoApprove {
 				name = styleAuto.Render(truncate(v.Name+" ⚡", nameW))
 			}
-			row := fmt.Sprintf("  %-*s %-*s %s %*s %*s  %s",
+			row := fmt.Sprintf("  %-*s %-*s %s %*s %*s %*s  %s",
 				nameW, name, dirW, truncate(dir, dirW),
 				padANSI(statusLabel(v.Status), statusWidth),
-				tokW, tokens, ctxW, ctx, detail)
+				tokW, tokens, aicW, humanAIC(v.Usage.NanoAiu), ctxW, ctx, detail)
 			if i == m.cursor {
 				row = styleSel.Render("▸") + row[1:]
 			}

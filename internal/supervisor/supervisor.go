@@ -295,6 +295,7 @@ func (s *Supervisor) Prompt(sess *Session, text string) error {
 		return errors.New("session is still starting")
 	}
 	sess.appendEntry(EntryUser, text)
+	sess.addHistory(text)
 	sess.setStatus(StatusWorking)
 	s.poke()
 	_, err := sdk.Send(context.Background(), copilot.MessageOptions{Prompt: text})

@@ -48,6 +48,7 @@ type Usage struct {
 	CurrentTokens int64 // context window fill
 	TokenLimit    int64
 	Cost          float64 // sum of per-call billing multipliers (experimental SDK field)
+	NanoAiu       float64 // actual billed AI credits, in nano-AIU (internal SDK field; 0 when unavailable)
 	Model         string
 }
 
@@ -94,6 +95,7 @@ type Session struct {
 	pending     *Permission
 	autoApprove bool // user flipped this session to allow-all at runtime
 	everWorked  bool
+	history     []string // prompts sent, for arrow-up recall
 
 	sdk *copilot.Session
 }
@@ -270,6 +272,24 @@ func (s *Session) clearPending() {
 	s.mu.Unlock()
 }
 
+const maxHistory = 100
+
+func (s *Session) addHistory(text string) {
+	s.mu.Lock()
+	s.history = append(s.history, text)
+	if n := len(s.history); n > maxHistory {
+		s.history = s.history[n-maxHistory:]
+	}
+	s.mu.Unlock()
+}
+
+// History returns the prompts sent to this session, oldest first.
+func (s *Session) History() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.history...)
+}
+
 func (s *Session) sdkSession() *copilot.Session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -294,6 +314,9 @@ func (s *Session) addUsage(d *rpc.AssistantUsageData) {
 	}
 	if d.Cost != nil {
 		s.usage.Cost += *d.Cost
+	}
+	if d.CopilotUsage != nil {
+		s.usage.NanoAiu += d.CopilotUsage.TotalNanoAiu
 	}
 	s.usage.Model = d.Model
 }

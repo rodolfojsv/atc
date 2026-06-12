@@ -36,7 +36,7 @@ Design priorities, in order:
 - **Worktree-per-session** — one keypress starts an agent in a fresh git worktree; cleanup on close. Parallel agents never collide in the same checkout.
 - **Approval policy** — per-preset `prompt` (default) or `allow-all`, where allow-all is still gated by a deterministic deny-list (destructive commands, credential exfiltration, pipe-to-shell) checked *before* any auto-approval.
 - **Hooks** — map events (`session-started`, `waiting-on-permission`, `finished`, `error`, `tool-call`) to commands in config. Built-in Windows toast notifications; sample hooks for Teams webhooks and tool-call audit logs.
-- **Usage panel** — per-session input/output token totals and cost (Copilot AI Credits era), context-fill gauge, powered by the SDK's `AssistantUsage` / `SessionUsageInfo` events.
+- **Usage panel** — per-session input/output token totals, **billed AI Credits** (AIC column — actual nano-AIU reported by the runtime per request; there is no fixed tokens→AIC rate, it varies by model multiplier and billing batches), and a context-fill gauge, powered by the SDK's `AssistantUsage` / `SessionUsageInfo` events.
 - **Scheduled prompts** — cron-style schedules that launch a session with a canned prompt and preset: nightly dependency audit, morning PR triage. Results flow through the same board, notifications, and hooks.
 
 ## Status
@@ -53,7 +53,7 @@ Design priorities, in order:
 
 **Board** — `↑/↓` select · `enter` attach · `n` new session · `a` review permission · `A` toggle auto-approve (⚡, deny-list still applies) · `x` abort turn · `K` kill · `q` quit
 
-**Focus** — type + `enter` send prompt · `ctrl+y`/`ctrl+n` approve/deny pending permission · `ctrl+x` abort · `pgup/pgdn` scroll · `esc` back to board
+**Focus** — type + `enter` send prompt · `ctrl+j` newline · `↑/↓` prompt history · `ctrl+y`/`ctrl+n` approve/deny pending permission · `ctrl+x` abort · `pgup/pgdn` scroll · `esc` back to board
 
 **Permission modal** — `y` approve once · `a` approve + auto-approve session · `n` deny · `esc` back
 
