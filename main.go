@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime/debug"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -27,6 +28,33 @@ import (
 )
 
 var version = "0.1.0-dev"
+
+// buildRevision reports the VCS commit Go embedded at build time, so
+// `atc --version` can prove which build is actually on PATH.
+func buildRevision() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return ""
+	}
+	rev, dirty := "", ""
+	for _, s := range info.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			rev = s.Value
+		case "vcs.modified":
+			if s.Value == "true" {
+				dirty = "+dirty"
+			}
+		}
+	}
+	if len(rev) > 12 {
+		rev = rev[:12]
+	}
+	if rev == "" {
+		return "(no build info)"
+	}
+	return rev + dirty
+}
 
 func main() {
 	args := os.Args[1:]
@@ -48,7 +76,7 @@ func cmdTUI(argv []string) int {
 	_ = fs.Parse(argv)
 
 	if *showVersion {
-		fmt.Println("atc", version)
+		fmt.Println("atc", version, buildRevision())
 		return 0
 	}
 

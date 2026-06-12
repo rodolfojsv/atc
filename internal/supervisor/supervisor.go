@@ -568,6 +568,7 @@ func (s *Supervisor) publish(typ string, sess *Session, data map[string]any) {
 }
 
 func (s *Supervisor) handleEvent(sess *Session, e agent.Event) {
+	sess.touch()
 	switch e.Type {
 	case agent.EventTurnStart:
 		sess.setStatus(StatusWorking)
