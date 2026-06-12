@@ -1,6 +1,7 @@
 // Package supervisor owns the Copilot SDK client and the set of live
 // agent sessions: spawning (optionally in a fresh git worktree),
-// prompting, permission flow, usage accounting, and teardown.
+// resuming previous sessions, prompting, permission flow, usage
+// accounting, and teardown.
 package supervisor
 
 import (
@@ -8,6 +9,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -28,6 +31,7 @@ type Supervisor struct {
 	sessions []*Session
 	trees    wt.Manager
 	bus      *bus.Bus
+	store    store
 
 	notifyMu      sync.Mutex
 	notify        func()
@@ -40,6 +44,7 @@ func New(cfg *config.Config, b *bus.Bus) *Supervisor {
 		client: copilot.NewClient(nil),
 		trees:  wt.Manager{Root: cfg.WorktreeRoot},
 		bus:    b,
+		store:  defaultStore(),
 	}
 }
 
@@ -96,29 +101,27 @@ type NewSessionOptions struct {
 	Prompt      string // optional first prompt
 }
 
-// NewSession registers a session immediately (so the board shows it in
-// "starting") and launches the SDK session in the background.
+// NewSession validates the target directory, registers a session
+// immediately (so the board shows it in "starting"), and finishes the
+// launch — including worktree creation — in the background. Launch
+// failures land on the session row as a visible error state.
 func (s *Supervisor) NewSession(opts NewSessionOptions) (*Session, error) {
+	if opts.Repo == "" {
+		return nil, errors.New("repo/directory is required")
+	}
+	repo, err := filepath.Abs(opts.Repo)
+	if err != nil {
+		return nil, err
+	}
+	if fi, err := os.Stat(repo); err != nil || !fi.IsDir() {
+		return nil, fmt.Errorf("%s is not a directory", repo)
+	}
+
 	name := wt.Slug(opts.Name)
 	if opts.Name == "" {
 		name = fmt.Sprintf("session-%s", time.Now().Format("1504-05"))
 	}
 	name = s.uniqueName(name)
-
-	if opts.Repo == "" {
-		return nil, errors.New("repo/directory is required")
-	}
-
-	dir := opts.Repo
-	var wtPath, branch string
-	if opts.UseWorktree {
-		var err error
-		wtPath, branch, err = s.trees.Create(opts.Repo, name)
-		if err != nil {
-			return nil, fmt.Errorf("creating worktree: %w", err)
-		}
-		dir = wtPath
-	}
 
 	presetName := opts.Preset
 	if presetName == "" {
@@ -134,8 +137,8 @@ func (s *Supervisor) NewSession(opts NewSessionOptions) (*Session, error) {
 	}
 
 	sess := &Session{
-		Name: name, Repo: opts.Repo, Dir: dir, Worktree: wtPath,
-		Branch: branch, Preset: presetName, Created: time.Now(),
+		Name: name, Repo: repo, Dir: repo,
+		Preset: presetName, Created: time.Now(),
 		status: StatusStarting,
 	}
 	s.mu.Lock()
@@ -143,7 +146,7 @@ func (s *Supervisor) NewSession(opts NewSessionOptions) (*Session, error) {
 	s.mu.Unlock()
 	s.poke()
 
-	go s.launch(sess, model, opts.Prompt)
+	go s.launch(sess, model, opts.Prompt, opts.UseWorktree)
 	return sess, nil
 }
 
@@ -162,13 +165,30 @@ func (s *Supervisor) uniqueName(name string) string {
 	}
 }
 
-func (s *Supervisor) launch(sess *Session, model, prompt string) {
+func (s *Supervisor) launch(sess *Session, model, prompt string, useWorktree bool) {
+	if useWorktree {
+		wtPath, branch, err := s.trees.Create(sess.Repo, sess.Name)
+		if err != nil {
+			sess.setError("worktree: " + err.Error())
+			s.publish(bus.Error, sess, map[string]any{"error": err.Error()})
+			s.poke()
+			return
+		}
+		sess.mu.Lock()
+		sess.Worktree, sess.Branch, sess.Dir = wtPath, branch, wtPath
+		sess.mu.Unlock()
+	}
+	sess.mu.Lock()
+	dir := sess.Dir
+	sess.mu.Unlock()
+	sess.appendLine("▶ starting agent in " + dir)
+	s.poke()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-
 	sdkSess, err := s.client.CreateSession(ctx, &copilot.SessionConfig{
 		Model:               model,
-		WorkingDirectory:    sess.Dir,
+		WorkingDirectory:    dir,
 		ClientName:          "atc",
 		Streaming:           copilot.Bool(true),
 		OnPermissionRequest: s.permissionHandler(sess),
@@ -189,7 +209,8 @@ func (s *Supervisor) launch(sess *Session, model, prompt string) {
 	sess.mu.Unlock()
 
 	sdkSess.On(func(ev copilot.SessionEvent) { s.handleEvent(sess, ev) })
-	s.publish(bus.SessionStarted, sess, map[string]any{"dir": sess.Dir, "model": model})
+	s.persist()
+	s.publish(bus.SessionStarted, sess, map[string]any{"dir": dir, "model": model})
 	s.poke()
 
 	if prompt != "" {
@@ -198,6 +219,73 @@ func (s *Supervisor) launch(sess *Session, model, prompt string) {
 			s.poke()
 		}
 	}
+}
+
+// ResumeAll restores sessions recorded by a previous run. Each appears
+// on the board immediately and resumes in the background; sessions the
+// runtime no longer knows show up as error rows to discard with K.
+func (s *Supervisor) ResumeAll() int {
+	saved := s.store.load()
+	for _, sv := range saved {
+		sess := &Session{
+			Name: s.uniqueName(wt.Slug(sv.Name)), Repo: sv.Repo, Dir: sv.Dir,
+			Worktree: sv.Worktree, Branch: sv.Branch, Preset: sv.Preset,
+			Created: sv.Created, status: StatusStarting, id: sv.ID,
+		}
+		s.mu.Lock()
+		s.sessions = append(s.sessions, sess)
+		s.mu.Unlock()
+		go s.resume(sess, sv)
+	}
+	if len(saved) > 0 {
+		s.poke()
+	}
+	return len(saved)
+}
+
+func (s *Supervisor) resume(sess *Session, sv savedSession) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	sdkSess, err := s.client.ResumeSession(ctx, sv.ID, &copilot.ResumeSessionConfig{
+		ClientName:          "atc",
+		WorkingDirectory:    sv.Dir,
+		Model:               sv.Model,
+		Streaming:           copilot.Bool(true),
+		OnPermissionRequest: s.permissionHandler(sess),
+	})
+	if err != nil {
+		sess.setError(fmt.Sprintf("resume failed: %v (K to discard)", err))
+		s.poke()
+		return
+	}
+	sess.mu.Lock()
+	sess.sdk = sdkSess
+	sess.id = sdkSess.SessionID
+	sess.status = StatusDone
+	sess.everWorked = true
+	sess.mu.Unlock()
+	sess.appendLine("↻ resumed from previous run — earlier transcript lives in the Copilot session log")
+	sdkSess.On(func(ev copilot.SessionEvent) { s.handleEvent(sess, ev) })
+	s.persist()
+	s.poke()
+}
+
+// persist snapshots resumable sessions to disk. Best-effort: a failed
+// write only costs resume-on-restart, never a running session.
+func (s *Supervisor) persist() {
+	var saved []savedSession
+	for _, sess := range s.Sessions() {
+		sess.mu.Lock()
+		if sess.id != "" && sess.status != StatusClosed {
+			saved = append(saved, savedSession{
+				ID: sess.id, Name: sess.Name, Repo: sess.Repo, Dir: sess.Dir,
+				Worktree: sess.Worktree, Branch: sess.Branch,
+				Preset: sess.Preset, Model: sess.usage.Model, Created: sess.Created,
+			})
+		}
+		sess.mu.Unlock()
+	}
+	_ = s.store.save(saved)
 }
 
 // Prompt sends a user message to the session.
@@ -228,7 +316,8 @@ func (s *Supervisor) Abort(sess *Session) {
 	sess.Respond(&rpc.PermissionDecisionCancelled{})
 }
 
-// Kill tears a session down and optionally removes its worktree.
+// Kill tears a session down, forgets it in the resume store, and
+// optionally removes its worktree.
 func (s *Supervisor) Kill(sess *Session, removeWorktree bool) {
 	sess.Respond(&rpc.PermissionDecisionCancelled{})
 	if sdk := sess.sdkSession(); sdk != nil {
@@ -238,8 +327,11 @@ func (s *Supervisor) Kill(sess *Session, removeWorktree bool) {
 		_ = sdk.Disconnect()
 	}
 	sess.setStatus(StatusClosed)
-	if removeWorktree && sess.Worktree != "" {
-		if err := s.trees.Remove(sess.Repo, sess.Worktree, sess.Branch); err != nil {
+	sess.mu.Lock()
+	repo, worktree, branch := sess.Repo, sess.Worktree, sess.Branch
+	sess.mu.Unlock()
+	if removeWorktree && worktree != "" {
+		if err := s.trees.Remove(repo, worktree, branch); err != nil {
 			sess.appendLine("✗ worktree cleanup: " + err.Error())
 		}
 	}
@@ -251,13 +343,15 @@ func (s *Supervisor) Kill(sess *Session, removeWorktree bool) {
 		}
 	}
 	s.mu.Unlock()
+	s.persist()
 	s.publish(bus.SessionClosed, sess, nil)
 	s.poke()
 }
 
-// Stop shuts everything down: pending permissions are cancelled,
-// sessions disconnected, and the CLI server process terminated.
+// Stop shuts the process down but leaves the resume store intact, so
+// the next run can pick the sessions back up.
 func (s *Supervisor) Stop() {
+	s.persist()
 	for _, sess := range s.Sessions() {
 		sess.Respond(&rpc.PermissionDecisionCancelled{})
 		if sdk := sess.sdkSession(); sdk != nil {
@@ -372,7 +466,7 @@ func describeRequest(req copilot.PermissionRequest) (kind, summary string, detai
 		if r.Warning != nil && *r.Warning != "" {
 			detail = append(detail, "", "⚠ "+*r.Warning)
 		}
-		return "shell", "run: "+truncate(r.FullCommandText, 80), detail
+		return "shell", "run: " + truncate(r.FullCommandText, 80), detail
 	case *rpc.PermissionRequestWrite:
 		detail = []string{"File: " + r.FileName}
 		if r.Intention != "" {

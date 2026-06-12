@@ -10,21 +10,41 @@ import (
 	"github.com/rodolfojsv/atc/internal/supervisor"
 )
 
-// sessionForm collects options for a new session: three text fields,
-// a preset selector, and a worktree toggle.
+// sessionForm collects options for a new session. Rows: name, repo
+// picker (only when repos are configured), repo path, prompt, preset,
+// worktree toggle. Enter submits from anywhere; tab/↑↓ navigate.
 type sessionForm struct {
 	inputs   []textinput.Model // name, repo, prompt
+	repos    []string          // configured repo picker choices
+	repoPick int
 	presets  []string
 	preset   int
 	worktree bool
-	focus    int // 0..2 inputs, 3 preset, 4 worktree
+	focus    int
 }
 
 const (
-	formFieldPreset   = 3
-	formFieldWorktree = 4
-	formFieldCount    = 5
+	rowName = iota
+	rowRepoPick
+	rowRepo
+	rowPrompt
+	rowPreset
+	rowWorktree
+	rowCount
 )
+
+// inputForRow maps a form row to its textinput index, or -1.
+func inputForRow(row int) int {
+	switch row {
+	case rowName:
+		return 0
+	case rowRepo:
+		return 1
+	case rowPrompt:
+		return 2
+	}
+	return -1
+}
 
 func newSessionForm(cfg *config.Config) sessionForm {
 	name := textinput.New()
@@ -33,7 +53,6 @@ func newSessionForm(cfg *config.Config) sessionForm {
 
 	repo := textinput.New()
 	repo.Placeholder = "/path/to/repo"
-	repo.SetValue(cfg.DefaultRepo)
 
 	prompt := textinput.New()
 	prompt.Placeholder = "optional first prompt"
@@ -48,26 +67,47 @@ func newSessionForm(cfg *config.Config) sessionForm {
 
 	f := sessionForm{
 		inputs:   []textinput.Model{name, repo, prompt},
+		repos:    cfg.Repos,
 		presets:  presets,
 		worktree: true,
+	}
+	switch {
+	case cfg.DefaultRepo != "":
+		f.inputs[1].SetValue(cfg.DefaultRepo)
+	case len(cfg.Repos) > 0:
+		f.inputs[1].SetValue(cfg.Repos[0])
 	}
 	f.inputs[0].Focus()
 	return f
 }
 
-func (f *sessionForm) setFocus(i int) tea.Cmd {
-	f.focus = (i + formFieldCount) % formFieldCount
+func (f *sessionForm) setFocus(row int) tea.Cmd {
+	row = (row + rowCount) % rowCount
+	if row == rowRepoPick && len(f.repos) == 0 {
+		// Skip the picker row when no repos are configured.
+		if row > f.focus || (f.focus == rowCount-1 && row == rowRepoPick) {
+			row = rowRepo
+		} else {
+			row = rowName
+		}
+	}
+	f.focus = row
 	for j := range f.inputs {
-		if j == f.focus {
+		if j == inputForRow(row) {
 			f.inputs[j].Focus()
 		} else {
 			f.inputs[j].Blur()
 		}
 	}
-	if f.focus < len(f.inputs) {
+	if inputForRow(row) >= 0 {
 		return textinput.Blink
 	}
 	return nil
+}
+
+// cycle moves a picker selection by delta and returns the new index.
+func cycle(current, delta, n int) int {
+	return ((current+delta)%n + n) % n
 }
 
 func (m *Model) updateForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -81,38 +121,41 @@ func (m *Model) updateForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "shift+tab", "up":
 		return m, f.setFocus(f.focus - 1)
 	case "left", "right":
-		if f.focus == formFieldPreset {
-			d := 1
-			if msg.String() == "left" {
-				d = len(f.presets) - 1
-			}
-			f.preset = (f.preset + d) % len(f.presets)
-			return m, nil
+		delta := 1
+		if msg.String() == "left" {
+			delta = -1
 		}
-		if f.focus == formFieldWorktree {
+		switch f.focus {
+		case rowRepoPick:
+			f.repoPick = cycle(f.repoPick, delta, len(f.repos))
+			f.inputs[1].SetValue(f.repos[f.repoPick])
+			return m, nil
+		case rowPreset:
+			f.preset = cycle(f.preset, delta, len(f.presets))
+			return m, nil
+		case rowWorktree:
 			f.worktree = !f.worktree
 			return m, nil
 		}
 	case " ":
-		if f.focus == formFieldWorktree {
+		switch f.focus {
+		case rowRepoPick:
+			f.repoPick = cycle(f.repoPick, 1, len(f.repos))
+			f.inputs[1].SetValue(f.repos[f.repoPick])
+			return m, nil
+		case rowPreset:
+			f.preset = cycle(f.preset, 1, len(f.presets))
+			return m, nil
+		case rowWorktree:
 			f.worktree = !f.worktree
 			return m, nil
 		}
-		if f.focus == formFieldPreset {
-			f.preset = (f.preset + 1) % len(f.presets)
-			return m, nil
-		}
-	case "enter":
-		if f.focus < formFieldWorktree {
-			return m, f.setFocus(f.focus + 1)
-		}
-		return m.submitForm()
-	case "ctrl+s":
+	case "enter", "ctrl+s":
 		return m.submitForm()
 	}
-	if f.focus < len(f.inputs) {
+	if i := inputForRow(f.focus); i >= 0 {
 		var cmd tea.Cmd
-		f.inputs[f.focus], cmd = f.inputs[f.focus].Update(msg)
+		f.inputs[i], cmd = f.inputs[i].Update(msg)
 		return m, cmd
 	}
 	return m, nil
@@ -131,50 +174,46 @@ func (m *Model) submitForm() (tea.Model, tea.Cmd) {
 		m.flash = "repo/directory is required"
 		return m, nil
 	}
-	m.mode = modeBoard
-	sup := m.sup
-	return m, func() tea.Msg {
-		// Worktree creation runs git; keep it off the UI goroutine.
-		if _, err := sup.NewSession(opts); err != nil {
-			return flashMsg{text: err.Error()}
-		}
-		return RefreshMsg{}
+	// Validate synchronously so a bad path keeps the form open with the
+	// error in view instead of silently doing nothing.
+	if _, err := m.sup.NewSession(opts); err != nil {
+		m.flash = err.Error()
+		return m, nil
 	}
+	m.mode = modeBoard
+	return m, nil
 }
 
 func (m *Model) viewForm() string {
 	f := &m.form
-	labels := []string{"Name", "Repo", "Prompt"}
 	var b strings.Builder
 	b.WriteString(styleTitle.Render("new session") + "\n\n")
-	for i, in := range f.inputs {
+
+	row := func(r int, label, body string) {
 		cursor := "  "
-		if f.focus == i {
+		if f.focus == r {
 			cursor = styleKey.Render("▸ ")
 		}
-		b.WriteString(cursor + styleHeader.Render(padRight(labels[i], 9)) + in.View() + "\n")
+		b.WriteString(cursor + styleHeader.Render(padRight(label, 9)) + body + "\n")
 	}
 
-	cursor := "  "
-	if f.focus == formFieldPreset {
-		cursor = styleKey.Render("▸ ")
+	row(rowName, "Name", f.inputs[0].View())
+	if len(f.repos) > 0 {
+		row(rowRepoPick, "Pick", "◂ "+truncate(f.repos[f.repoPick], 50)+" ▸")
 	}
-	b.WriteString(cursor + styleHeader.Render(padRight("Preset", 9)) + "◂ " + f.presets[f.preset] + " ▸\n")
-
-	cursor = "  "
-	if f.focus == formFieldWorktree {
-		cursor = styleKey.Render("▸ ")
-	}
+	row(rowRepo, "Repo", f.inputs[1].View())
+	row(rowPrompt, "Prompt", f.inputs[2].View())
+	row(rowPreset, "Preset", "◂ "+f.presets[f.preset]+" ▸")
 	wtLabel := "[ ] run in repo directly"
 	if f.worktree {
 		wtLabel = "[x] fresh git worktree"
 	}
-	b.WriteString(cursor + styleHeader.Render(padRight("Worktree", 9)) + wtLabel + "\n")
+	row(rowWorktree, "Worktree", wtLabel)
 
 	if m.flash != "" {
 		b.WriteString("\n" + styleFlash.Render("  "+m.flash) + "\n")
 	}
-	b.WriteString("\n" + keybar("tab", "next", "space/←→", "toggle", "enter", "start", "esc", "cancel"))
+	b.WriteString("\n" + keybar("tab/↑↓", "field", "←→/space", "choose", "enter", "start", "esc", "cancel"))
 	return m.center(styleModal.Width(min(m.width-4, 80)).Render(b.String()))
 }
 

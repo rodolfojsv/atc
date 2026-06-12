@@ -53,6 +53,10 @@ func main() {
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	sup.SetNotify(func() { p.Send(tui.RefreshMsg{}) })
 
+	// Reattach to sessions from the previous run (recorded in
+	// ~/.atc/sessions.json); they appear on the board as they resume.
+	sup.ResumeAll()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if err := startSchedules(ctx, cfg, sup); err != nil {

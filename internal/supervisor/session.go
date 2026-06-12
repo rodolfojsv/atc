@@ -53,7 +53,9 @@ const maxTranscriptLines = 5000
 type Session struct {
 	mu sync.Mutex
 
-	// Immutable after creation.
+	// Name, Repo, Preset and Created are immutable after creation.
+	// Dir/Worktree/Branch are set once by the launch goroutine (under
+	// mu) when a worktree is created.
 	Name     string
 	Repo     string // original repo path
 	Dir      string // directory the agent runs in (worktree if one was made)

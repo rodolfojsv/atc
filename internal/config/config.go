@@ -36,7 +36,10 @@ type Config struct {
 	// WorktreeRoot is where per-session worktrees are created.
 	// Empty means ~/.atc/worktrees/<repo>/<session>.
 	WorktreeRoot string `json:"worktreeRoot,omitempty"`
-	// DefaultRepo pre-fills the repo field of the new-session form.
+	// Repos are the repositories you usually work with; the new-session
+	// form offers them as a picker. DefaultRepo pre-fills the repo field
+	// (falls back to the first of Repos).
+	Repos       []string            `json:"repos,omitempty"`
 	DefaultRepo string              `json:"defaultRepo,omitempty"`
 	Model       string              `json:"model,omitempty"`
 	Presets     map[string]Preset   `json:"presets,omitempty"`

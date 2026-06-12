@@ -31,6 +31,7 @@ Design priorities, in order:
 ## Features
 
 - **Session board** — live status per agent: idle / working / **waiting on permission** / done / error, with per-session token usage and context-window fill.
+- **Session resume** — open sessions are recorded in `~/.atc/sessions.json`; the next `atc` run reattaches to them (the Copilot runtime persists the conversations; killed sessions are forgotten). Agents don't keep *running* while atc is closed — for that, run atc inside tmux (e.g. under WSL).
 - **Attach / detach** — focus any session to watch its stream and send prompts; detach back to the board without interrupting it.
 - **Worktree-per-session** — one keypress starts an agent in a fresh git worktree; cleanup on close. Parallel agents never collide in the same checkout.
 - **Approval policy** — per-preset `prompt` (default) or `allow-all`, where allow-all is still gated by a deterministic deny-list (destructive commands, credential exfiltration, pipe-to-shell) checked *before* any auto-approval.
@@ -44,7 +45,7 @@ Design priorities, in order:
 
 - [ ] **Phase 0** — validate: SDK hello-world against a work Copilot seat; observe permission + usage events
 - [x] **Phase 1** — MVP: session board, spawn/kill, attach/detach, prompts
-- [x] **Phase 2** — worktree-per-session, permission surfacing, approval policy, config *(session persistence across restarts: not yet)*
+- [x] **Phase 2** — worktree-per-session, permission surfacing, approval policy, config, session persistence (sessions are recorded in `~/.atc/sessions.json` and resumed on the next run)
 - [x] **Phase 3** — hooks, usage panel, scheduled prompts; toasts via the sample `hooks/toast.ps1` *(quota panel: not yet)*
 - Later: remote-control API (deliberately deferred until the security story is settled — when it lands it will be tailnet-bound with bearer auth, never a public tunnel)
 
@@ -73,9 +74,12 @@ No install step, no runtime dependencies. Config lives at `%APPDATA%\atc\config.
 
 ## Configuration sketch
 
+Note: real `config.json` must be plain JSON — the `//` comments below are illustration only.
+
 ```jsonc
 {
   "worktreeRoot": "C:/dev/worktrees",
+  "repos": ["C:/dev/app", "C:/dev/infra"],   // repo picker in the new-session form
   "presets": {
     "default": { "approval": "prompt" },
     "scratch": { "approval": "allow-all" }   // deny-list still applies

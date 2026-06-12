@@ -30,7 +30,9 @@ func Slug(name string) string {
 }
 
 // Create adds a worktree for repo on a fresh atc/<name> branch and
-// returns its path and branch name.
+// returns its path and branch name. Leftover branches/directories from
+// earlier sessions of the same name are skipped with a numeric suffix
+// rather than failing.
 func (m Manager) Create(repo, name string) (dir, branch string, err error) {
 	repo, err = filepath.Abs(repo)
 	if err != nil {
@@ -40,8 +42,6 @@ func (m Manager) Create(repo, name string) (dir, branch string, err error) {
 		return "", "", fmt.Errorf("%s is not a git repository: %w", repo, err)
 	}
 
-	slug := Slug(name)
-	branch = "atc/" + slug
 	base := m.Root
 	if base == "" {
 		home, err := os.UserHomeDir()
@@ -53,12 +53,37 @@ func (m Manager) Create(repo, name string) (dir, branch string, err error) {
 	if err := os.MkdirAll(base, 0o755); err != nil {
 		return "", "", err
 	}
-	dir = filepath.Join(base, slug)
 
-	if _, err := git(repo, "worktree", "add", "-b", branch, dir); err != nil {
-		return "", "", err
+	slug := Slug(name)
+	var lastErr error
+	for i := 1; i <= 20; i++ {
+		candidate := slug
+		if i > 1 {
+			candidate = fmt.Sprintf("%s-%d", slug, i)
+		}
+		branch = "atc/" + candidate
+		dir = filepath.Join(base, candidate)
+		if branchExists(repo, branch) || pathExists(dir) {
+			continue
+		}
+		if _, lastErr = git(repo, "worktree", "add", "-b", branch, dir); lastErr == nil {
+			return dir, branch, nil
+		}
 	}
-	return dir, branch, nil
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no free worktree name for %q after 20 tries", slug)
+	}
+	return "", "", lastErr
+}
+
+func branchExists(repo, branch string) bool {
+	_, err := git(repo, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch)
+	return err == nil
+}
+
+func pathExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
 }
 
 // Remove deletes the worktree and its branch. The branch delete is
