@@ -264,10 +264,69 @@ func (s *Supervisor) resume(sess *Session, sv savedSession) {
 	sess.status = StatusDone
 	sess.everWorked = true
 	sess.mu.Unlock()
-	sess.appendEntry(EntrySystem, "resumed from previous run — earlier transcript lives in the Copilot session log")
+	// Replay history before subscribing to live events; a freshly
+	// resumed session emits nothing until prompted, so the gap is safe.
+	restored := s.loadHistory(sess, sdkSess)
+	if restored > 0 {
+		sess.appendEntry(EntrySystem, fmt.Sprintf("— resumed; %d earlier events restored —", restored))
+	} else {
+		sess.appendEntry(EntrySystem, "resumed from previous run (no earlier transcript available)")
+	}
 	sdkSess.On(func(ev copilot.SessionEvent) { s.handleEvent(sess, ev) })
 	s.persist()
 	s.poke()
+}
+
+// loadHistory replays the session's persisted event log into the
+// transcript, restoring chat text, prompt history for ↑-recall, and
+// usage totals. The event-log API is experimental SDK surface, so any
+// failure just leaves the transcript empty rather than failing the
+// resume. Returns how many events were restored.
+func (s *Supervisor) loadHistory(sess *Session, sdkSess *copilot.Session) int {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	scope := rpc.EventsAgentScopePrimary // skip sub-agent chatter
+	max := int64(500)
+	var cursor *string
+	restored, total := 0, 0
+	for total < 10_000 { // hard cap, generous for any real session
+		res, err := sdkSess.RPC.EventLog.Read(ctx, &rpc.EventLogReadRequest{
+			AgentScope: &scope,
+			Cursor:     cursor,
+			Max:        &max,
+		})
+		if err != nil || res == nil {
+			return restored
+		}
+		for _, ev := range res.Events {
+			total++
+			if ev.AgentID != nil {
+				continue
+			}
+			switch d := ev.Data.(type) {
+			case *rpc.UserMessageData:
+				sess.appendEntry(EntryUser, d.Content)
+				sess.addHistory(d.Content)
+				restored++
+			case *rpc.AssistantMessageData:
+				sess.finishMessage(d.Content)
+				restored++
+			case *rpc.ToolExecutionStartData:
+				sess.appendEntry(EntryTool, toolSummary(d.ToolName, d.Arguments))
+				restored++
+			case *rpc.SessionUsageInfoData:
+				sess.updateContext(d.CurrentTokens, d.TokenLimit)
+			case *rpc.AssistantUsageData:
+				sess.addUsage(d)
+			}
+		}
+		if !res.HasMore {
+			return restored
+		}
+		cursor = &res.Cursor
+	}
+	return restored
 }
 
 // persist snapshots resumable sessions to disk. Best-effort: a failed
