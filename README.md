@@ -40,13 +40,21 @@ Design priorities, in order:
 
 ## Status
 
-**Pre-alpha — plan stage.** Nothing to install yet. Roadmap:
+**Alpha — first working build.** Implemented and compiling; awaiting validation against a real Copilot seat (the Phase 0 smoke test happens on first run):
 
 - [ ] **Phase 0** — validate: SDK hello-world against a work Copilot seat; observe permission + usage events
-- [ ] **Phase 1** — MVP: session board, spawn/kill, attach/detach, prompts
-- [ ] **Phase 2** — worktree-per-session, permission surfacing, approval policy, config, persistence
-- [ ] **Phase 3** — hooks, toasts, usage panel, scheduled prompts
+- [x] **Phase 1** — MVP: session board, spawn/kill, attach/detach, prompts
+- [x] **Phase 2** — worktree-per-session, permission surfacing, approval policy, config *(session persistence across restarts: not yet)*
+- [x] **Phase 3** — hooks, usage panel, scheduled prompts; toasts via the sample `hooks/toast.ps1` *(quota panel: not yet)*
 - Later: remote-control API (deliberately deferred until the security story is settled — when it lands it will be tailnet-bound with bearer auth, never a public tunnel)
+
+## Keys
+
+**Board** — `↑/↓` select · `enter` attach · `n` new session · `a` review permission · `A` toggle auto-approve (⚡, deny-list still applies) · `x` abort turn · `K` kill · `q` quit
+
+**Focus** — type + `enter` send prompt · `ctrl+y`/`ctrl+n` approve/deny pending permission · `ctrl+x` abort · `pgup/pgdn` scroll · `esc` back to board
+
+**Permission modal** — `y` approve once · `a` approve + auto-approve session · `n` deny · `esc` back
 
 ## Requirements
 
