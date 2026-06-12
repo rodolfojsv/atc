@@ -60,7 +60,7 @@ Design priorities, in order:
 
 **Focus** — type + `enter` send prompt · `ctrl+j` newline · `↑/↓` prompt history · `ctrl+y`/`ctrl+n` approve/deny pending permission · `ctrl+x` abort · `pgup/pgdn` scroll · `esc` back to board. The active model shows bottom-right.
 
-**Prompt box extras** — `@` fuzzy-finds a file in the session's directory (type to filter, `↑/↓` select, `tab`/`enter` insert the path); `/` opens atc's command palette: `/model [name]` (show/switch model mid-session), `/diff`, `/export`, `/abort`, `/auto`, `/help`. Note these are atc commands — backend CLI slash commands (`/fleet`, `/compact`) don't exist over the SDK path.
+**Prompt box extras** — `@` fuzzy-finds a file in the session's directory (type to filter, `↑/↓` select, `tab`/`enter` insert the path); `/` opens atc's command palette: `/model [name]` (show/switch model mid-session), `/diff`, `/export`, `/abort`, `/auto`, `/skills`, `/help`. In **claude sessions**, the repo's own `.claude/commands/*.md` appear in the palette too and pass through to the agent (it expands them itself; verified headless). `/skills` lists the repo's agent assets — `.claude/skills`, `.claude/commands`, instruction files — all of which the agents load as usual; skills are model-invoked when relevant. Backend CLI built-ins (`/fleet`, `/compact`) don't exist over the SDK path.
 
 **Permission modal** — `y` approve once · `s` always allow this kind for the session · `a` approve + auto-approve session · `n` deny · `esc` back
 

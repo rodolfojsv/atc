@@ -519,6 +519,12 @@ func (s *Supervisor) Prompt(sess *Session, text string) error {
 	return err
 }
 
+// Note drops an informational line into the session transcript.
+func (s *Supervisor) Note(sess *Session, text string) {
+	sess.appendEntry(EntrySystem, text)
+	s.poke()
+}
+
 // SwitchModel changes the model for the session's subsequent turns.
 func (s *Supervisor) SwitchModel(sess *Session, model string) error {
 	ag := sess.agentSession()

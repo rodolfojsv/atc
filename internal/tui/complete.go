@@ -2,6 +2,7 @@ package tui
 
 import (
 	"io/fs"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -24,6 +25,7 @@ var slashCommands = []struct{ name, desc string }{
 	{"/export", "export the transcript to markdown"},
 	{"/abort", "abort the current turn"},
 	{"/auto", "toggle auto-approve ⚡"},
+	{"/skills", "list this repo's skills and commands"},
 	{"/help", "list commands"},
 }
 
@@ -44,12 +46,21 @@ func (m *Model) syncCompletion() {
 	if val == "" {
 		return
 	}
-	// Slash commands: only as the very first token.
+	// Slash commands: only as the very first token. atc's own commands
+	// first, then the repo's .claude/commands (Claude sessions expand
+	// those themselves; verified working in headless mode).
 	if strings.HasPrefix(val, "/") && !strings.ContainsAny(val, " \n") {
 		var items []string
 		for _, c := range slashCommands {
 			if strings.HasPrefix(c.name, val) {
 				items = append(items, c.name+"  —  "+c.desc)
+			}
+		}
+		if m.target != nil && m.target.View().Backend == "claude" {
+			for _, c := range m.repoCommands() {
+				if strings.HasPrefix(c, val) {
+					items = append(items, c+"  —  repo command")
+				}
 			}
 		}
 		if len(items) > 0 && !(len(items) == 1 && strings.HasPrefix(items[0], val+" ")) {
@@ -167,6 +178,59 @@ func subsequenceAt(s, q string) int {
 		}
 	}
 	return -1
+}
+
+// repoCommands lists the session repo's .claude/commands/*.md as
+// invocable names (subdirectories become namespaces, "/ns:cmd").
+func (m *Model) repoCommands() []string {
+	if m.target == nil {
+		return nil
+	}
+	dir := filepath.Join(m.target.View().Dir, ".claude", "commands")
+	var out []string
+	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(d.Name(), ".md") {
+			return nil
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return nil
+		}
+		name := strings.TrimSuffix(filepath.ToSlash(rel), ".md")
+		out = append(out, "/"+strings.ReplaceAll(name, "/", ":"))
+		return nil
+	})
+	sort.Strings(out)
+	return out
+}
+
+// skillsInventory describes the repo's agent assets for /skills.
+func (m *Model) skillsInventory() []string {
+	if m.target == nil {
+		return nil
+	}
+	dir := m.target.View().Dir
+	var out []string
+	skills, _ := filepath.Glob(filepath.Join(dir, ".claude", "skills", "*", "SKILL.md"))
+	for _, s := range skills {
+		out = append(out, "skill: "+filepath.Base(filepath.Dir(s))+" (.claude/skills — model-invoked when relevant)")
+	}
+	for _, c := range m.repoCommands() {
+		out = append(out, "command: "+c+" (.claude/commands — type it in a claude session)")
+	}
+	for _, probe := range []struct{ path, label string }{
+		{filepath.Join(dir, ".github", "copilot-instructions.md"), "copilot instructions: .github/copilot-instructions.md (loaded automatically)"},
+		{filepath.Join(dir, "AGENTS.md"), "agent instructions: AGENTS.md (loaded automatically)"},
+		{filepath.Join(dir, "CLAUDE.md"), "claude instructions: CLAUDE.md (loaded automatically)"},
+	} {
+		if _, err := os.Stat(probe.path); err == nil {
+			out = append(out, probe.label)
+		}
+	}
+	if len(out) == 0 {
+		out = []string{"no skills, commands, or instruction files found in " + dir}
+	}
+	return out
 }
 
 // acceptCompletion inserts the selected item into the prompt.
