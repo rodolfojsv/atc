@@ -26,7 +26,7 @@ func (m *Model) layoutFocus() {
 	} else {
 		m.vp.Width = m.width
 	}
-	m.input.SetWidth(m.width - 2)
+	m.input.SetWidth(m.width - 6) // border + padding
 	m.syncFocusLayout()
 
 	if m.mdWidth != m.width {
@@ -47,7 +47,8 @@ func (m *Model) layoutFocus() {
 
 // syncFocusLayout grows the prompt box with its content (a long prompt
 // wraps into a paragraph) and gives the viewport the remaining height.
-// Chrome around them: title, permission banner slot, keybar.
+// Chrome around them: title, permission banner slot, keybar, and the
+// input box border (2 lines).
 func (m *Model) syncFocusLayout() {
 	lines := m.input.LineCount()
 	if lines < 1 {
@@ -57,7 +58,7 @@ func (m *Model) syncFocusLayout() {
 		lines = maxInputLines
 	}
 	m.input.SetHeight(lines)
-	h := m.height - 4 - lines
+	h := m.height - 6 - lines
 	if h < 3 {
 		h = 3
 	}
@@ -252,7 +253,11 @@ func (m *Model) viewFocus() string {
 		b.WriteString("\n")
 	}
 
-	b.WriteString(m.input.View() + "\n")
+	box := styleInputBox
+	if m.input.Focused() {
+		box = styleInputBoxFocused
+	}
+	b.WriteString(box.Width(m.width-2).Render(m.input.View()) + "\n")
 	b.WriteString(keybar("esc", "board", "enter", "send", "ctrl+j", "newline", "ctrl+x", "abort", "wheel", "scroll"))
 	if m.flash != "" {
 		b.WriteString("  " + styleFlash.Render(m.flash))

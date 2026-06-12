@@ -69,6 +69,13 @@ func New(sup *supervisor.Supervisor, cfg *config.Config) *Model {
 	input.CharLimit = 0
 	input.ShowLineNumbers = false
 	input.SetHeight(1)
+	// Clean look: the surrounding rounded border (see viewFocus) is the
+	// only chrome — no per-line gutter prompt, no cursor-line highlight.
+	input.Prompt = ""
+	input.FocusedStyle.CursorLine = lipgloss.NewStyle()
+	input.BlurredStyle.CursorLine = lipgloss.NewStyle()
+	input.FocusedStyle.Placeholder = styleDim
+	input.BlurredStyle.Placeholder = styleDim
 	// Enter is reserved for sending; ctrl+j inserts a manual newline.
 	// Long prompts soft-wrap into a growing paragraph either way.
 	input.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("ctrl+j"))

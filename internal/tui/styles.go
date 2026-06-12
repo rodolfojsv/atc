@@ -23,6 +23,9 @@ var (
 	styleUser     = lipgloss.NewStyle().Foreground(lipgloss.Color("81")).Bold(true)
 	styleUserText = lipgloss.NewStyle().Foreground(lipgloss.Color("81"))
 
+	styleInputBox        = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("240")).Padding(0, 1)
+	styleInputBoxFocused = styleInputBox.BorderForeground(lipgloss.Color("75"))
+
 	styleWorking  = lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
 	styleWaiting  = lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Bold(true)
 	styleDone     = lipgloss.NewStyle().Foreground(lipgloss.Color("78"))
