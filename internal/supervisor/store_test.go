@@ -82,3 +82,51 @@ func testConfig(t *testing.T) *config.Config {
 	}
 	return cfg
 }
+
+func TestUsageSnapshotRoundtrip(t *testing.T) {
+	st := store{path: filepath.Join(t.TempDir(), "sessions.json")}
+	in := []savedSession{{
+		ID: "u1", Name: "x", Repo: "/r", Dir: "/r", Status: "done", Created: time.Now().UTC(),
+		InTokens: 12400, OutTokens: 8100, NanoAiu: 4.2e8, CostUSD: 0.05,
+		CurrentTokens: 45000, TokenLimit: 128000,
+	}}
+	if err := st.save(in); err != nil {
+		t.Fatal(err)
+	}
+	got := st.load()
+	if len(got) != 1 {
+		t.Fatalf("want 1, got %d", len(got))
+	}
+	sv := got[0]
+	if sv.InTokens != 12400 || sv.OutTokens != 8100 || sv.NanoAiu != 4.2e8 ||
+		sv.CostUSD != 0.05 || sv.CurrentTokens != 45000 || sv.TokenLimit != 128000 {
+		t.Fatalf("usage snapshot lost: %+v", sv)
+	}
+}
+
+func TestPersistWritesUsageSnapshot(t *testing.T) {
+	st := store{path: filepath.Join(t.TempDir(), "sessions.json")}
+	s := New(testConfig(t), nil)
+	s.store = st
+	sess := &Session{Name: "x", Repo: "/r", Dir: "/r", id: "u2", status: StatusDone}
+	sess.usage = Usage{InputTokens: 100, OutputTokens: 50, NanoAiu: 1e8, CostUSD: 0.01, CurrentTokens: 9000, TokenLimit: 128000}
+	s.sessions = []*Session{sess}
+	s.persist()
+	got := st.load()
+	if len(got) != 1 || got[0].InTokens != 100 || got[0].NanoAiu != 1e8 || got[0].TokenLimit != 128000 {
+		t.Fatalf("persist did not snapshot usage: %+v", got)
+	}
+}
+
+func TestPersistKeepsConfiguredModelWithoutUsage(t *testing.T) {
+	st := store{path: filepath.Join(t.TempDir(), "sessions.json")}
+	s := New(testConfig(t), nil)
+	s.store = st
+	// Configured model, but no turn has run yet (usage.Model empty).
+	s.sessions = []*Session{{Name: "x", Repo: "/r", Dir: "/r", id: "m1", status: StatusIdle, Model: "gpt-5"}}
+	s.persist()
+	got := st.load()
+	if len(got) != 1 || got[0].Model != "gpt-5" {
+		t.Fatalf("configured model not persisted: %+v", got)
+	}
+}

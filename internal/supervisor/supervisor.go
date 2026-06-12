@@ -72,6 +72,13 @@ func New(cfg *config.Config, b *bus.Bus) *Supervisor {
 	}
 }
 
+func firstNonEmpty(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
+}
+
 func spendPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -337,8 +344,8 @@ func (s *Supervisor) ResumeAll() int {
 		sess := &Session{
 			Name: s.uniqueName(wt.Slug(sv.Name)), Repo: sv.Repo, Dir: sv.Dir,
 			Worktree: sv.Worktree, Branch: sv.Branch, Backend: backendName,
-			Preset: sv.Preset, ReadOnly: sv.ReadOnly, Created: sv.Created,
-			BaseBranch: sv.BaseBranch, BaseCommit: sv.BaseCommit,
+			Preset: sv.Preset, ReadOnly: sv.ReadOnly, Model: sv.Model,
+			Created: sv.Created, BaseBranch: sv.BaseBranch, BaseCommit: sv.BaseCommit,
 			status: StatusStarting, id: sv.ID,
 		}
 		s.mu.Lock()
@@ -375,9 +382,22 @@ func (s *Supervisor) resume(sess *Session, sv savedSession) {
 	sess.id = ag.ID()
 	sess.status = StatusDone
 	sess.everWorked = true
+	// Restore the usage snapshot atc persisted; the runtimes' own logs
+	// don't reliably keep usage events (often marked ephemeral), so
+	// history replay can't be trusted for the numbers.
+	sess.usage.InputTokens = sv.InTokens
+	sess.usage.OutputTokens = sv.OutTokens
+	sess.usage.NanoAiu = sv.NanoAiu
+	sess.usage.CostUSD = sv.CostUSD
+	sess.usage.CurrentTokens = sv.CurrentTokens
+	sess.usage.TokenLimit = sv.TokenLimit
+	if sess.usage.Model == "" {
+		sess.usage.Model = sv.Model
+	}
+	snapshotHasUsage := sv.InTokens+sv.OutTokens > 0 || sv.NanoAiu > 0 || sv.CostUSD > 0
 	sess.mu.Unlock()
 
-	restored := s.replayHistory(sess, ag.History(context.Background()))
+	restored := s.replayHistory(sess, ag.History(context.Background()), !snapshotHasUsage)
 	s.log.Log(logx.Info, "session.resumed", map[string]any{"session": sess.Name, "id": sv.ID, "restored": restored})
 	if restored > 0 {
 		sess.appendEntry(EntrySystem, fmt.Sprintf("— resumed; %d earlier events restored —", restored))
@@ -389,8 +409,11 @@ func (s *Supervisor) resume(sess *Session, sv savedSession) {
 }
 
 // replayHistory feeds persisted events back into the transcript,
-// restoring chat text, ↑-recall history, and usage totals.
-func (s *Supervisor) replayHistory(sess *Session, events []agent.Event) int {
+// restoring chat text and ↑-recall history. Usage events apply only
+// when applyUsage is set (no snapshot existed — e.g. pre-snapshot
+// store files); otherwise the snapshot wins and replaying would
+// double-count.
+func (s *Supervisor) replayHistory(sess *Session, events []agent.Event, applyUsage bool) int {
 	restored := 0
 	for _, e := range events {
 		switch e.Type {
@@ -408,9 +431,13 @@ func (s *Supervisor) replayHistory(sess *Session, events []agent.Event) int {
 			sess.appendEntry(EntryError, e.Text)
 			restored++
 		case agent.EventContext:
-			sess.updateContext(e.CurrentTokens, e.TokenLimit)
+			if applyUsage {
+				sess.updateContext(e.CurrentTokens, e.TokenLimit)
+			}
 		case agent.EventUsage:
-			sess.addUsage(e)
+			if applyUsage {
+				sess.addUsage(e)
+			}
 		}
 	}
 	return restored
@@ -430,9 +457,12 @@ func (s *Supervisor) persist() {
 			saved = append(saved, savedSession{
 				ID: sess.id, Name: sess.Name, Repo: sess.Repo, Dir: sess.Dir,
 				Worktree: sess.Worktree, Branch: sess.Branch, Backend: sess.Backend,
-				Preset: sess.Preset, Model: sess.usage.Model, ReadOnly: sess.ReadOnly,
+				Preset: sess.Preset, Model: firstNonEmpty(sess.usage.Model, sess.Model), ReadOnly: sess.ReadOnly,
 				BaseBranch: sess.BaseBranch, BaseCommit: sess.BaseCommit,
 				Status: string(sess.status), Created: sess.Created,
+				InTokens: sess.usage.InputTokens, OutTokens: sess.usage.OutputTokens,
+				NanoAiu: sess.usage.NanoAiu, CostUSD: sess.usage.CostUSD,
+				CurrentTokens: sess.usage.CurrentTokens, TokenLimit: sess.usage.TokenLimit,
 			})
 		}
 		sess.mu.Unlock()
@@ -486,8 +516,8 @@ func (s *Supervisor) WatchStore(ctx context.Context, interval time.Duration) {
 			sess := &Session{
 				Name: s.uniqueName(wt.Slug(sv.Name)), Repo: sv.Repo, Dir: sv.Dir,
 				Worktree: sv.Worktree, Branch: sv.Branch, Backend: backendName,
-				Preset: sv.Preset, ReadOnly: sv.ReadOnly, Created: sv.Created,
-				BaseBranch: sv.BaseBranch, BaseCommit: sv.BaseCommit,
+				Preset: sv.Preset, ReadOnly: sv.ReadOnly, Model: sv.Model,
+				Created: sv.Created, BaseBranch: sv.BaseBranch, BaseCommit: sv.BaseCommit,
 				status: StatusStarting, id: sv.ID,
 			}
 			s.mu.Lock()
