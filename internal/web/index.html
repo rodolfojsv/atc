@@ -75,8 +75,10 @@
   .tag { font-size: .76em; color: var(--faint); }
   /* board grouping + per-card organize chips */
   .section { display: flex; align-items: center; gap: .5em; margin: 1em .2em .45em;
-    color: var(--accent); font-size: .76em; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; }
+    color: var(--accent); font-size: .76em; font-weight: 600; text-transform: uppercase; letter-spacing: .06em;
+    cursor: pointer; user-select: none; -webkit-user-select: none; }
   .section:first-child { margin-top: .2em; }
+  .section .caret { color: var(--faint); width: .8em; display: inline-block; }
   .section .cnt { color: var(--faint); font-weight: 400; }
   .chip { font: inherit; font-size: .72em; padding: .12em .6em; border-radius: 20px; line-height: 1.5;
     border: 1px solid var(--line); background: transparent; color: var(--dim); cursor: pointer; }
@@ -279,6 +281,7 @@ let attachments = [];      // focus composer queue
 let formAttachments = [];  // new-session queue
 let pendingFirst = null;   // {name, text, atts} — sent once the session is ready
 let timer = null, meta = {};
+let histList = [], histIdx = -1, histDraft = ''; // ↑/↓ prompt recall in the focus composer
 
 function api(path, opts = {}) {
   opts.headers = Object.assign({ 'Authorization': 'Bearer ' + token }, opts.headers || {});
@@ -406,6 +409,16 @@ function renderFilterBar(groups) {
   bar.innerHTML = chip('All', -1, !filterGroup) +
     groups.map((g, i) => chip(`${g.title} ${g.sessions.length}`, i, filterGroup === g.title)).join('');
 }
+// collapsedGroups: group titles the user minimized, remembered across
+// reloads. Clicking a section header toggles it.
+let collapsedGroups = new Set(JSON.parse(localStorage.getItem('atc-collapsed') || '[]'));
+function toggleCollapse(i) {
+  const t = (lastGroups[i] || {}).title;
+  if (!t) return;
+  if (collapsedGroups.has(t)) collapsedGroups.delete(t); else collapsedGroups.add(t);
+  localStorage.setItem('atc-collapsed', JSON.stringify([...collapsedGroups]));
+  renderBoard(boardList);
+}
 function renderBoard(list) {
   if (holdActive) return; // don't disturb an in-progress hold
   const rows = $('rows');
@@ -419,12 +432,16 @@ function renderBoard(list) {
   if (filterGroup && !groups.some(g => g.title === filterGroup)) filterGroup = null; // category vanished
   renderFilterBar(groups);
   const shown = filterGroup ? groups.filter(g => g.title === filterGroup) : groups;
-  // Headers orient you across groups; with a single group isolated the
-  // filter chip already names it, so drop the redundant header.
-  const showHeaders = !filterGroup && (groups.length > 1 || groups[0].title !== 'Uncategorized');
-  rows.innerHTML = shown.map(g =>
-    (showHeaders ? `<div class="section">${esc(g.title)}<span class="cnt">${g.sessions.length}</span></div>` : '') +
-    g.sessions.map(cardHTML).join('')).join('');
+  // Headers orient you across groups (and toggle collapse); with a single
+  // group isolated by the filter, its chip already names it.
+  const headers = !filterGroup && (groups.length > 1 || groups[0].title !== 'Uncategorized');
+  rows.innerHTML = shown.map(g => {
+    if (!headers) return g.sessions.map(cardHTML).join('');
+    const collapsed = collapsedGroups.has(g.title);
+    const head = `<div class="section" onclick="toggleCollapse(${groups.indexOf(g)})">` +
+      `<span class="caret">${collapsed ? '▸' : '▾'}</span>${esc(g.title)}<span class="cnt">${g.sessions.length}</span></div>`;
+    return head + (collapsed ? '' : g.sessions.map(cardHTML).join(''));
+  }).join('');
   rows.querySelectorAll('.del').forEach(setupHold);
 }
 // togglePin / setCategory: organize the board (persisted server-side).
@@ -462,11 +479,13 @@ async function pollBoard() {
 function saveDraft() {
   if (current) drafts[current] = { text: $('prompt').value, atts: attachments.slice() };
 }
+let boardScroll = 0; // window scroll to restore when returning to the board
 function showBoard() {
   saveDraft();
   current = null; clearInterval(timer);
   $('focus').classList.add('hidden'); $('board').classList.remove('hidden');
   $('crumb').textContent = ''; $('newBtn').classList.remove('hidden');
+  window.scrollTo(0, boardScroll); // land where you left, not at the bottom
   pollBoard(); timer = setInterval(pollBoard, 2000);
 }
 function toggleNew() { $('newSheet').classList.toggle('hidden'); }
@@ -504,7 +523,9 @@ async function createSession() {
 function isReady(st) { return st !== 'starting'; }
 function openSession(name) {
   saveDraft();               // preserve whatever we were composing elsewhere
+  if (!$('board').classList.contains('hidden')) boardScroll = window.scrollY;
   current = name; clearInterval(timer); lastRender = '';
+  histList = []; histIdx = -1; histDraft = ''; // fresh prompt-recall state per session
   $('board').classList.add('hidden'); $('focus').classList.remove('hidden');
   $('newBtn').classList.add('hidden'); $('transcript').innerHTML = '';
   $('stat').textContent = ''; $('stat').className = '';
@@ -521,9 +542,19 @@ let lastRender = '';
 async function pollFocus() {
   if (!current) return;
   let data;
-  try { data = await api('/api/sessions/' + encodeURIComponent(current)); live(true); }
-  catch (e) { live(false); setStat(e.message, true); return; }
+  try {
+    data = await api('/api/sessions/' + encodeURIComponent(current)); live(true);
+    if ($('stat').textContent === 'reconnecting…') setStat(''); // clear the transient note
+  } catch (e) {
+    // A dropped poll (sleep, brief network blip) self-heals on the next
+    // tick — show a quiet note, not a scary error, and never clobber a
+    // real send/action error already on screen.
+    live(false);
+    if (!$('stat').classList.contains('err')) setStat('reconnecting…');
+    return;
+  }
   const s = data.session;
+  histList = data.transcript.filter(e => e.kind === 'user').map(e => e.text); // for ↑/↓ prompt recall
   currentAuto = s.autoApprove;
   $('crumb').textContent = `${s.name} · ${s.status}${s.model ? ' · ' + s.model : ''}${cost(s) ? ' · ' + cost(s) : ''}`;
   $('autoBtn').textContent = s.autoApprove ? '⚡ auto' : 'auto';
@@ -713,10 +744,34 @@ function sendPrompt() {
   if (!text.trim() && !attachments.length) return;
   const atts = attachments.slice(); attachments = [];
   $('prompt').value = ''; autosize($('prompt')); renderThumbs();
+  histIdx = -1; histDraft = '';
   sendMessage(text, atts);
 }
 function autosize(t) { t.style.height = 'auto'; t.style.height = Math.min(t.scrollHeight, 9 * 16) + 'px'; }
-$('prompt').addEventListener('input', e => autosize(e.target));
+$('prompt').addEventListener('input', e => { autosize(e.target); histIdx = -1; }); // editing leaves recall mode
+
+// ↑ recalls your previous prompts into the composer (newest first), ↓
+// walks back toward what you were typing — so after aborting you can ↑,
+// tweak it, and resend without retyping. Only triggers at the text
+// edge, so arrows still move the caret within a multi-line draft.
+$('prompt').addEventListener('keydown', e => {
+  const t = e.target;
+  if (e.key === 'ArrowUp') {
+    if (t.selectionStart !== 0 || t.selectionEnd !== 0 || !histList.length) return;
+    e.preventDefault();
+    if (histIdx === -1) { histDraft = t.value; histIdx = histList.length - 1; }
+    else if (histIdx > 0) { histIdx--; }
+    t.value = histList[histIdx]; autosize(t); t.setSelectionRange(0, 0);
+  } else if (e.key === 'ArrowDown') {
+    if (histIdx === -1) return;
+    const end = t.value.length;
+    if (t.selectionStart !== end || t.selectionEnd !== end) return;
+    e.preventDefault();
+    if (histIdx >= histList.length - 1) { histIdx = -1; t.value = histDraft; }
+    else { histIdx++; t.value = histList[histIdx]; }
+    autosize(t); t.setSelectionRange(t.value.length, t.value.length);
+  }
+});
 
 // Enter submits; Ctrl/Cmd/Shift+Enter inserts a newline. (isComposing
 // guards IME input so Enter doesn't submit mid-composition.)

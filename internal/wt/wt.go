@@ -29,6 +29,23 @@ func Slug(name string) string {
 	return s
 }
 
+var (
+	pathBreakers = regexp.MustCompile(`[/\\\x00-\x1f]+`)
+	multiSpace   = regexp.MustCompile(`\s+`)
+)
+
+// CleanName normalizes a human-facing session name: it keeps spaces and
+// letter case (unlike Slug) so the board can show "fix login bug", and
+// only strips characters that would break a file path or URL. Worktree
+// branches and directories still go through Slug, so the display name
+// and the on-disk name are decoupled. Returns "" when nothing usable
+// remains.
+func CleanName(name string) string {
+	s := pathBreakers.ReplaceAllString(name, " ")
+	s = multiSpace.ReplaceAllString(strings.TrimSpace(s), " ")
+	return s
+}
+
 // Create adds a worktree for repo on a fresh atc/<name> branch and
 // returns its path and branch name. Leftover branches/directories from
 // earlier sessions of the same name are skipped with a numeric suffix

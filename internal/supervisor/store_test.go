@@ -11,8 +11,8 @@ import (
 
 func TestAutoName(t *testing.T) {
 	for _, c := range []struct{ prompt, repo, want string }{
-		{"Fix the login flow please", "/home/rodo/atc", "Fix-the-login-flow-please"},
-		{"one two three four five six seven eight", "/r", "one-two-three-four-five-six"}, // capped to 6 words
+		{"Fix the login flow please", "/home/rodo/atc", "Fix the login flow please"},     // spaces kept
+		{"one two three four five six seven eight", "/r", "one two three four five six"}, // capped to 6 words
 		{"", "/home/rodo/Development/atc", "atc"},                                        // no prompt → repo base
 		{"   ", "/x/my-repo", "my-repo"},
 	} {
@@ -47,11 +47,17 @@ func TestRename(t *testing.T) {
 	b := &Session{Name: "beta", id: "b1", status: StatusWorking}
 	s.sessions = []*Session{a, b}
 
-	if err := s.Rename(a, "Fancy Name!"); err != nil {
+	if err := s.Rename(a, "  My  Fancy   Name  "); err != nil {
 		t.Fatalf("rename: %v", err)
 	}
-	if a.View().Name != "Fancy-Name" {
-		t.Errorf("name not slugged: %q", a.View().Name)
+	if a.View().Name != "My Fancy Name" { // spaces kept, trimmed & collapsed
+		t.Errorf("name not cleaned: %q", a.View().Name)
+	}
+	if err := s.Rename(a, "a/b\\c"); err != nil { // path separators become spaces
+		t.Fatalf("rename with separators: %v", err)
+	}
+	if a.View().Name != "a b c" {
+		t.Errorf("separators not stripped: %q", a.View().Name)
 	}
 	if err := s.Rename(a, "beta"); err == nil {
 		t.Error("rename onto an existing name should error")

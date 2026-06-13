@@ -277,7 +277,7 @@ func (m *Model) updateBoard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.input.Focus()
 		}
 	case "n":
-		m.form = newSessionForm(m.cfg, m.sup.Backends())
+		m.form = newSessionForm(m.cfg, m.sup.Backends(), m.sup.PreferredBackend())
 		m.mode = modeNew
 		return m, textinput.Blink
 	case "a":

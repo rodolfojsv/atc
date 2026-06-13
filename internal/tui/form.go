@@ -55,7 +55,7 @@ func inputForRow(row int) int {
 	return -1
 }
 
-func newSessionForm(cfg *config.Config, backends []string) sessionForm {
+func newSessionForm(cfg *config.Config, backends []string, defaultBackend string) sessionForm {
 	name := textinput.New()
 	name.Placeholder = "auto"
 	name.CharLimit = 48
@@ -85,6 +85,12 @@ func newSessionForm(cfg *config.Config, backends []string) sessionForm {
 		repos:    cfg.Repos,
 		presets:  presets,
 		worktree: true,
+	}
+	for i, b := range backends {
+		if b == defaultBackend {
+			f.backend = i
+			break
+		}
 	}
 	switch {
 	case cfg.DefaultRepo != "":
