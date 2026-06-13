@@ -347,6 +347,11 @@ function api(path, opts = {}) {
 }
 function esc(s) { const d = document.createElement('span'); d.textContent = s == null ? '' : s; return d.innerHTML; }
 function escAttr(s) { return esc(s).replace(/"/g, '&quot;'); }
+// jsArg makes a value safe to drop inside a single-quoted JS string that
+// itself lives in a double-quoted HTML attribute (e.g. onclick="fn('…')").
+// Escapes JS string-breakers first, then HTML attribute-breakers — so
+// session names with ' or " can't break the handler.
+function jsArg(s) { return escAttr(String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/'/g, "\\'")); }
 function live(on) { $('live').classList.toggle('live', on); }
 
 // ---- modal overlay (diff, link preview) ----
@@ -638,8 +643,8 @@ function groupSessions(list) {
 }
 function cardHTML(s) {
   return `
-    <div class="card" onclick="openSession('${esc(s.name)}')">
-      <button class="del" data-name="${esc(s.name)}" title="Hold to delete" aria-label="Hold to delete">
+    <div class="card" onclick="openSession('${jsArg(s.name)}')">
+      <button class="del" data-name="${escAttr(s.name)}" title="Hold to delete" aria-label="Hold to delete">
         <svg class="delsvg" viewBox="0 0 24 24"><circle class="ring" cx="12" cy="12" r="9"/></svg>
         <span class="xmark">✕</span>
       </button>
@@ -649,9 +654,9 @@ function cardHTML(s) {
         <span class="tag">${esc(s.backend)}${s.model ? ' · ' + esc(s.model) : ''}${s.readOnly ? ' · 🔒' : ''}${s.autoApprove ? ' · ⚡' : ''}</span>
         <span class="spacer" style="flex:1"></span>
         <button class="chip pin${s.pinned ? ' on' : ''}" title="${s.pinned ? 'Unpin' : 'Pin'}"
-          onclick="event.stopPropagation(); togglePin('${esc(s.name)}', ${!s.pinned})">📌</button>
+          onclick="event.stopPropagation(); togglePin('${jsArg(s.name)}', ${!s.pinned})">📌</button>
         <button class="chip" title="Set category"
-          onclick="event.stopPropagation(); setCategory('${esc(s.name)}')">${s.category ? esc(s.category) : '+ category'}</button>
+          onclick="event.stopPropagation(); setCategory('${jsArg(s.name)}')">${s.category ? esc(s.category) : '+ category'}</button>
       </div>
       <div class="sub">${esc(s.repo)}${s.branch ? ' @ ' + esc(s.branch) : ''}${cost(s) ? ' · ' + cost(s) : ''}</div>
       ${s.pending ? `<div class="last alert">⚠ ${esc(s.pending.summary)}</div>`
