@@ -64,13 +64,16 @@ type Config struct {
 	// Repos are the repositories you usually work with; the new-session
 	// form offers them as a picker. DefaultRepo pre-fills the repo field
 	// (falls back to the first of Repos).
-	Repos       []string            `json:"repos,omitempty"`
-	DefaultRepo string              `json:"defaultRepo,omitempty"`
-	Model       string              `json:"model,omitempty"`
-	Presets     map[string]Preset   `json:"presets,omitempty"`
-	Hooks       map[string][]string `json:"hooks,omitempty"`
-	Schedules   []Schedule          `json:"schedules,omitempty"`
-	Web         Web                 `json:"web,omitempty"`
+	Repos       []string `json:"repos,omitempty"`
+	DefaultRepo string   `json:"defaultRepo,omitempty"`
+	// DefaultBackend pre-selects the backend in the new-session forms
+	// ("copilot" or "claude"); empty falls back to the built-in default.
+	DefaultBackend string              `json:"defaultBackend,omitempty"`
+	Model          string              `json:"model,omitempty"`
+	Presets        map[string]Preset   `json:"presets,omitempty"`
+	Hooks          map[string][]string `json:"hooks,omitempty"`
+	Schedules      []Schedule          `json:"schedules,omitempty"`
+	Web            Web                 `json:"web,omitempty"`
 }
 
 // Path returns the default config file location:

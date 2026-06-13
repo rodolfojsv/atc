@@ -204,6 +204,9 @@ func (s *Supervisor) NewSession(opts NewSessionOptions) (*Session, error) {
 		backendName = preset.Backend
 	}
 	if backendName == "" {
+		backendName = s.cfg.DefaultBackend
+	}
+	if backendName == "" {
 		backendName = DefaultBackend
 	}
 	if _, err := s.backend(backendName); err != nil {

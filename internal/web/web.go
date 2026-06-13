@@ -201,10 +201,21 @@ func (s *Server) handleMeta(w http.ResponseWriter, _ *http.Request) {
 	for name := range s.cfg.Presets {
 		presets = append(presets, name)
 	}
+	defaultRepo := s.cfg.DefaultRepo
+	if defaultRepo == "" && len(s.cfg.Repos) > 0 {
+		defaultRepo = s.cfg.Repos[0]
+	}
+	defaultBackend := s.cfg.DefaultBackend
+	if defaultBackend == "" {
+		defaultBackend = supervisor.DefaultBackend
+	}
 	writeJSON(w, map[string]any{
-		"repos":    s.cfg.Repos,
-		"backends": s.sup.Backends(),
-		"presets":  presets,
+		"repos":          s.cfg.Repos,
+		"backends":       s.sup.Backends(),
+		"presets":        presets,
+		"defaultRepo":    defaultRepo,
+		"defaultBackend": defaultBackend,
+		"defaultModel":   s.cfg.Model,
 		"spend": map[string]any{
 			"todayUsd": today.CostUSD, "todayAiu": today.NanoAiu / 1e9,
 			"monthUsd": month.CostUSD, "monthAiu": month.NanoAiu / 1e9,
