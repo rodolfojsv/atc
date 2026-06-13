@@ -278,6 +278,7 @@ func (s *Supervisor) spec(sess *Session, model string) agent.SessionSpec {
 		ReadOnly:     sess.ReadOnly,
 		OnEvent:      func(e agent.Event) { s.handleEvent(sess, e) },
 		OnPermission: s.permissionFunc(sess),
+		OnQuestion:   s.questionFunc(sess),
 	}
 }
 
@@ -548,8 +549,18 @@ func (s *Supervisor) WatchStore(ctx context.Context, interval time.Duration) {
 	}
 }
 
-// Prompt sends a user message to the session.
+// Prompt sends a user message to the session. When the agent is waiting
+// on a question (Copilot's ask_user), the message answers that question
+// instead of starting a new turn.
 func (s *Supervisor) Prompt(sess *Session, text string) error {
+	if sess.HasQuestion() {
+		sess.appendEntry(EntryUser, text)
+		sess.addHistory(text)
+		sess.answerQuestion(text)
+		sess.setStatus(StatusWorking)
+		s.poke()
+		return nil
+	}
 	ag := sess.agentSession()
 	if ag == nil {
 		return errors.New("session is still starting")
@@ -564,6 +575,41 @@ func (s *Supervisor) Prompt(sess *Session, text string) error {
 		s.poke()
 	}
 	return err
+}
+
+// questionFunc surfaces an agent's ask-the-user request and blocks until
+// the user's next message answers it (or the session is cancelled). Only
+// backends that can take an answer (Copilot) call this; Claude headless
+// renders the question instead.
+func (s *Supervisor) questionFunc(sess *Session) agent.QuestionFunc {
+	return func(q agent.Question) (string, bool) {
+		ch := sess.askQuestion(q)
+		sess.appendEntry(EntrySystem, formatQuestion(q))
+		sess.setStatus(StatusWaiting)
+		s.log.Log(logx.Info, "session.question", map[string]any{
+			"session": sess.Name, "options": len(q.Options), "freeform": q.AllowFreeform,
+		})
+		s.publish(bus.WaitingOnPermission, sess, map[string]any{"kind": "question", "summary": agent.Truncate(q.Prompt, 120)})
+		s.poke()
+		ans, ok := <-ch
+		s.poke()
+		return ans, ok
+	}
+}
+
+// formatQuestion renders an agent question for the transcript so the user
+// knows what to answer with their next message.
+func formatQuestion(q agent.Question) string {
+	var b strings.Builder
+	b.WriteString("❓ " + q.Prompt)
+	for i, opt := range q.Options {
+		b.WriteString(fmt.Sprintf("\n   %d) %s", i+1, opt))
+	}
+	b.WriteString("\n→ reply with your answer")
+	if len(q.Options) > 0 {
+		b.WriteString(" (the option text, or its number)")
+	}
+	return b.String()
 }
 
 // SessionByName finds a session by its (unique) board name.
@@ -692,8 +738,9 @@ func (s *Supervisor) Abort(sess *Session) {
 		defer cancel()
 		_ = ag.Abort(ctx)
 	}
-	// Unblock a waiting permission handler, if any.
+	// Unblock a waiting permission handler or question, if any.
 	sess.RespondAll(agent.Cancel, "")
+	sess.cancelQuestion()
 }
 
 // Kill tears a session down, forgets it in the resume store, and
@@ -701,6 +748,7 @@ func (s *Supervisor) Abort(sess *Session) {
 func (s *Supervisor) Kill(sess *Session, removeWorktree bool) {
 	s.log.Log(logx.Info, "session.kill", map[string]any{"session": sess.Name, "removeWorktree": removeWorktree})
 	sess.RespondAll(agent.Cancel, "")
+	sess.cancelQuestion()
 	if ag := sess.agentSession(); ag != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		_ = ag.Abort(ctx)
@@ -740,6 +788,7 @@ func (s *Supervisor) Stop() {
 	s.persist()
 	for _, sess := range s.Sessions() {
 		sess.RespondAll(agent.Cancel, "")
+		sess.cancelQuestion()
 		if ag := sess.agentSession(); ag != nil {
 			_ = ag.Close()
 		}

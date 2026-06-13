@@ -112,6 +112,12 @@
   #perm .q { font-weight: 600; }
   #perm pre { white-space: pre-wrap; word-break: break-word; color: var(--dim); font-size: .82em; margin: .5em 0; max-height: 8em; overflow: auto; }
   #perm .btns { display: flex; gap: .5em; flex-wrap: wrap; }
+  #ask { background: linear-gradient(180deg, #1f2a3a, #1b2433); border: 1px solid var(--accent);
+    border-radius: var(--r); padding: .8em; margin: .7em 0; position: sticky; top: 56px; z-index: 10; }
+  #ask .q { font-weight: 600; margin-bottom: .5em; }
+  #ask .btns { display: flex; gap: .5em; flex-wrap: wrap; }
+  #ask .btns button { border-color: var(--accent); color: #cdddff; }
+  #ask .hint { color: var(--dim); font-size: .82em; margin-top: .5em; }
 
   /* composer (focus + new) */
   .composer { position: sticky; bottom: 0; background: linear-gradient(180deg, transparent, var(--bg) 22%);
@@ -217,6 +223,7 @@
     <!-- FOCUS -->
     <div id="focus" class="hidden">
       <div id="perm" class="hidden"></div>
+      <div id="ask" class="hidden"></div>
       <div id="transcript"></div>
       <div class="composer">
         <div class="thumbs" id="thumbs"></div>
@@ -442,6 +449,21 @@ async function pollFocus() {
     if (stick) window.scrollTo(0, document.body.scrollHeight);
   }
 
+  // agent question (Copilot ask_user): quick-reply buttons + freeform box
+  const ask = $('ask');
+  if (s.question) {
+    ask.classList.remove('hidden');
+    const opts = (s.question.options || []).map((o, i) =>
+      `<button onclick="answerQuestion(${i})">${esc(o)}</button>`).join('');
+    ask.innerHTML = `<div class="q">❓ ${esc(s.question.prompt)}</div>` +
+      (opts ? `<div class="btns">${opts}</div>` : '') +
+      `<div class="hint">${s.question.allowFreeform !== false ? 'Tap an option or type your answer below.' : 'Tap an option above.'}</div>`;
+    window._askOptions = s.question.options || [];
+  } else {
+    ask.classList.add('hidden');
+    window._askOptions = null;
+  }
+
   const perm = $('perm');
   if (s.pending) {
     perm.classList.remove('hidden');
@@ -471,6 +493,15 @@ function renderEntry(e) {
   return `<div class="e ${cls}">${esc(e.text)}${cursor}</div>`;
 }
 function setStat(msg, isErr) { const el = $('stat'); el.textContent = msg || ''; el.className = isErr ? 'err' : ''; }
+
+// answerQuestion sends the chosen option text as the answer (which the
+// server routes to the waiting agent question).
+function answerQuestion(i) {
+  const opts = window._askOptions || [];
+  if (i < 0 || i >= opts.length) return;
+  $('ask').classList.add('hidden');
+  sendMessage(opts[i], []);
+}
 
 async function respond(d) {
   try { await api('/api/sessions/' + encodeURIComponent(current) + '/respond',

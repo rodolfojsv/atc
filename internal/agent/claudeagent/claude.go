@@ -24,6 +24,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"sync"
 
 	"github.com/google/uuid"
@@ -330,6 +331,16 @@ func messageEvents(content json.RawMessage) []agent.Event {
 				out = append(out, agent.Event{Type: agent.EventMessage, Text: b.Text})
 			}
 		case "tool_use":
+			// Claude Code's headless CLI auto-dismisses AskUserQuestion
+			// (no interactive UI to answer it), so atc can't feed an
+			// answer back. Render the question instead, so the user sees
+			// it and replies in their next message.
+			if b.Name == "AskUserQuestion" {
+				if q := formatAskUserQuestion(b.Input); q != "" {
+					out = append(out, agent.Event{Type: agent.EventMessage, Text: q})
+				}
+				continue
+			}
 			out = append(out, agent.Event{Type: agent.EventToolStart, Text: agent.ToolSummary(b.Name, anyMap(b.Input))})
 		}
 	}
@@ -341,6 +352,48 @@ func anyMap(m map[string]any) any {
 		return nil
 	}
 	return m
+}
+
+// formatAskUserQuestion turns AskUserQuestion's input
+// ({questions:[{header,question,options:[{label,description}]}]}) into a
+// readable markdown prompt for the transcript.
+func formatAskUserQuestion(input map[string]any) string {
+	qs, _ := input["questions"].([]any)
+	var b strings.Builder
+	for _, qi := range qs {
+		m, ok := qi.(map[string]any)
+		if !ok {
+			continue
+		}
+		header, _ := m["header"].(string)
+		question, _ := m["question"].(string)
+		if b.Len() > 0 {
+			b.WriteString("\n\n")
+		}
+		b.WriteString("**❓ ")
+		if header != "" {
+			b.WriteString(header + ": ")
+		}
+		b.WriteString(question + "**")
+		opts, _ := m["options"].([]any)
+		for _, oi := range opts {
+			om, ok := oi.(map[string]any)
+			if !ok {
+				continue
+			}
+			label, _ := om["label"].(string)
+			desc, _ := om["description"].(string)
+			b.WriteString("\n- **" + label + "**")
+			if desc != "" {
+				b.WriteString(" — " + desc)
+			}
+		}
+	}
+	if b.Len() == 0 {
+		return ""
+	}
+	b.WriteString("\n\n_Reply with your choice (headless Claude can't show the picker, so just type it)._")
+	return b.String()
 }
 
 func firstModel(raw json.RawMessage) string {

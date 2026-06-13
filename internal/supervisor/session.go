@@ -1,6 +1,7 @@
 package supervisor
 
 import (
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -73,6 +74,14 @@ type PermissionView struct {
 	Detail  []string
 }
 
+// QuestionView is the UI-safe copy of a pending agent question. When set,
+// the session is waiting for the user's next message as the answer.
+type QuestionView struct {
+	Prompt        string
+	Options       []string
+	AllowFreeform bool
+}
+
 const (
 	maxTranscriptEntries = 1500
 	maxHistory           = 100
@@ -108,7 +117,9 @@ type Session struct {
 	streamBuf   string // in-flight assistant message (deltas)
 	usage       Usage
 	pending     []*Permission // FIFO queue; index 0 is surfaced in the UI
-	autoApprove bool          // user flipped this session to allow-all at runtime
+	question    *agent.Question
+	questionCh  chan string // the next user message resolves a pending question
+	autoApprove bool        // user flipped this session to allow-all at runtime
 	everWorked  bool
 	lastEvent   time.Time // last backend event; exposes stalls
 	history     []string  // prompts sent, for arrow-up recall
@@ -127,6 +138,7 @@ type SessionView struct {
 	Usage                                              Usage
 	Pending                                            *PermissionView
 	PendingCount                                       int // total queued (incl. the surfaced one)
+	Question                                           *QuestionView
 	AutoApprove                                        bool
 	ReadOnly                                           bool
 	Created                                            time.Time
@@ -193,6 +205,12 @@ func (s *Session) View() SessionView {
 		v.Pending = &PermissionView{Kind: head.Kind, Summary: head.Summary, Detail: append([]string(nil), head.Detail...)}
 		v.PendingCount = len(s.pending)
 	}
+	if s.question != nil {
+		v.Question = &QuestionView{
+			Prompt: s.question.Prompt, AllowFreeform: s.question.AllowFreeform,
+			Options: append([]string(nil), s.question.Options...),
+		}
+	}
 	v.Model = s.usage.Model
 	if v.Model == "" {
 		v.Model = s.Model
@@ -253,6 +271,62 @@ func (s *Session) RespondAll(decision agent.Decision, feedback string) {
 	s.mu.Unlock()
 	for _, p := range ps {
 		p.respond <- permissionAnswer{decision: decision, feedback: feedback}
+	}
+}
+
+// askQuestion records a pending agent question and returns the channel
+// the answer (the user's next message) will arrive on. A closed channel
+// means the question was cancelled.
+func (s *Session) askQuestion(q agent.Question) chan string {
+	ch := make(chan string, 1)
+	s.mu.Lock()
+	s.question = &q
+	s.questionCh = ch
+	s.mu.Unlock()
+	return ch
+}
+
+// HasQuestion reports whether the session is waiting for the user to
+// answer an agent question (so the next message is routed as the answer).
+func (s *Session) HasQuestion() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.question != nil
+}
+
+// answerQuestion resolves a pending question with the user's text. A
+// bare option number ("2") is mapped to that option's text so the
+// backend gets the choice it offered.
+func (s *Session) answerQuestion(answer string) bool {
+	s.mu.Lock()
+	ch := s.questionCh
+	if s.question != nil {
+		answer = resolveChoice(answer, s.question.Options)
+	}
+	s.question, s.questionCh = nil, nil
+	s.mu.Unlock()
+	if ch != nil {
+		ch <- answer
+		return true
+	}
+	return false
+}
+
+func resolveChoice(answer string, options []string) string {
+	if n, err := strconv.Atoi(strings.TrimSpace(answer)); err == nil && n >= 1 && n <= len(options) {
+		return options[n-1]
+	}
+	return answer
+}
+
+// cancelQuestion unblocks a waiting question handler with no answer.
+func (s *Session) cancelQuestion() {
+	s.mu.Lock()
+	ch := s.questionCh
+	s.question, s.questionCh = nil, nil
+	s.mu.Unlock()
+	if ch != nil {
+		close(ch)
 	}
 }
 
