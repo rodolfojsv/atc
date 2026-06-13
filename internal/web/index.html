@@ -247,6 +247,7 @@ if (q.get('token')) { token = q.get('token'); localStorage.setItem('atc-token', 
 const $ = id => document.getElementById(id);
 const fileInput = $('fileInput'), formFile = $('formFile');
 let current = null, currentAuto = false;
+let drafts = {};           // per-session unsent prompt + attachments, kept while the page is open
 let attachments = [];      // focus composer queue
 let formAttachments = [];  // new-session queue
 let pendingFirst = null;   // {name, text, atts} — sent once the session is ready
@@ -362,7 +363,13 @@ async function pollBoard() {
     live(true);
   } catch (e) { live(false); }
 }
+// saveDraft stashes the current session's unsent prompt and attachments
+// so reopening it restores what you were composing.
+function saveDraft() {
+  if (current) drafts[current] = { text: $('prompt').value, atts: attachments.slice() };
+}
 function showBoard() {
+  saveDraft();
   current = null; clearInterval(timer);
   $('focus').classList.add('hidden'); $('board').classList.remove('hidden');
   $('crumb').textContent = ''; $('newBtn').classList.remove('hidden');
@@ -401,10 +408,17 @@ async function createSession() {
 // ---- focus ----
 function isReady(st) { return st !== 'starting'; }
 function openSession(name) {
+  saveDraft();               // preserve whatever we were composing elsewhere
   current = name; clearInterval(timer); lastRender = '';
   $('board').classList.add('hidden'); $('focus').classList.remove('hidden');
   $('newBtn').classList.add('hidden'); $('transcript').innerHTML = '';
   $('stat').textContent = ''; $('stat').className = '';
+  // restore this session's saved draft (empty if none) — also clears any
+  // leftover text/attachments from the session we came from
+  const d = drafts[name] || { text: '', atts: [] };
+  $('prompt').value = d.text || '';
+  attachments = (d.atts || []).slice();
+  autosize($('prompt')); renderThumbs();
   pollFocus(); timer = setInterval(pollFocus, 1000);
 }
 
@@ -520,15 +534,18 @@ document.addEventListener('paste', e => {
   if (into) pasteImages(e, into);
 });
 
-// Esc / Left arrow returns from a session to the board. Ignored while a
-// field is focused (there those keys edit text); Esc first blurs the
-// field so a second Esc goes back.
+// Esc returns to the board from anywhere in a session — including while
+// the message box is focused; the draft is saved and restored on return.
+// Left arrow also goes back, but only when not typing (there it moves
+// the cursor).
 document.addEventListener('keydown', e => {
   if (!current || $('focus').classList.contains('hidden')) return;
   const ae = document.activeElement;
   const typing = ae && (ae.tagName === 'TEXTAREA' || ae.tagName === 'INPUT' || ae.tagName === 'SELECT');
   if (e.key === 'Escape') {
-    if (typing) ae.blur(); else { e.preventDefault(); showBoard(); }
+    e.preventDefault();
+    if (ae && ae.blur) ae.blur();
+    showBoard();
   } else if (e.key === 'ArrowLeft' && !typing) {
     e.preventDefault(); showBoard();
   }
@@ -553,6 +570,7 @@ async function sendMessage(text, atts) {
   setStat('sending…');
   try {
     await api('/api/sessions/' + encodeURIComponent(current) + '/prompt', { method: 'POST', body: fd });
+    delete drafts[current]; // sent — nothing left to restore
     setStat(''); pollFocus();
   } catch (e) {
     // session not ready yet — requeue the first message and retry on next poll
