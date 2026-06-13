@@ -1,6 +1,7 @@
 package supervisor
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -8,6 +9,36 @@ import (
 	"github.com/rodolfojsv/atc/internal/config"
 	"time"
 )
+
+func TestReadSessionFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "notes.md"), []byte("# hi"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "sub", "a.md"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(filepath.Dir(dir), "secret.txt"), []byte("nope"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := New(testConfig(t), nil)
+	sess := &Session{Name: "x", Dir: dir, status: StatusDone}
+
+	if name, data, err := s.ReadSessionFile(sess, "notes.md"); err != nil || name != "notes.md" || string(data) != "# hi" {
+		t.Fatalf("relative read: name=%q data=%q err=%v", name, data, err)
+	}
+	if _, _, err := s.ReadSessionFile(sess, filepath.Join(dir, "sub", "a.md")); err != nil {
+		t.Fatalf("absolute-within read should succeed: %v", err)
+	}
+	for _, bad := range []string{"../secret.txt", filepath.Join(filepath.Dir(dir), "secret.txt"), "/etc/hostname", ""} {
+		if _, _, err := s.ReadSessionFile(sess, bad); err == nil {
+			t.Errorf("expected refusal for %q", bad)
+		}
+	}
+}
 
 func TestAutoName(t *testing.T) {
 	for _, c := range []struct{ prompt, repo, want string }{
