@@ -6,6 +6,7 @@ package tui
 import (
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -42,6 +43,8 @@ const (
 	modeQuit
 	modeDiff
 	modeMerge
+	modeCategory
+	modeRename
 )
 
 type Model struct {
@@ -74,6 +77,11 @@ type Model struct {
 	fileListAt  time.Time
 
 	form sessionForm
+
+	// catInput backs the category-assignment modal (the 'c' key);
+	// renameInput backs the rename modal (the 'r' key).
+	catInput    textinput.Model
+	renameInput textinput.Model
 }
 
 func New(sup *supervisor.Supervisor, cfg *config.Config) *Model {
@@ -92,7 +100,13 @@ func New(sup *supervisor.Supervisor, cfg *config.Config) *Model {
 	// Enter is reserved for sending; ctrl+j inserts a manual newline.
 	// Long prompts soft-wrap into a growing paragraph either way.
 	input.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("ctrl+j"))
-	return &Model{sup: sup, cfg: cfg, vpFollow: true, input: input, histIdx: -1}
+	cat := textinput.New()
+	cat.Placeholder = "category (blank = uncategorized)"
+	cat.CharLimit = 40
+	rename := textinput.New()
+	rename.Placeholder = "new name"
+	rename.CharLimit = 48
+	return &Model{sup: sup, cfg: cfg, vpFollow: true, input: input, histIdx: -1, catInput: cat, renameInput: rename}
 }
 
 func (m *Model) Init() tea.Cmd { return nil }
@@ -137,6 +151,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateDiff(msg)
 		case modeMerge:
 			return m.updateMerge(msg)
+		case modeCategory:
+			return m.updateCategory(msg)
+		case modeRename:
+			return m.updateRename(msg)
 		}
 	}
 	return m, nil
@@ -160,23 +178,78 @@ func (m *Model) updateMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		if wheelUp && m.cursor > 0 {
 			m.cursor--
 		}
-		if wheelDown && m.cursor < len(m.sup.Sessions())-1 {
+		if wheelDown && m.cursor < len(m.ordered())-1 {
 			m.cursor++
 		}
 	}
 	return m, nil
 }
 
+// boardGroup is a labeled run of sessions on the board.
+type boardGroup struct {
+	title    string
+	sessions []*supervisor.Session
+}
+
+// groupBoard arranges sessions for display: a Pinned band first (pinned
+// sessions of any category), then one group per category sorted
+// alphabetically with Uncategorized last. Order within a group preserves
+// the supervisor's session order.
+func groupBoard(sessions []*supervisor.Session) []boardGroup {
+	var pinned []*supervisor.Session
+	byCat := map[string][]*supervisor.Session{}
+	var cats []string
+	for _, sess := range sessions {
+		v := sess.View()
+		if v.Pinned {
+			pinned = append(pinned, sess)
+			continue
+		}
+		if _, ok := byCat[v.Category]; !ok {
+			cats = append(cats, v.Category)
+		}
+		byCat[v.Category] = append(byCat[v.Category], sess)
+	}
+	sort.SliceStable(cats, func(i, j int) bool {
+		if (cats[i] == "") != (cats[j] == "") {
+			return cats[j] == "" // Uncategorized ("") sorts last
+		}
+		return cats[i] < cats[j]
+	})
+	var groups []boardGroup
+	if len(pinned) > 0 {
+		groups = append(groups, boardGroup{title: "PINNED", sessions: pinned})
+	}
+	for _, c := range cats {
+		title := c
+		if c == "" {
+			title = "Uncategorized"
+		}
+		groups = append(groups, boardGroup{title: title, sessions: byCat[c]})
+	}
+	return groups
+}
+
+// ordered is the board's sessions flattened in display order, so the
+// cursor indexes the same sequence the board renders.
+func (m *Model) ordered() []*supervisor.Session {
+	var out []*supervisor.Session
+	for _, g := range groupBoard(m.sup.Sessions()) {
+		out = append(out, g.sessions...)
+	}
+	return out
+}
+
 func (m *Model) selected() *supervisor.Session {
-	sessions := m.sup.Sessions()
-	if len(sessions) == 0 || m.cursor >= len(sessions) {
+	ordered := m.ordered()
+	if len(ordered) == 0 || m.cursor >= len(ordered) {
 		return nil
 	}
-	return sessions[m.cursor]
+	return ordered[m.cursor]
 }
 
 func (m *Model) clampCursor() {
-	if n := len(m.sup.Sessions()); m.cursor >= n && n > 0 {
+	if n := len(m.ordered()); m.cursor >= n && n > 0 {
 		m.cursor = n - 1
 	} else if n == 0 {
 		m.cursor = 0
@@ -190,7 +263,7 @@ func (m *Model) updateBoard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.cursor--
 		}
 	case "down", "j":
-		if m.cursor < len(m.sup.Sessions())-1 {
+		if m.cursor < len(m.ordered())-1 {
 			m.cursor++
 		}
 	case "enter":
@@ -239,6 +312,32 @@ func (m *Model) updateBoard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "e":
 		if sess := m.selected(); sess != nil {
 			return m.exportSession(sess)
+		}
+	case "p":
+		if sess := m.selected(); sess != nil {
+			on := !sess.View().Pinned
+			m.sup.SetPinned(sess, on)
+			if on {
+				m.flash = sess.Name + ": pinned"
+			} else {
+				m.flash = sess.Name + ": unpinned"
+			}
+		}
+	case "c":
+		if sess := m.selected(); sess != nil {
+			m.target = sess
+			m.mode = modeCategory
+			m.catInput.SetValue(sess.View().Category)
+			m.catInput.CursorEnd()
+			return m, m.catInput.Focus()
+		}
+	case "r":
+		if sess := m.selected(); sess != nil {
+			m.target = sess
+			m.mode = modeRename
+			m.renameInput.SetValue(sess.Name)
+			m.renameInput.CursorEnd()
+			return m, m.renameInput.Focus()
 		}
 	case "q", "ctrl+c":
 		if m.sup.ActiveCount() > 0 {
@@ -302,6 +401,64 @@ func (m *Model) updateKill(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// updateCategory drives the category-assignment modal: enter commits the
+// typed category (blank clears it), esc cancels. Other keys edit the box.
+func (m *Model) updateCategory(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	sess := m.target
+	if sess == nil {
+		m.mode = modeBoard
+		return m, nil
+	}
+	switch msg.String() {
+	case "enter":
+		cat := strings.TrimSpace(m.catInput.Value())
+		m.sup.SetCategory(sess, cat)
+		if cat == "" {
+			m.flash = sess.Name + ": category cleared"
+		} else {
+			m.flash = sess.Name + ": category “" + cat + "”"
+		}
+		m.catInput.Blur()
+		m.mode = modeBoard
+		return m, nil
+	case "esc":
+		m.catInput.Blur()
+		m.mode = modeBoard
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.catInput, cmd = m.catInput.Update(msg)
+	return m, cmd
+}
+
+// updateRename drives the rename modal: enter commits the new name
+// (errors keep the modal open with the message), esc cancels.
+func (m *Model) updateRename(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	sess := m.target
+	if sess == nil {
+		m.mode = modeBoard
+		return m, nil
+	}
+	switch msg.String() {
+	case "enter":
+		if err := m.sup.Rename(sess, m.renameInput.Value()); err != nil {
+			m.flash = err.Error()
+			return m, nil
+		}
+		m.flash = "renamed to " + sess.Name
+		m.renameInput.Blur()
+		m.mode = modeBoard
+		return m, nil
+	case "esc":
+		m.renameInput.Blur()
+		m.mode = modeBoard
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.renameInput, cmd = m.renameInput.Update(msg)
+	return m, cmd
+}
+
 func (m *Model) updateQuit(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "y":
@@ -335,6 +492,10 @@ func (m *Model) View() string {
 		v := m.target.View()
 		return m.modal(fmt.Sprintf("Commit all changes in %q and merge into %s?", m.target.Name, v.BaseBranch),
 			keybar("y", "merge", "esc", "cancel"))
+	case modeCategory:
+		return m.viewCategory()
+	case modeRename:
+		return m.viewRename()
 	}
 	return m.viewBoard()
 }
@@ -344,61 +505,26 @@ func (m *Model) viewBoard() string {
 	title := styleTitle.Render("atc — agent traffic control")
 	b.WriteString(title + "\n\n")
 
-	sessions := m.sup.Sessions()
-	if len(sessions) == 0 {
+	groups := groupBoard(m.sup.Sessions())
+	if len(groups) == 0 {
 		b.WriteString(styleDim.Render("  no sessions — press ") + styleKey.Render("[n]") + styleDim.Render(" to launch an agent") + "\n")
 	} else {
 		nameW, dirW, tokW, costW, ctxW := 18, 22, 12, 9, 5
 		header := fmt.Sprintf("  %-*s %-*s %-*s %*s %*s %*s  %s",
 			nameW, "SESSION", dirW, "DIR", statusWidth, "STATUS", tokW, "TOKENS", costW, "COST", ctxW, "CTX", "DETAIL")
 		b.WriteString(styleHeader.Render(header) + "\n")
-		for i, sess := range sessions {
-			v := sess.View()
-			dir := filepath.Base(v.Dir)
-			if v.Worktree != "" {
-				dir = filepath.Base(v.Repo) + "@" + filepath.Base(v.Worktree)
+		// Section headers appear only once the user has organized things:
+		// a single Uncategorized group renders flat, exactly as before.
+		showHeaders := len(groups) > 1 || groups[0].title != "Uncategorized"
+		idx := 0
+		for _, g := range groups {
+			if showHeaders {
+				b.WriteString(styleSection.Render("  "+g.title) + styleDim.Render(fmt.Sprintf("  (%d)", len(g.sessions))) + "\n")
 			}
-			tokens := "—"
-			if v.Usage.InputTokens+v.Usage.OutputTokens > 0 {
-				tokens = humanTokens(v.Usage.InputTokens) + "↑" + humanTokens(v.Usage.OutputTokens) + "↓"
+			for _, sess := range g.sessions {
+				b.WriteString(m.sessionRow(sess.View(), idx == m.cursor, nameW, dirW, tokW, costW, ctxW) + "\n")
+				idx++
 			}
-			ctx := "—"
-			if v.Usage.TokenLimit > 0 {
-				ctx = fmt.Sprintf("%d%%", v.Usage.CurrentTokens*100/v.Usage.TokenLimit)
-			}
-			detail := v.Intent
-			if v.Status == supervisor.StatusWorking && v.SinceEvent > 2*time.Minute {
-				detail = "⚠ no events for " + v.SinceEvent.Truncate(time.Minute).String() + " — x to abort, or restart atc to reattach"
-			}
-			switch {
-			case v.Pending != nil:
-				detail = styleWaiting.Render(truncate(v.Pending.Summary, m.width-70))
-			case v.Status == supervisor.StatusError:
-				detail = styleErrSt.Render(truncate(v.Err, m.width-70))
-			case detail == "":
-				detail = styleDim.Render(truncate(v.LastLine, m.width-70))
-			default:
-				detail = styleDim.Render(truncate(detail, m.width-70))
-			}
-			marker := ""
-			if v.AutoApprove {
-				marker = " ⚡"
-			}
-			if v.ReadOnly {
-				marker += " 🔒"
-			}
-			name := truncate(v.Name+marker, nameW)
-			if v.AutoApprove {
-				name = styleAuto.Render(name)
-			}
-			row := fmt.Sprintf("  %-*s %-*s %s %*s %*s %*s  %s",
-				nameW, name, dirW, truncate(dir, dirW),
-				padANSI(statusLabel(v.Status), statusWidth),
-				tokW, tokens, costW, humanCost(v.Usage), ctxW, ctx, detail)
-			if i == m.cursor {
-				row = styleSel.Render("▸") + row[1:]
-			}
-			b.WriteString(row + "\n")
 		}
 	}
 
@@ -415,8 +541,60 @@ func (m *Model) viewBoard() string {
 	}
 	b.WriteString(footer + "\n")
 	b.WriteString("\n" + keybar(
-		"enter", "attach", "n", "new", "a", "approve", "d", "diff", "e", "export", "A", "auto⚡", "x", "abort", "K", "kill", "q", "quit"))
+		"enter", "attach", "n", "new", "a", "approve", "p", "pin", "c", "category", "r", "rename", "d", "diff", "e", "export", "A", "auto⚡", "x", "abort", "K", "kill", "q", "quit"))
 	return b.String()
+}
+
+// sessionRow renders one board row for a session view.
+func (m *Model) sessionRow(v supervisor.SessionView, selected bool, nameW, dirW, tokW, costW, ctxW int) string {
+	dir := filepath.Base(v.Dir)
+	if v.Worktree != "" {
+		dir = filepath.Base(v.Repo) + "@" + filepath.Base(v.Worktree)
+	}
+	tokens := "—"
+	if v.Usage.InputTokens+v.Usage.OutputTokens > 0 {
+		tokens = humanTokens(v.Usage.InputTokens) + "↑" + humanTokens(v.Usage.OutputTokens) + "↓"
+	}
+	ctx := "—"
+	if v.Usage.TokenLimit > 0 {
+		ctx = fmt.Sprintf("%d%%", v.Usage.CurrentTokens*100/v.Usage.TokenLimit)
+	}
+	detail := v.Intent
+	if v.Status == supervisor.StatusWorking && v.SinceEvent > 2*time.Minute {
+		detail = "⚠ no events for " + v.SinceEvent.Truncate(time.Minute).String() + " — x to abort, or restart atc to reattach"
+	}
+	switch {
+	case v.Pending != nil:
+		detail = styleWaiting.Render(truncate(v.Pending.Summary, m.width-70))
+	case v.Status == supervisor.StatusError:
+		detail = styleErrSt.Render(truncate(v.Err, m.width-70))
+	case detail == "":
+		detail = styleDim.Render(truncate(v.LastLine, m.width-70))
+	default:
+		detail = styleDim.Render(truncate(detail, m.width-70))
+	}
+	marker := ""
+	if v.Pinned {
+		marker += " 📌"
+	}
+	if v.AutoApprove {
+		marker += " ⚡"
+	}
+	if v.ReadOnly {
+		marker += " 🔒"
+	}
+	name := truncate(v.Name+marker, nameW)
+	if v.AutoApprove {
+		name = styleAuto.Render(name)
+	}
+	row := fmt.Sprintf("  %-*s %-*s %s %*s %*s %*s  %s",
+		nameW, name, dirW, truncate(dir, dirW),
+		padANSI(statusLabel(v.Status), statusWidth),
+		tokW, tokens, costW, humanCost(v.Usage), ctxW, ctx, detail)
+	if selected {
+		row = styleSel.Render("▸") + row[1:]
+	}
+	return row
 }
 
 func (m *Model) viewPerm() string {
@@ -440,6 +618,26 @@ func (m *Model) viewPerm() string {
 	}
 	lines = append(lines, "", keybar("y", "approve once", "s", "always (this kind, this session)", "a", "approve + auto⚡", "n", "deny", "esc", "back"))
 	return m.center(styleModal.Width(min(m.width-4, 100)).Render(strings.Join(lines, "\n")))
+}
+
+func (m *Model) viewCategory() string {
+	title := "Category for " + m.target.Name
+	lines := []string{styleHeader.Render(title), "", m.catInput.View()}
+	if existing := m.sup.Categories(); len(existing) > 0 {
+		lines = append(lines, "", styleDim.Render("in use: "+strings.Join(existing, ", ")))
+	}
+	lines = append(lines, "", keybar("enter", "set", "esc", "cancel"))
+	return m.center(styleModal.Width(min(m.width-4, 60)).Render(strings.Join(lines, "\n")))
+}
+
+func (m *Model) viewRename() string {
+	lines := []string{
+		styleHeader.Render("Rename " + m.target.Name), "",
+		m.renameInput.View(),
+		"", styleDim.Render("worktree & branch keep their original names"),
+		"", keybar("enter", "rename", "esc", "cancel"),
+	}
+	return m.center(styleModal.Width(min(m.width-4, 60)).Render(strings.Join(lines, "\n")))
 }
 
 func (m *Model) modal(title, footer string) string {

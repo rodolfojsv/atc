@@ -47,6 +47,12 @@ func Write(dir string, v supervisor.SessionView, entries []supervisor.Entry) (st
 		fmt.Fprintf(&b, "model: %s\n", v.Usage.Model)
 	}
 	fmt.Fprintf(&b, "status: %s\n", v.Status)
+	if v.Category != "" {
+		fmt.Fprintf(&b, "category: %s\n", v.Category)
+	}
+	if v.Pinned {
+		b.WriteString("pinned: true\n")
+	}
 	fmt.Fprintf(&b, "tokens: %d in / %d out\n", v.Usage.InputTokens, v.Usage.OutputTokens)
 	if v.Usage.NanoAiu > 0 {
 		fmt.Fprintf(&b, "aic: %.3f\n", v.Usage.NanoAiu/1e9)

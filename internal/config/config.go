@@ -69,6 +69,11 @@ type Config struct {
 	// DefaultBackend pre-selects the backend in the new-session forms
 	// ("copilot" or "claude"); empty falls back to the built-in default.
 	DefaultBackend string `json:"defaultBackend,omitempty"`
+	// CategoryByRepo overrides the default board category for new
+	// sessions, keyed by either the repo's absolute path or its base
+	// directory name (e.g. {"smib-12362": "smib"} groups several repos
+	// under one category). Unmatched repos default to their base name.
+	CategoryByRepo map[string]string `json:"categoryByRepo,omitempty"`
 	// DefaultAutoApprove starts new sessions in allow-all (the ⚡ auto
 	// state) without a per-session toggle. Deny-list still gates Copilot;
 	// for Claude this means the process spawns in bypassPermissions.

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -168,6 +169,8 @@ func (s *Supervisor) ActiveCount() int {
 
 type NewSessionOptions struct {
 	Name        string
+	NameHint    string // derives an auto-name when Name is empty; never sent to the agent (the web form passes its first prompt here)
+	Category    string // board category; empty defaults to the repo (see defaultCategory)
 	Repo        string // repo or plain directory the agent runs in
 	UseWorktree bool
 	Backend     string // "copilot" (default) or "claude"
@@ -216,7 +219,7 @@ func (s *Supervisor) NewSession(opts NewSessionOptions) (*Session, error) {
 
 	name := wt.Slug(opts.Name)
 	if opts.Name == "" {
-		name = fmt.Sprintf("session-%s", time.Now().Format("1504-05"))
+		name = autoName(firstNonEmpty(opts.Prompt, opts.NameHint), repo)
 	}
 	name = s.uniqueName(name)
 
@@ -228,11 +231,17 @@ func (s *Supervisor) NewSession(opts NewSessionOptions) (*Session, error) {
 		model = s.cfg.Model
 	}
 
+	category := opts.Category
+	if category == "" {
+		category = s.defaultCategory(repo)
+	}
+
 	autoApprove := opts.AutoApprove || s.cfg.DefaultAutoApprove
 	sess := &Session{
 		Name: name, Repo: repo, Dir: repo, Backend: backendName,
 		Preset: presetName, ReadOnly: opts.ReadOnly, Model: model,
 		Created: time.Now(), status: StatusStarting, autoApprove: autoApprove,
+		category: category,
 	}
 	s.mu.Lock()
 	s.sessions = append(s.sessions, sess)
@@ -241,6 +250,57 @@ func (s *Supervisor) NewSession(opts NewSessionOptions) (*Session, error) {
 
 	go s.launch(sess, model, opts.Prompt, opts.UseWorktree)
 	return sess, nil
+}
+
+// defaultCategory picks the board category for a new session when the
+// caller didn't set one: a config override keyed by the repo's absolute
+// path or base name, else the repo's base directory name. The user can
+// re-categorize afterward with SetCategory.
+func (s *Supervisor) defaultCategory(repo string) string {
+	if c, ok := s.cfg.CategoryByRepo[repo]; ok {
+		return c
+	}
+	base := filepath.Base(repo)
+	if c, ok := s.cfg.CategoryByRepo[base]; ok {
+		return c
+	}
+	if base == "." || base == string(filepath.Separator) {
+		return ""
+	}
+	return base
+}
+
+// autoName derives a friendly session name when the user didn't supply
+// one: the first few words of the first prompt, else the repo's base
+// name, else a short timestamp. The caller still de-dupes the result.
+func autoName(prompt, repo string) string {
+	if words := strings.Fields(prompt); len(words) > 0 {
+		if len(words) > 6 {
+			words = words[:6]
+		}
+		if s := capLen(wt.Slug(strings.Join(words, " ")), 40); s != "session" {
+			return s
+		}
+	}
+	if repo != "" {
+		if s := wt.Slug(filepath.Base(repo)); s != "session" {
+			return s
+		}
+	}
+	return fmt.Sprintf("session-%s", time.Now().Format("1504-05"))
+}
+
+// capLen trims a slug to at most n runes at a dash boundary when possible.
+func capLen(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	cut := string(r[:n])
+	if i := strings.LastIndexByte(cut, '-'); i > 0 {
+		cut = cut[:i]
+	}
+	return strings.Trim(cut, "-.")
 }
 
 func (s *Supervisor) uniqueName(name string) string {
@@ -362,8 +422,8 @@ func (s *Supervisor) ResumeAll() int {
 			Worktree: sv.Worktree, Branch: sv.Branch, Backend: backendName,
 			Preset: sv.Preset, ReadOnly: sv.ReadOnly, Model: sv.Model,
 			Created: sv.Created, BaseBranch: sv.BaseBranch, BaseCommit: sv.BaseCommit,
-			autoApprove: sv.AutoApprove,
-			status:      StatusStarting, id: sv.ID,
+			autoApprove: sv.AutoApprove, pinned: sv.Pinned, category: sv.Category,
+			status: StatusStarting, id: sv.ID,
 		}
 		s.mu.Lock()
 		s.sessions = append(s.sessions, sess)
@@ -476,7 +536,8 @@ func (s *Supervisor) persist() {
 				Worktree: sess.Worktree, Branch: sess.Branch, Backend: sess.Backend,
 				Preset: sess.Preset, Model: firstNonEmpty(sess.usage.Model, sess.Model), ReadOnly: sess.ReadOnly,
 				AutoApprove: sess.autoApprove,
-				BaseBranch:  sess.BaseBranch, BaseCommit: sess.BaseCommit,
+				Pinned:      sess.pinned, Category: sess.category,
+				BaseBranch: sess.BaseBranch, BaseCommit: sess.BaseCommit,
 				Status: string(sess.status), Created: sess.Created,
 				InTokens: sess.usage.InputTokens, OutTokens: sess.usage.OutputTokens,
 				NanoAiu: sess.usage.NanoAiu, CostUSD: sess.usage.CostUSD,
@@ -536,6 +597,7 @@ func (s *Supervisor) WatchStore(ctx context.Context, interval time.Duration) {
 				Worktree: sv.Worktree, Branch: sv.Branch, Backend: backendName,
 				Preset: sv.Preset, ReadOnly: sv.ReadOnly, Model: sv.Model,
 				Created: sv.Created, BaseBranch: sv.BaseBranch, BaseCommit: sv.BaseCommit,
+				pinned: sv.Pinned, category: sv.Category,
 				status: StatusStarting, id: sv.ID,
 			}
 			s.mu.Lock()
@@ -699,6 +761,66 @@ func (s *Supervisor) saveAttachments(sess *Session, atts []agent.Attachment) ([]
 		paths = append(paths, filepath.Join(".atc-attachments", name))
 	}
 	return paths, nil
+}
+
+// Rename changes a session's board name. The worktree, branch and
+// resume ID are physical artifacts created at launch and are left
+// untouched — only the display name changes. Returns an error if the
+// new name (after slugging) collides with another live session.
+func (s *Supervisor) Rename(sess *Session, newName string) error {
+	if strings.TrimSpace(newName) == "" {
+		return errors.New("name cannot be empty")
+	}
+	slug := wt.Slug(newName)
+	s.mu.Lock()
+	for _, other := range s.sessions {
+		if other != sess && other.Name == slug {
+			s.mu.Unlock()
+			return fmt.Errorf("a session named %q already exists", slug)
+		}
+	}
+	s.mu.Unlock()
+	sess.mu.Lock()
+	old := sess.Name
+	sess.Name = slug
+	sess.mu.Unlock()
+	if slug != old {
+		s.log.Log(logx.Info, "session.rename", map[string]any{"from": old, "to": slug})
+	}
+	s.persist()
+	s.poke()
+	return nil
+}
+
+// SetPinned flips a session's pinned flag — board organization only,
+// no effect on the agent — and persists it so it survives a restart.
+func (s *Supervisor) SetPinned(sess *Session, on bool) {
+	sess.setPinned(on)
+	s.persist()
+	s.poke()
+}
+
+// SetCategory assigns a session's category (empty clears it to
+// uncategorized), trimming surrounding whitespace, and persists it.
+func (s *Supervisor) SetCategory(sess *Session, category string) {
+	sess.setCategory(strings.TrimSpace(category))
+	s.persist()
+	s.poke()
+}
+
+// Categories returns the distinct non-empty categories currently in use,
+// sorted — for the new-session form, the TUI picker and the web sidebar.
+func (s *Supervisor) Categories() []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, sess := range s.Sessions() {
+		if c := sess.View().Category; c != "" && !seen[c] {
+			seen[c] = true
+			out = append(out, c)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Note drops an informational line into the session transcript.
