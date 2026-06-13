@@ -220,10 +220,7 @@ func (s *Server) handleMeta(w http.ResponseWriter, _ *http.Request) {
 	if defaultRepo == "" && len(s.cfg.Repos) > 0 {
 		defaultRepo = s.cfg.Repos[0]
 	}
-	defaultBackend := s.cfg.DefaultBackend
-	if defaultBackend == "" {
-		defaultBackend = supervisor.DefaultBackend
-	}
+	defaultBackend := s.sup.PreferredBackend()
 	writeJSON(w, map[string]any{
 		"repos":              s.cfg.Repos,
 		"backends":           s.sup.Backends(),

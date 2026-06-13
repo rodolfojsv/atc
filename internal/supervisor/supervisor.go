@@ -42,6 +42,10 @@ type Supervisor struct {
 	ledger   *spend.Ledger
 	log      *logx.Logger
 
+	prefsMu    sync.Mutex
+	prefsStore prefsStore
+	prefs      prefs
+
 	notifyMu      sync.Mutex
 	notify        func()
 	notifyPending bool
@@ -59,18 +63,21 @@ func New(cfg *config.Config, b *bus.Bus) *Supervisor {
 		sdkLogLevel = "debug"
 	}
 	log.Log(logx.Info, "atc.start", map[string]any{"logLevel": cfg.LogLevel})
+	ps := defaultPrefsStore()
 	return &Supervisor{
 		cfg: cfg,
 		backends: map[string]agent.Backend{
 			"copilot": copilotagent.New(sdkLogLevel),
 			"claude":  claudeagent.New(),
 		},
-		killed: map[string]bool{},
-		trees:  wt.Manager{Root: cfg.WorktreeRoot},
-		bus:    b,
-		store:  defaultStore(),
-		ledger: spend.Open(spendPath()),
-		log:    log,
+		killed:     map[string]bool{},
+		trees:      wt.Manager{Root: cfg.WorktreeRoot},
+		bus:        b,
+		store:      defaultStore(),
+		ledger:     spend.Open(spendPath()),
+		log:        log,
+		prefsStore: ps,
+		prefs:      ps.load(),
 	}
 }
 
@@ -103,6 +110,37 @@ func (s *Supervisor) Backends() []string {
 		}
 	}
 	return names
+}
+
+// PreferredBackend is what a new-session form should default to: the
+// last backend the user actually launched, else the configured default,
+// else the built-in default. Lets the choice stick across restarts
+// without editing config.
+func (s *Supervisor) PreferredBackend() string {
+	s.prefsMu.Lock()
+	last := s.prefs.LastBackend
+	s.prefsMu.Unlock()
+	if _, ok := s.backends[last]; ok {
+		return last
+	}
+	if _, ok := s.backends[s.cfg.DefaultBackend]; ok {
+		return s.cfg.DefaultBackend
+	}
+	return DefaultBackend
+}
+
+// rememberBackend records the backend just launched so the next new
+// session defaults to it.
+func (s *Supervisor) rememberBackend(name string) {
+	s.prefsMu.Lock()
+	if s.prefs.LastBackend == name {
+		s.prefsMu.Unlock()
+		return
+	}
+	s.prefs.LastBackend = name
+	p := s.prefs
+	s.prefsMu.Unlock()
+	s.prefsStore.save(p)
 }
 
 func (s *Supervisor) backend(name string) (agent.Backend, error) {
@@ -216,9 +254,10 @@ func (s *Supervisor) NewSession(opts NewSessionOptions) (*Session, error) {
 	if _, err := s.backend(backendName); err != nil {
 		return nil, err
 	}
+	s.rememberBackend(backendName)
 
-	name := wt.Slug(opts.Name)
-	if opts.Name == "" {
+	name := wt.CleanName(opts.Name)
+	if name == "" {
 		name = autoName(firstNonEmpty(opts.Prompt, opts.NameHint), repo)
 	}
 	name = s.uniqueName(name)
@@ -278,29 +317,30 @@ func autoName(prompt, repo string) string {
 		if len(words) > 6 {
 			words = words[:6]
 		}
-		if s := capLen(wt.Slug(strings.Join(words, " ")), 40); s != "session" {
+		if s := capLen(wt.CleanName(strings.Join(words, " ")), 40); s != "" {
 			return s
 		}
 	}
 	if repo != "" {
-		if s := wt.Slug(filepath.Base(repo)); s != "session" {
+		if s := wt.CleanName(filepath.Base(repo)); s != "" {
 			return s
 		}
 	}
 	return fmt.Sprintf("session-%s", time.Now().Format("1504-05"))
 }
 
-// capLen trims a slug to at most n runes at a dash boundary when possible.
+// capLen trims a name to at most n runes, preferring to break at the
+// last word boundary (space, else dash) so it doesn't cut mid-word.
 func capLen(s string, n int) string {
 	r := []rune(s)
 	if len(r) <= n {
 		return s
 	}
 	cut := string(r[:n])
-	if i := strings.LastIndexByte(cut, '-'); i > 0 {
+	if i := strings.LastIndexAny(cut, " -"); i > 0 {
 		cut = cut[:i]
 	}
-	return strings.Trim(cut, "-.")
+	return strings.TrimRight(strings.TrimSpace(cut), "-.")
 }
 
 func (s *Supervisor) uniqueName(name string) string {
@@ -418,7 +458,7 @@ func (s *Supervisor) ResumeAll() int {
 			backendName = DefaultBackend
 		}
 		sess := &Session{
-			Name: s.uniqueName(wt.Slug(sv.Name)), Repo: sv.Repo, Dir: sv.Dir,
+			Name: s.uniqueName(wt.CleanName(sv.Name)), Repo: sv.Repo, Dir: sv.Dir,
 			Worktree: sv.Worktree, Branch: sv.Branch, Backend: backendName,
 			Preset: sv.Preset, ReadOnly: sv.ReadOnly, Model: sv.Model,
 			Created: sv.Created, BaseBranch: sv.BaseBranch, BaseCommit: sv.BaseCommit,
@@ -593,7 +633,7 @@ func (s *Supervisor) WatchStore(ctx context.Context, interval time.Duration) {
 				backendName = DefaultBackend
 			}
 			sess := &Session{
-				Name: s.uniqueName(wt.Slug(sv.Name)), Repo: sv.Repo, Dir: sv.Dir,
+				Name: s.uniqueName(wt.CleanName(sv.Name)), Repo: sv.Repo, Dir: sv.Dir,
 				Worktree: sv.Worktree, Branch: sv.Branch, Backend: backendName,
 				Preset: sv.Preset, ReadOnly: sv.ReadOnly, Model: sv.Model,
 				Created: sv.Created, BaseBranch: sv.BaseBranch, BaseCommit: sv.BaseCommit,
@@ -766,26 +806,26 @@ func (s *Supervisor) saveAttachments(sess *Session, atts []agent.Attachment) ([]
 // Rename changes a session's board name. The worktree, branch and
 // resume ID are physical artifacts created at launch and are left
 // untouched — only the display name changes. Returns an error if the
-// new name (after slugging) collides with another live session.
+// new name (after cleaning) collides with another live session.
 func (s *Supervisor) Rename(sess *Session, newName string) error {
-	if strings.TrimSpace(newName) == "" {
+	clean := wt.CleanName(newName)
+	if clean == "" {
 		return errors.New("name cannot be empty")
 	}
-	slug := wt.Slug(newName)
 	s.mu.Lock()
 	for _, other := range s.sessions {
-		if other != sess && other.Name == slug {
+		if other != sess && other.Name == clean {
 			s.mu.Unlock()
-			return fmt.Errorf("a session named %q already exists", slug)
+			return fmt.Errorf("a session named %q already exists", clean)
 		}
 	}
 	s.mu.Unlock()
 	sess.mu.Lock()
 	old := sess.Name
-	sess.Name = slug
+	sess.Name = clean
 	sess.mu.Unlock()
-	if slug != old {
-		s.log.Log(logx.Info, "session.rename", map[string]any{"from": old, "to": slug})
+	if clean != old {
+		s.log.Log(logx.Info, "session.rename", map[string]any{"from": old, "to": clean})
 	}
 	s.persist()
 	s.poke()
