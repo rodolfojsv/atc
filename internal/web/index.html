@@ -209,7 +209,7 @@
       <div class="composer">
         <div class="thumbs" id="thumbs"></div>
         <div class="inputbar" id="focusBar">
-          <textarea id="prompt" placeholder="Message… (paste an image, ⌘/Ctrl+Enter to send)" rows="1"></textarea>
+          <textarea id="prompt" placeholder="Message… (Enter to send · Ctrl/Shift+Enter for newline)" rows="1"></textarea>
           <button class="icon ghost" title="attach image" onclick="fileInput.click()">📎</button>
           <button class="primary icon" onclick="sendPrompt()" title="send">➤</button>
         </div>
@@ -490,9 +490,25 @@ function sendPrompt() {
 }
 function autosize(t) { t.style.height = 'auto'; t.style.height = Math.min(t.scrollHeight, 9 * 16) + 'px'; }
 $('prompt').addEventListener('input', e => autosize(e.target));
-$('prompt').addEventListener('keydown', e => {
-  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); sendPrompt(); }
-});
+
+// Enter submits; Ctrl/Cmd/Shift+Enter inserts a newline. (isComposing
+// guards IME input so Enter doesn't submit mid-composition.)
+function enterToSubmit(t, submit) {
+  t.addEventListener('keydown', e => {
+    if (e.key !== 'Enter' || e.isComposing) return;
+    e.preventDefault();
+    if (e.ctrlKey || e.metaKey || e.shiftKey) {
+      const a = t.selectionStart, b = t.selectionEnd;
+      t.value = t.value.slice(0, a) + '\n' + t.value.slice(b);
+      t.selectionStart = t.selectionEnd = a + 1;
+      if (t.id === 'prompt') autosize(t);
+    } else {
+      submit();
+    }
+  });
+}
+enterToSubmit($('prompt'), sendPrompt);
+enterToSubmit($('fPrompt'), createSession);
 
 // ---- boot ----
 async function boot() {
