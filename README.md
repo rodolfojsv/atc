@@ -191,6 +191,13 @@ atc serve            # headless: web only, no terminal (laptop-lid-closed case)
 
 Both print a tokenized URL at startup, e.g. `http://127.0.0.1:8787/?token=ab12…`. Open that once and the browser remembers the token. `atc serve` runs the full machinery — sessions resume, schedules fire, hooks run, and permission requests wait for an answer from the browser, exactly like the TUI.
 
+**Sharing sessions between the terminal and the browser.** This comes down to *one process or two*:
+
+- **`atc --serve`** — one process runs the TUI **and** the web server against the same in-memory supervisor. The terminal and the browser show the **same live sessions in real time** (same transcripts streaming, same permission prompts). This is what you want if you're at the machine and also want the phone view. It needs a terminal (the TUI renders there); the web URL is served alongside.
+- **`atc serve` + a separate `atc`** — these are two independent processes. A live agent session is owned by the process that spawned it, so they do **not** stream each other's in-flight sessions. They share only **settled** sessions (done/error) through `~/.atc/sessions.json`: a session finished in one shows up in the other within a few seconds (the same `WatchStore` adoption used for scheduled `atc run` jobs), transcript restored, ready to continue. So a web-created session appears in a later-launched TUI once it settles, and vice versa — just not mid-turn.
+
+Rule of thumb: want both views *live* → run `atc --serve`. Running them as separate processes (e.g. a headless `atc serve` plus an occasional TUI) is fine too; you just get settled-session hand-off rather than live mirroring.
+
 **What you can do from the browser:** see the live board (status, model, cost, pending-permission badges), open a session and watch its transcript stream, send prompts, **approve/deny/always-allow permission requests**, toggle auto-approve, abort, kill, and launch new sessions (repo/backend/model/worktree/read-only).
 
 **Images.** Click 📎 to pick files, or just **paste a screenshot** into the prompt box. For **Claude** sessions the image is inlined into the model's context as a base64 content block — no file written. For backends that can't take inline images (and for non-image files anywhere), the file is saved under `<session dir>/.atc-attachments/` and its path is appended to the prompt so the agent reads it with its file tools. Limits: 6 files/prompt, 10 MB each.
