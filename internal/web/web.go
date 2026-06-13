@@ -100,6 +100,7 @@ func (s *Server) routes() {
 	api("GET /api/sessions/{name}/diff", s.handleDiff)
 	api("POST /api/sessions/{name}/merge", s.handleMerge)
 	api("POST /api/sessions/{name}/model", s.handleModel)
+	api("GET /api/sessions/{name}/file", s.handleFile)
 }
 
 // auth accepts the token as a bearer header (fetch calls) or query
@@ -547,6 +548,23 @@ func (s *Server) handleModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true, "model": sess.View().Model})
+}
+
+func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
+	sess := s.session(w, r)
+	if sess == nil {
+		return
+	}
+	name, data, err := s.sup.ReadSessionFile(sess, r.URL.Query().Get("path"))
+	if err != nil {
+		jsonError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{
+		"name":     name,
+		"content":  string(data),
+		"markdown": strings.HasSuffix(strings.ToLower(name), ".md"),
+	})
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

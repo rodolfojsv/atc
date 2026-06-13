@@ -1022,13 +1022,66 @@ func (s *Supervisor) handleEvent(sess *Session, e agent.Event) {
 	s.poke()
 }
 
-// Diff shows what the session's worktree changed relative to its base.
+// maxFileReadBytes caps the size of a file the web UI can fetch for
+// preview (clickable file mentions).
+const maxFileReadBytes = 2 << 20
+
+// ReadSessionFile reads a file for preview, resolved relative to the
+// session's working directory and confined to it: relative paths join
+// the dir, absolute paths must already live under it, and any result
+// that escapes the dir (via "..") is refused. Returns the base name and
+// contents. This is the file equivalent of what the agent can already
+// see, exposed read-only to the (token-gated, tailnet-bound) web UI.
+func (s *Supervisor) ReadSessionFile(sess *Session, rel string) (string, []byte, error) {
+	sess.mu.Lock()
+	base := sess.Dir
+	sess.mu.Unlock()
+	if base == "" {
+		return "", nil, errors.New("session has no directory yet")
+	}
+	rel = strings.TrimSpace(rel)
+	if rel == "" {
+		return "", nil, errors.New("path is required")
+	}
+	target := rel
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(base, target)
+	}
+	target = filepath.Clean(target)
+	if r, err := filepath.Rel(base, target); err != nil || r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) {
+		return "", nil, errors.New("path is outside the session directory")
+	}
+	fi, err := os.Stat(target)
+	if err != nil {
+		return "", nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return "", nil, errors.New("not a regular file")
+	}
+	if fi.Size() > maxFileReadBytes {
+		return "", nil, fmt.Errorf("file is larger than %dMB", maxFileReadBytes>>20)
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		return "", nil, err
+	}
+	return filepath.Base(target), data, nil
+}
+
+// Diff shows what changed: for a worktree session, relative to the
+// commit it branched from; for a session running directly in the repo,
+// the repo's current uncommitted changes (vs HEAD) plus untracked files.
+// The latter isn't scoped to this session — it's the working tree as it
+// stands — but it's the "git diff" view of the work.
 func (s *Supervisor) Diff(sess *Session) (string, error) {
 	sess.mu.Lock()
 	dir, base := sess.Worktree, sess.BaseCommit
+	if dir == "" {
+		dir, base = sess.Dir, "" // direct-in-repo: empty base → diff vs HEAD
+	}
 	sess.mu.Unlock()
 	if dir == "" {
-		return "", errors.New("session has no worktree — it works directly in the repo")
+		return "", errors.New("session has no directory yet")
 	}
 	return s.trees.Diff(dir, base)
 }

@@ -195,6 +195,11 @@
   .md blockquote { margin: .5em 0; padding: .1em .9em; border-left: 3px solid var(--line); color: var(--dim); }
   .md hr { border: 0; border-top: 1px solid var(--line); margin: .8em 0; }
   .md a.mdlink { color: var(--accent); text-decoration: underline; cursor: pointer; }
+  .md table { border-collapse: collapse; margin: .5em 0; display: block; overflow-x: auto; max-width: 100%; }
+  .md th, .md td { border: 1px solid var(--line); padding: .3em .6em; text-align: left; }
+  .md th { background: var(--bg2); font-weight: 600; }
+  /* clickable file/markdown mentions detected anywhere in a message */
+  a.filelink { color: var(--accent); text-decoration: underline dotted; text-underline-offset: 2px; cursor: pointer; }
 
   /* login */
   #login { max-width: 380px; margin: 16vh auto; display: grid; gap: .8em; padding: 0 1.2em; text-align: center; }
@@ -294,7 +299,7 @@
         <div class="actions">
           <button class="ghost" onclick="showBoard()">← Board</button>
           <span class="spacer"></span>
-          <button id="diffBtn" class="ghost hidden" onclick="openDiff()">diff</button>
+          <button id="diffBtn" class="ghost" onclick="openDiff()">diff</button>
           <button class="ghost" onclick="switchModel()">model</button>
           <button class="ghost" onclick="renameSession()">rename</button>
           <button id="autoBtn" class="ghost" onclick="toggleAuto()">auto</button>
@@ -342,6 +347,11 @@ function api(path, opts = {}) {
 }
 function esc(s) { const d = document.createElement('span'); d.textContent = s == null ? '' : s; return d.innerHTML; }
 function escAttr(s) { return esc(s).replace(/"/g, '&quot;'); }
+// jsArg makes a value safe to drop inside a single-quoted JS string that
+// itself lives in a double-quoted HTML attribute (e.g. onclick="fn('…')").
+// Escapes JS string-breakers first, then HTML attribute-breakers — so
+// session names with ' or " can't break the handler.
+function jsArg(s) { return escAttr(String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/'/g, "\\'")); }
 function live(on) { $('live').classList.toggle('live', on); }
 
 // ---- modal overlay (diff, link preview) ----
@@ -387,9 +397,28 @@ function renderMarkdown(src) {
   const out = []; let list = null, para = [];
   const flushPara = () => { if (para.length) { out.push('<p>' + para.map(l => mdInline(mdEscape(l))).join('<br>') + '</p>'); para = []; } };
   const flushList = () => { if (list) { out.push(`<${list.type}>` + list.items.map(it => '<li>' + mdInline(mdEscape(it)) + '</li>').join('') + `</${list.type}>`); list = null; } };
-  for (const raw of src.split('\n')) {
+  const lines = src.split('\n');
+  const tcells = (line) => { let s = line.trim(); if (s.startsWith('|')) s = s.slice(1); if (s.endsWith('|')) s = s.slice(0, -1); return s.split('|').map(c => c.trim()); };
+  const isTSep = (line) => /^\s*\|?\s*:?-{1,}:?\s*(\|\s*:?-{1,}:?\s*)*\|?\s*$/.test(line);
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
     let m = raw.match(/^(\d+)$/);
     if (m) { flushPara(); flushList(); out.push('<pre class="code">' + mdEscape(blocks[+m[1]]) + '</pre>'); continue; }
+    if (raw.indexOf('|') !== -1 && i + 1 < lines.length && isTSep(lines[i + 1])) {
+      flushPara(); flushList();
+      const head = tcells(raw);
+      const aligns = tcells(lines[i + 1]).map(c => { const l = c.startsWith(':'), r = c.endsWith(':'); return l && r ? 'center' : r ? 'right' : l ? 'left' : ''; });
+      const cell = (c, j, tag) => `<${tag}${aligns[j] ? ` style="text-align:${aligns[j]}"` : ''}>` + mdInline(mdEscape(c || '')) + `</${tag}>`;
+      let tbl = '<table><thead><tr>' + head.map((c, j) => cell(c, j, 'th')).join('') + '</tr></thead><tbody>';
+      i += 2;
+      for (; i < lines.length && lines[i].indexOf('|') !== -1 && lines[i].trim() !== ''; i++) {
+        const row = tcells(lines[i]);
+        tbl += '<tr>' + head.map((_, j) => cell(row[j], j, 'td')).join('') + '</tr>';
+      }
+      i--;
+      out.push(tbl + '</tbody></table>');
+      continue;
+    }
     if (/^\s*$/.test(raw)) { flushPara(); flushList(); continue; }
     if (m = raw.match(/^(#{1,6})\s+(.*)$/)) { flushPara(); flushList(); const n = m[1].length; out.push(`<h${n}>` + mdInline(mdEscape(m[2])) + `</h${n}>`); continue; }
     if (/^\s*([-*+])\s+/.test(raw)) { flushPara(); if (!list || list.type !== 'ul') { flushList(); list = { type: 'ul', items: [] }; } list.items.push(raw.replace(/^\s*[-*+]\s+/, '')); continue; }
@@ -414,6 +443,49 @@ function openLink(url) {
     `<button class="primary" onclick="window.open(lastLink, '_blank', 'noopener')">Open in new tab ↗</button>`);
 }
 
+// linkifyFiles turns bare ".md" path mentions in a rendered message into
+// clickable links. It walks text nodes only (never inside an existing
+// <a>/<code>/<pre>), so it can't double-link or corrupt markup.
+const FILE_RE = /(^|[\s(])(\/?(?:[\w.@~+-]+\/)*[\w.@~+-]+\.md)\b/g;
+function linkifyFiles(root) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode(n) {
+      for (let p = n.parentNode; p && p !== root; p = p.parentNode) {
+        const t = p.tagName;
+        if (t === 'A' || t === 'CODE' || t === 'PRE') return NodeFilter.FILTER_REJECT;
+      }
+      FILE_RE.lastIndex = 0;
+      return FILE_RE.test(n.nodeValue) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+    }
+  });
+  const nodes = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode);
+  for (const node of nodes) {
+    const text = node.nodeValue;
+    const frag = document.createDocumentFragment();
+    let last = 0, m; FILE_RE.lastIndex = 0;
+    while ((m = FILE_RE.exec(text))) {
+      const start = m.index + m[1].length;
+      frag.appendChild(document.createTextNode(text.slice(last, start)));
+      const a = document.createElement('a');
+      a.className = 'filelink'; a.textContent = m[2]; a.dataset.path = m[2];
+      frag.appendChild(a);
+      last = start + m[2].length;
+    }
+    frag.appendChild(document.createTextNode(text.slice(last)));
+    node.parentNode.replaceChild(frag, node);
+  }
+}
+// Clicking a file mention fetches it (scoped to the session dir) and shows
+// it in the modal — markdown rendered, anything else as plain code.
+async function openFile(path) {
+  try {
+    const r = await api('/api/sessions/' + encodeURIComponent(current) + '/file?path=' + encodeURIComponent(path));
+    const body = r.markdown ? `<div class="md">${renderMarkdown(r.content)}</div>` : `<pre class="code">${mdEscape(r.content)}</pre>`;
+    openModal(r.name, body, `<button class="ghost" onclick="closeModal()">Close</button>`);
+  } catch (e) { setStat(e.message, true); }
+}
+
 // ---- diff / merge / model ----
 function colorDiff(text) {
   return mdEscape(text).split('\n').map(l => {
@@ -427,10 +499,15 @@ async function openDiff() {
   if (!current) return;
   try {
     const d = await api('/api/sessions/' + encodeURIComponent(current) + '/diff');
+    const wt = !!(curSession && curSession.worktree);
     const base = (curSession || {}).baseBranch || 'base';
-    openModal('diff · ' + current, `<pre class="diff">${colorDiff(d.diff || '(no changes)')}</pre>`,
+    // Worktree sessions diff against their branch point and can merge back.
+    // Direct-in-repo sessions show the repo's uncommitted changes (not
+    // scoped to this session) and have nothing to merge.
+    const note = wt ? '' : `<div class="hint">Uncommitted changes in the repo — this session runs directly in it, so the diff isn't scoped to just this session.</div>`;
+    openModal('diff · ' + current, note + `<pre class="diff">${colorDiff(d.diff || '(no changes)')}</pre>`,
       `<button class="ghost" onclick="closeModal()">Close</button>` +
-      `<button class="primary" onclick="doMerge()">Merge into ${esc(base)}</button>`);
+      (wt ? `<button class="primary" onclick="doMerge()">Merge into ${esc(base)}</button>` : ''));
   } catch (e) { setStat(e.message, true); }
 }
 async function doMerge() {
@@ -566,8 +643,8 @@ function groupSessions(list) {
 }
 function cardHTML(s) {
   return `
-    <div class="card" onclick="openSession('${esc(s.name)}')">
-      <button class="del" data-name="${esc(s.name)}" title="Hold to delete" aria-label="Hold to delete">
+    <div class="card" onclick="openSession('${jsArg(s.name)}')">
+      <button class="del" data-name="${escAttr(s.name)}" title="Hold to delete" aria-label="Hold to delete">
         <svg class="delsvg" viewBox="0 0 24 24"><circle class="ring" cx="12" cy="12" r="9"/></svg>
         <span class="xmark">✕</span>
       </button>
@@ -577,9 +654,9 @@ function cardHTML(s) {
         <span class="tag">${esc(s.backend)}${s.model ? ' · ' + esc(s.model) : ''}${s.readOnly ? ' · 🔒' : ''}${s.autoApprove ? ' · ⚡' : ''}</span>
         <span class="spacer" style="flex:1"></span>
         <button class="chip pin${s.pinned ? ' on' : ''}" title="${s.pinned ? 'Unpin' : 'Pin'}"
-          onclick="event.stopPropagation(); togglePin('${esc(s.name)}', ${!s.pinned})">📌</button>
+          onclick="event.stopPropagation(); togglePin('${jsArg(s.name)}', ${!s.pinned})">📌</button>
         <button class="chip" title="Set category"
-          onclick="event.stopPropagation(); setCategory('${esc(s.name)}')">${s.category ? esc(s.category) : '+ category'}</button>
+          onclick="event.stopPropagation(); setCategory('${jsArg(s.name)}')">${s.category ? esc(s.category) : '+ category'}</button>
       </div>
       <div class="sub">${esc(s.repo)}${s.branch ? ' @ ' + esc(s.branch) : ''}${cost(s) ? ' · ' + cost(s) : ''}</div>
       ${s.pending ? `<div class="last alert">⚠ ${esc(s.pending.summary)}</div>`
@@ -750,13 +827,13 @@ async function pollFocus() {
   $('crumb').textContent = `${s.name} · ${s.status}${s.model ? ' · ' + s.model : ''}${cost(s) ? ' · ' + cost(s) : ''}`;
   $('autoBtn').textContent = s.autoApprove ? '⚡ auto' : 'auto';
   $('autoBtn').classList.toggle('good', s.autoApprove);
-  $('diffBtn').classList.toggle('hidden', !s.worktree); // diff/merge only apply to worktree sessions
 
   const html = data.transcript.map(renderEntry).join('');
   if (html !== lastRender) {
     const el = $('transcript');
     const stick = window.innerHeight + window.scrollY >= document.body.offsetHeight - 120;
     el.innerHTML = html; lastRender = html;
+    linkifyFiles(el); // make .md path mentions clickable (DOM only changes, lastRender stays the string)
     if (stick) window.scrollTo(0, document.body.scrollHeight);
   }
 
@@ -804,12 +881,13 @@ function renderEntry(e) {
   if (e.kind === 'assistant') return `<div class="e assistant md">${renderMarkdown(e.text)}${cursor}</div>`;
   return `<div class="e ${cls}">${esc(e.text)}${cursor}</div>`;
 }
-// Links in rendered markdown open in the in-app modal, never navigating away.
+// Links and file mentions in the transcript open in the in-app modal,
+// never navigating away.
 $('transcript').addEventListener('click', e => {
+  const fl = e.target.closest('a.filelink');
+  if (fl) { e.preventDefault(); openFile(fl.dataset.path); return; }
   const a = e.target.closest('a.mdlink');
-  if (!a) return;
-  e.preventDefault();
-  openLink(a.getAttribute('href'));
+  if (a) { e.preventDefault(); openLink(a.getAttribute('href')); }
 });
 function setStat(msg, isErr) { const el = $('stat'); el.textContent = msg || ''; el.className = isErr ? 'err' : ''; }
 

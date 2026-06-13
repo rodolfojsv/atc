@@ -10,7 +10,8 @@ import (
 	"github.com/rodolfojsv/atc/internal/supervisor"
 )
 
-// openDiff loads the session's worktree diff into the shared viewport.
+// openDiff loads the session's diff into the shared viewport (worktree
+// vs its base, or the repo's uncommitted changes for direct sessions).
 func (m *Model) openDiff(sess *supervisor.Session) (tea.Model, tea.Cmd) {
 	diff, err := m.sup.Diff(sess)
 	if err != nil {
@@ -44,13 +45,22 @@ func (m *Model) updateDiff(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m *Model) viewDiff() string {
 	v := m.target.View()
 	var b strings.Builder
-	title := " diff: " + v.Name + "  ·  " + v.Branch
-	if v.BaseBranch != "" {
-		title += " vs " + v.BaseBranch
+	title := " diff: " + v.Name
+	if v.Worktree != "" {
+		title += "  ·  " + v.Branch
+		if v.BaseBranch != "" {
+			title += " vs " + v.BaseBranch
+		}
+	} else {
+		title += "  ·  uncommitted changes in repo"
 	}
 	b.WriteString(styleTitle.Render("atc") + title + "\n")
 	b.WriteString(m.vp.View() + "\n\n")
-	b.WriteString(keybar("m", "merge into "+v.BaseBranch, "↑↓/wheel", "scroll", "esc", "back"))
+	if v.Worktree != "" {
+		b.WriteString(keybar("m", "merge into "+v.BaseBranch, "↑↓/wheel", "scroll", "esc", "back"))
+	} else {
+		b.WriteString(keybar("↑↓/wheel", "scroll", "esc", "back"))
+	}
 	if m.flash != "" {
 		b.WriteString("  " + styleFlash.Render(m.flash))
 	}
