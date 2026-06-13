@@ -170,6 +170,7 @@ func (s *Supervisor) ActiveCount() int {
 type NewSessionOptions struct {
 	Name        string
 	NameHint    string // derives an auto-name when Name is empty; never sent to the agent (the web form passes its first prompt here)
+	Category    string // board category; empty defaults to the repo (see defaultCategory)
 	Repo        string // repo or plain directory the agent runs in
 	UseWorktree bool
 	Backend     string // "copilot" (default) or "claude"
@@ -230,11 +231,17 @@ func (s *Supervisor) NewSession(opts NewSessionOptions) (*Session, error) {
 		model = s.cfg.Model
 	}
 
+	category := opts.Category
+	if category == "" {
+		category = s.defaultCategory(repo)
+	}
+
 	autoApprove := opts.AutoApprove || s.cfg.DefaultAutoApprove
 	sess := &Session{
 		Name: name, Repo: repo, Dir: repo, Backend: backendName,
 		Preset: presetName, ReadOnly: opts.ReadOnly, Model: model,
 		Created: time.Now(), status: StatusStarting, autoApprove: autoApprove,
+		category: category,
 	}
 	s.mu.Lock()
 	s.sessions = append(s.sessions, sess)
@@ -243,6 +250,24 @@ func (s *Supervisor) NewSession(opts NewSessionOptions) (*Session, error) {
 
 	go s.launch(sess, model, opts.Prompt, opts.UseWorktree)
 	return sess, nil
+}
+
+// defaultCategory picks the board category for a new session when the
+// caller didn't set one: a config override keyed by the repo's absolute
+// path or base name, else the repo's base directory name. The user can
+// re-categorize afterward with SetCategory.
+func (s *Supervisor) defaultCategory(repo string) string {
+	if c, ok := s.cfg.CategoryByRepo[repo]; ok {
+		return c
+	}
+	base := filepath.Base(repo)
+	if c, ok := s.cfg.CategoryByRepo[base]; ok {
+		return c
+	}
+	if base == "." || base == string(filepath.Separator) {
+		return ""
+	}
+	return base
 }
 
 // autoName derives a friendly session name when the user didn't supply

@@ -25,6 +25,21 @@ func TestAutoName(t *testing.T) {
 	}
 }
 
+func TestDefaultCategory(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.CategoryByRepo = map[string]string{"smib-12362": "smib", "/abs/special": "proj"}
+	s := New(cfg, nil)
+	for _, c := range []struct{ repo, want string }{
+		{"/home/rodo/Development/atc", "atc"}, // base name by default
+		{"/work/smib-12362", "smib"},          // config override by base name
+		{"/abs/special", "proj"},              // config override by full path
+	} {
+		if got := s.defaultCategory(c.repo); got != c.want {
+			t.Errorf("defaultCategory(%q) = %q, want %q", c.repo, got, c.want)
+		}
+	}
+}
+
 func TestRename(t *testing.T) {
 	s := New(testConfig(t), nil)
 	s.store = store{path: filepath.Join(t.TempDir(), "sessions.json")}

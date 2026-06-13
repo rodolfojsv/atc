@@ -82,6 +82,15 @@
     border: 1px solid var(--line); background: transparent; color: var(--dim); cursor: pointer; }
   .chip:hover { border-color: var(--accent-dim); }
   .chip.pin.on { color: var(--accent); border-color: var(--accent-dim); }
+  /* filter bar: isolate one group */
+  .filterbar { display: flex; gap: .4em; overflow-x: auto; padding-bottom: .55em; margin-bottom: .2em;
+    -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+  .filterbar::-webkit-scrollbar { display: none; }
+  .filterbar:empty { display: none; }
+  .fchip { white-space: nowrap; font: inherit; font-size: .8em; padding: .3em .8em; border-radius: 20px;
+    border: 1px solid var(--line); background: transparent; color: var(--dim); cursor: pointer; }
+  .fchip:hover { border-color: var(--accent-dim); }
+  .fchip.on { color: #cdddff; background: var(--accent-dim); border-color: var(--accent); }
   @keyframes pulse { 50% { opacity: .5; } }
   .empty { color: var(--dim); text-align: center; padding: 2.5em 1em; }
   .empty button { margin-top: 1em; }
@@ -225,6 +234,7 @@
         <input id="formFile" type="file" multiple accept="image/*" class="hidden">
       </div>
 
+      <div id="filterBar" class="filterbar"></div>
       <div id="rows"></div>
       <div id="spend"></div>
     </div>
@@ -384,16 +394,35 @@ function cardHTML(s) {
         : s.lastLine ? `<div class="last">${esc(s.lastLine)}</div>` : ''}
     </div>`;
 }
+// filterGroup isolates the board to one group title (null = show all).
+// lastGroups backs the index-based chip handlers so arbitrary category
+// names never need escaping into inline onclick.
+let filterGroup = null, lastGroups = [];
+function setFilter(i) { filterGroup = i < 0 ? null : (lastGroups[i] || {}).title || null; renderBoard(boardList); }
+function renderFilterBar(groups) {
+  const bar = $('filterBar');
+  if (groups.length <= 1) { bar.innerHTML = ''; return; } // nothing worth filtering
+  const chip = (label, i, active) => `<button class="fchip${active ? ' on' : ''}" onclick="setFilter(${i})">${esc(label)}</button>`;
+  bar.innerHTML = chip('All', -1, !filterGroup) +
+    groups.map((g, i) => chip(`${g.title} ${g.sessions.length}`, i, filterGroup === g.title)).join('');
+}
 function renderBoard(list) {
   if (holdActive) return; // don't disturb an in-progress hold
   const rows = $('rows');
   if (!list.length) {
     rows.innerHTML = `<div class="empty">No sessions yet.<br><button class="primary" onclick="toggleNew()">+ New session</button></div>`;
+    $('filterBar').innerHTML = '';
     return;
   }
   const groups = groupSessions(list);
-  const showHeaders = groups.length > 1 || groups[0].title !== 'Uncategorized';
-  rows.innerHTML = groups.map(g =>
+  lastGroups = groups;
+  if (filterGroup && !groups.some(g => g.title === filterGroup)) filterGroup = null; // category vanished
+  renderFilterBar(groups);
+  const shown = filterGroup ? groups.filter(g => g.title === filterGroup) : groups;
+  // Headers orient you across groups; with a single group isolated the
+  // filter chip already names it, so drop the redundant header.
+  const showHeaders = !filterGroup && (groups.length > 1 || groups[0].title !== 'Uncategorized');
+  rows.innerHTML = shown.map(g =>
     (showHeaders ? `<div class="section">${esc(g.title)}<span class="cnt">${g.sessions.length}</span></div>` : '') +
     g.sessions.map(cardHTML).join('')).join('');
   rows.querySelectorAll('.del').forEach(setupHold);
