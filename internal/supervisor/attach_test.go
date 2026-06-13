@@ -11,6 +11,21 @@ import (
 	"github.com/rodolfojsv/atc/internal/bus"
 )
 
+// A session started in auto-approve must spawn the backend in allow-all
+// so Claude (whose permission mode is fixed at launch) gets
+// bypassPermissions, not just the Copilot runtime path.
+func TestSpecAutoApproveBecomesAllowAll(t *testing.T) {
+	s := New(testConfig(t), bus.New())
+	sess := &Session{Name: "x", Dir: "/tmp", Preset: "default", autoApprove: true}
+	if got := s.spec(sess, "").Approval; got != "allow-all" {
+		t.Fatalf("auto session approval = %q, want allow-all", got)
+	}
+	off := &Session{Name: "y", Dir: "/tmp", Preset: "default"}
+	if got := s.spec(off, "").Approval; got == "allow-all" {
+		t.Fatalf("non-auto session should not be allow-all, got %q", got)
+	}
+}
+
 // fakeAgent records what was sent. With inline=true it also implements
 // agent.AttachmentSender, like the claude adapter.
 type fakeAgent struct {

@@ -210,12 +210,13 @@ func (s *Server) handleMeta(w http.ResponseWriter, _ *http.Request) {
 		defaultBackend = supervisor.DefaultBackend
 	}
 	writeJSON(w, map[string]any{
-		"repos":          s.cfg.Repos,
-		"backends":       s.sup.Backends(),
-		"presets":        presets,
-		"defaultRepo":    defaultRepo,
-		"defaultBackend": defaultBackend,
-		"defaultModel":   s.cfg.Model,
+		"repos":              s.cfg.Repos,
+		"backends":           s.sup.Backends(),
+		"presets":            presets,
+		"defaultRepo":        defaultRepo,
+		"defaultBackend":     defaultBackend,
+		"defaultModel":       s.cfg.Model,
+		"defaultAutoApprove": s.cfg.DefaultAutoApprove,
 		"spend": map[string]any{
 			"todayUsd": today.CostUSD, "todayAiu": today.NanoAiu / 1e9,
 			"monthUsd": month.CostUSD, "monthAiu": month.NanoAiu / 1e9,
@@ -234,14 +235,15 @@ func (s *Server) handleList(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name     string `json:"name"`
-		Repo     string `json:"repo"`
-		Backend  string `json:"backend"`
-		Preset   string `json:"preset"`
-		Model    string `json:"model"`
-		Prompt   string `json:"prompt"`
-		Worktree bool   `json:"worktree"`
-		ReadOnly bool   `json:"readOnly"`
+		Name        string `json:"name"`
+		Repo        string `json:"repo"`
+		Backend     string `json:"backend"`
+		Preset      string `json:"preset"`
+		Model       string `json:"model"`
+		Prompt      string `json:"prompt"`
+		Worktree    bool   `json:"worktree"`
+		ReadOnly    bool   `json:"readOnly"`
+		AutoApprove bool   `json:"autoApprove"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
 		jsonError(w, http.StatusBadRequest, "bad JSON: "+err.Error())
@@ -250,7 +252,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	sess, err := s.sup.NewSession(supervisor.NewSessionOptions{
 		Name: req.Name, Repo: req.Repo, Backend: req.Backend,
 		Preset: req.Preset, Model: req.Model, Prompt: req.Prompt,
-		UseWorktree: req.Worktree, ReadOnly: req.ReadOnly,
+		UseWorktree: req.Worktree, ReadOnly: req.ReadOnly, AutoApprove: req.AutoApprove,
 	})
 	if err != nil {
 		jsonError(w, http.StatusBadRequest, err.Error())

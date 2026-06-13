@@ -181,6 +181,7 @@
           <label class="ck"><input type="checkbox" id="fWorktree"> Worktree</label>
           <label class="ck"><input type="checkbox" id="fReadOnly"> Read-only</label>
         </div>
+        <label class="ck" style="width:100%"><input type="checkbox" id="fAuto"> ⚡ Auto-approve (runs unattended; deny-list still applies)</label>
         <div>
           <label class="fld">First prompt <span style="text-transform:none">(optional — you can attach images)</span></label>
           <div class="thumbs" id="formThumbs"></div>
@@ -322,6 +323,7 @@ async function createSession() {
       body: JSON.stringify({
         name: $('fName').value.trim(), repo, backend: $('fBackend').value,
         model: $('fModel').value.trim(), worktree: $('fWorktree').checked, readOnly: $('fReadOnly').checked,
+        autoApprove: $('fAuto').checked,
         // first prompt is sent after the session is ready so images can ride along
       }) });
     if (text.trim() || atts.length) pendingFirst = { name: s.name, text, atts };
@@ -503,6 +505,7 @@ async function boot() {
     onRepoChange();
     $('fBackend').innerHTML = (meta.backends || []).map(b => `<option ${b === meta.defaultBackend ? 'selected' : ''}>${esc(b)}</option>`).join('');
     if (meta.defaultModel) $('fModel').value = meta.defaultModel;
+    $('fAuto').checked = !!meta.defaultAutoApprove;
     dropZone('formBar', formAttachments);
     dropZone('focusBar', attachments);
     showBoard();
