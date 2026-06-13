@@ -455,6 +455,20 @@ document.addEventListener('paste', e => {
   if (into) pasteImages(e, into);
 });
 
+// Esc / Left arrow returns from a session to the board. Ignored while a
+// field is focused (there those keys edit text); Esc first blurs the
+// field so a second Esc goes back.
+document.addEventListener('keydown', e => {
+  if (!current || $('focus').classList.contains('hidden')) return;
+  const ae = document.activeElement;
+  const typing = ae && (ae.tagName === 'TEXTAREA' || ae.tagName === 'INPUT' || ae.tagName === 'SELECT');
+  if (e.key === 'Escape') {
+    if (typing) ae.blur(); else { e.preventDefault(); showBoard(); }
+  } else if (e.key === 'ArrowLeft' && !typing) {
+    e.preventDefault(); showBoard();
+  }
+});
+
 // drag & drop onto either input bar
 function dropZone(barId, into) {
   const bar = $(barId);
