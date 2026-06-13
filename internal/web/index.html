@@ -160,8 +160,8 @@
         <h3>New session</h3>
         <div>
           <label class="fld" for="fRepo">Repository</label>
-          <input id="fRepo" placeholder="/path/to/repo" list="repoList" autocapitalize="off" spellcheck="false">
-          <datalist id="repoList"></datalist>
+          <select id="fRepo" onchange="onRepoChange()"></select>
+          <input id="fRepoCustom" class="hidden" placeholder="/path/to/repo" autocapitalize="off" spellcheck="false" style="margin-top:.5em">
         </div>
         <div class="grid2">
           <div>
@@ -304,8 +304,16 @@ function showBoard() {
 }
 function toggleNew() { $('newSheet').classList.toggle('hidden'); }
 
+function baseName(p) { const s = String(p).replace(/[\\/]+$/, ''); const i = Math.max(s.lastIndexOf('/'), s.lastIndexOf('\\')); return i >= 0 ? s.slice(i + 1) : s; }
+function onRepoChange() {
+  const custom = $('fRepo').value === '__custom__';
+  $('fRepoCustom').classList.toggle('hidden', !custom);
+  if (custom) $('fRepoCustom').focus();
+}
+
 async function createSession() {
-  const repo = $('fRepo').value.trim();
+  let repo = $('fRepo').value;
+  if (repo === '__custom__') repo = $('fRepoCustom').value.trim();
   if (!repo) { alert('Pick a repository.'); return; }
   const text = $('fPrompt').value;
   const atts = formAttachments.slice();
@@ -489,9 +497,11 @@ async function boot() {
   try {
     meta = await api('/api/meta');
     $('login').classList.add('hidden'); $('app').classList.remove('hidden');
-    $('repoList').innerHTML = (meta.repos || []).map(r => `<option value="${esc(r)}">`).join('');
+    const repoOpts = (meta.repos || []).map(r =>
+      `<option value="${esc(r)}" ${r === meta.defaultRepo ? 'selected' : ''}>${esc(baseName(r))}</option>`).join('');
+    $('fRepo').innerHTML = repoOpts + `<option value="__custom__">Custom path…</option>`;
+    onRepoChange();
     $('fBackend').innerHTML = (meta.backends || []).map(b => `<option ${b === meta.defaultBackend ? 'selected' : ''}>${esc(b)}</option>`).join('');
-    if (meta.defaultRepo) $('fRepo').value = meta.defaultRepo;
     if (meta.defaultModel) $('fModel').value = meta.defaultModel;
     dropZone('formBar', formAttachments);
     dropZone('focusBar', attachments);
