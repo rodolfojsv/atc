@@ -160,6 +160,31 @@ func TestUserContentPlain(t *testing.T) {
 	}
 }
 
+// AskUserQuestion must render as a readable question (headless Claude
+// can't be answered, so the user replies in prose).
+func TestFormatAskUserQuestion(t *testing.T) {
+	raw := json.RawMessage(`[{"type":"tool_use","name":"AskUserQuestion","input":{
+		"questions":[{"header":"Indentation","question":"Tabs or spaces?","options":[
+			{"label":"Tabs","description":"tab chars"},
+			{"label":"Spaces","description":"space chars"}]}]}}]`)
+	events := messageEvents(raw)
+	if len(events) != 1 || events[0].Type != agent.EventMessage {
+		t.Fatalf("expected one message event, got %+v", events)
+	}
+	text := events[0].Text
+	for _, want := range []string{"Indentation", "Tabs or spaces?", "Tabs", "Spaces", "Reply with your choice"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("rendered question missing %q:\n%s", want, text)
+		}
+	}
+	// It must NOT have produced a generic tool-start line.
+	for _, e := range events {
+		if e.Type == agent.EventToolStart {
+			t.Errorf("AskUserQuestion should not render as a tool line")
+		}
+	}
+}
+
 func TestHistoryRestoresUsage(t *testing.T) {
 	cfgDir := t.TempDir()
 	t.Setenv("CLAUDE_CONFIG_DIR", cfgDir)

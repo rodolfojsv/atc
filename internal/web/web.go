@@ -141,12 +141,19 @@ type sessionJSON struct {
 
 	Pending      *permissionJSON `json:"pending,omitempty"`
 	PendingCount int             `json:"pendingCount,omitempty"`
+	Question     *questionJSON   `json:"question,omitempty"`
 }
 
 type permissionJSON struct {
 	Kind    string   `json:"kind"`
 	Summary string   `json:"summary"`
 	Detail  []string `json:"detail,omitempty"`
+}
+
+type questionJSON struct {
+	Prompt        string   `json:"prompt"`
+	Options       []string `json:"options,omitempty"`
+	AllowFreeform bool     `json:"allowFreeform"`
 }
 
 type entryJSON struct {
@@ -173,6 +180,9 @@ func toSessionJSON(v supervisor.SessionView) sessionJSON {
 	if v.Pending != nil {
 		out.Pending = &permissionJSON{Kind: v.Pending.Kind, Summary: v.Pending.Summary, Detail: v.Pending.Detail}
 		out.PendingCount = v.PendingCount
+	}
+	if v.Question != nil {
+		out.Question = &questionJSON{Prompt: v.Question.Prompt, Options: v.Question.Options, AllowFreeform: v.Question.AllowFreeform}
 	}
 	return out
 }

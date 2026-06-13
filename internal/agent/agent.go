@@ -35,6 +35,22 @@ type PermissionRequest struct {
 // denial to the agent.
 type PermissionFunc func(req PermissionRequest) (Decision, string)
 
+// Question is an agent asking the user to choose or answer — normalized
+// across backends (Copilot's ask_user / UserInputRequest). The user's
+// answer is fed back to the backend. Claude Code's headless CLI can't
+// take an answer for its AskUserQuestion tool, so that backend renders
+// the question instead of calling this.
+type Question struct {
+	Prompt        string   // the question text
+	Options       []string // suggested choices (may be empty)
+	AllowFreeform bool     // whether a free-text answer is allowed
+}
+
+// QuestionFunc blocks until the user answers. ok=false means the answer
+// was cancelled (e.g. the session was aborted); the backend should treat
+// it as no answer.
+type QuestionFunc func(q Question) (answer string, ok bool)
+
 type EventType int
 
 const (
@@ -95,6 +111,10 @@ type SessionSpec struct {
 	ReadOnly     bool
 	OnEvent      func(Event)
 	OnPermission PermissionFunc
+	// OnQuestion answers an agent's ask-the-user request (Copilot's
+	// ask_user tool). Backends that can't take an answer (Claude headless)
+	// leave it unused and render the question instead.
+	OnQuestion QuestionFunc
 }
 
 // Attachment is a file (typically an image) sent alongside a prompt.

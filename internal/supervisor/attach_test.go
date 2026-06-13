@@ -6,10 +6,89 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rodolfojsv/atc/internal/agent"
 	"github.com/rodolfojsv/atc/internal/bus"
 )
+
+// An agent question blocks until the user's next message answers it; a
+// bare option number maps to that option's text.
+func TestQuestionAnsweredByNextPrompt(t *testing.T) {
+	s := New(testConfig(t), bus.New())
+	ag := &fakeAgent{}
+	sess := &Session{Name: "x", Dir: t.TempDir(), Preset: "default", status: StatusWorking, ag: ag}
+	qf := s.questionFunc(sess)
+
+	answer := make(chan string, 1)
+	go func() {
+		ans, ok := qf(agent.Question{Prompt: "Tabs or spaces?", Options: []string{"Tabs", "Spaces"}})
+		if !ok {
+			t.Errorf("question reported cancelled")
+		}
+		answer <- ans
+	}()
+
+	// Wait until the question is pending.
+	deadline := time.After(2 * time.Second)
+	for !sess.HasQuestion() {
+		select {
+		case <-deadline:
+			t.Fatal("question never became pending")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	// Answering "2" should resolve to the second option's text.
+	if err := s.Prompt(sess, "2"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case ans := <-answer:
+		if ans != "Spaces" {
+			t.Fatalf("answer = %q, want Spaces", ans)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("question handler still blocked after answer")
+	}
+	if sess.HasQuestion() {
+		t.Fatal("question still pending after answer")
+	}
+	// The answer must NOT have been sent as a normal turn to the backend.
+	if ag.sentText != "" {
+		t.Fatalf("answer leaked to backend as a prompt: %q", ag.sentText)
+	}
+}
+
+// Aborting a session unblocks a waiting question with ok=false.
+func TestQuestionCancelledByAbort(t *testing.T) {
+	s := New(testConfig(t), bus.New())
+	ag := &fakeAgent{}
+	sess := &Session{Name: "x", Dir: t.TempDir(), Preset: "default", status: StatusWorking, ag: ag}
+	qf := s.questionFunc(sess)
+
+	done := make(chan bool, 1)
+	go func() {
+		_, ok := qf(agent.Question{Prompt: "Proceed?"})
+		done <- ok
+	}()
+	deadline := time.After(2 * time.Second)
+	for !sess.HasQuestion() {
+		select {
+		case <-deadline:
+			t.Fatal("question never pending")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	s.Abort(sess)
+	select {
+	case ok := <-done:
+		if ok {
+			t.Fatal("expected cancelled (ok=false) on abort")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("abort did not unblock the question")
+	}
+}
 
 // A session started in auto-approve must spawn the backend in allow-all
 // so Claude (whose permission mode is fixed at launch) gets

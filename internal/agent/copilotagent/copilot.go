@@ -4,6 +4,7 @@ package copilotagent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -42,6 +43,7 @@ func (b *Backend) NewSession(ctx context.Context, spec agent.SessionSpec) (agent
 		ClientName:          "atc",
 		Streaming:           copilot.Bool(true),
 		OnPermissionRequest: permissionHandler(spec.OnPermission),
+		OnUserInputRequest:  userInputHandler(spec.OnQuestion),
 	})
 	if err != nil {
 		return nil, err
@@ -57,6 +59,7 @@ func (b *Backend) ResumeSession(ctx context.Context, spec agent.SessionSpec) (ag
 		Model:               spec.Model,
 		Streaming:           copilot.Bool(true),
 		OnPermissionRequest: permissionHandler(spec.OnPermission),
+		OnUserInputRequest:  userInputHandler(spec.OnQuestion),
 	})
 	if err != nil {
 		return nil, err
@@ -218,6 +221,33 @@ func permissionHandler(onPermission agent.PermissionFunc) copilot.PermissionHand
 			}
 			return &rpc.PermissionDecisionReject{Feedback: copilot.String(feedback)}, nil
 		}
+	}
+}
+
+// userInputHandler bridges Copilot's ask_user tool to atc's question
+// flow. Registering it is what enables the ask_user tool at all; the
+// returned answer is fed back to the agent. A nil onQuestion leaves the
+// tool disabled.
+func userInputHandler(onQuestion agent.QuestionFunc) copilot.UserInputHandler {
+	if onQuestion == nil {
+		return nil
+	}
+	return func(req copilot.UserInputRequest, _ copilot.UserInputInvocation) (copilot.UserInputResponse, error) {
+		allowFreeform := req.AllowFreeform == nil || *req.AllowFreeform
+		ans, ok := onQuestion(agent.Question{
+			Prompt: req.Question, Options: req.Choices, AllowFreeform: allowFreeform,
+		})
+		if !ok {
+			return copilot.UserInputResponse{}, errors.New("question cancelled in atc")
+		}
+		wasFreeform := true
+		for _, c := range req.Choices {
+			if c == ans {
+				wasFreeform = false
+				break
+			}
+		}
+		return copilot.UserInputResponse{Answer: ans, WasFreeform: wasFreeform}, nil
 	}
 }
 
