@@ -1,0 +1,22 @@
+// Applied from app/build.gradle to inject release signing without editing
+// the Capacitor-generated file in place. Reads its inputs from environment
+// variables so the keystore stays out of the repo.
+
+android {
+    signingConfigs {
+        release {
+            def storeFilePath = System.getenv("ATC_KEYSTORE_FILE")
+            if (storeFilePath != null && !storeFilePath.isEmpty()) {
+                storeFile file(storeFilePath)
+            }
+            storePassword System.getenv("ATC_KEYSTORE_PASSWORD")
+            keyAlias System.getenv("ATC_KEY_ALIAS")
+            keyPassword System.getenv("ATC_KEY_PASSWORD")
+        }
+    }
+    buildTypes {
+        release {
+            signingConfig signingConfigs.release
+        }
+    }
+}

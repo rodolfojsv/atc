@@ -37,6 +37,8 @@ type savedSession struct {
 	AutoApprove bool      `json:"autoApprove,omitempty"`
 	Pinned      bool      `json:"pinned,omitempty"`
 	Category    string    `json:"category,omitempty"`
+	CreatedBy   string    `json:"createdBy,omitempty"`   // per-device clientId of the creator
+	NotifyTopic string    `json:"notifyTopic,omitempty"` // ntfy topic of the creator's device
 	BaseBranch  string    `json:"baseBranch,omitempty"`
 	BaseCommit  string    `json:"baseCommit,omitempty"`
 	Status      string    `json:"status,omitempty"` // session status at last persist

@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f1115">
+<title>atc</title>
+<style>
+  :root { --bg:#0f1115; --panel:#1b1f29; --panel2:#222735; --line:#2c3242; --fg:#e6eaf2; --dim:#8b94a7; --accent:#7aa2f7; --accent-dim:#3a4a73; --bad:#f7768e; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+    font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+  /* The atc UI fills the screen via this iframe. */
+  #frame { position:fixed; inset:0; width:100%; height:100%; border:0; background:var(--bg); }
+  /* Servers overlay sits above the frame. */
+  #servers { position:fixed; inset:0; z-index:10; background:var(--bg); overflow:auto;
+    display:flex; flex-direction:column; padding:24px 18px; gap:16px; }
+  #servers.hidden { display:none; }
+  .logo { font-weight:800; font-size:2em; letter-spacing:1px; }
+  h2 { font-size:1em; color:var(--dim); margin:6px 0 0; font-weight:600; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:14px; }
+  .srv { display:flex; align-items:center; gap:10px; }
+  .srv .meta { flex:1; min-width:0; }
+  .srv .name { font-weight:600; }
+  .srv .url { color:var(--dim); font-size:.78em; font-family: ui-monospace, Menlo, Consolas, monospace; word-break:break-all; }
+  .srv .open { background:var(--accent-dim); border:1px solid var(--accent); color:#cdddff; }
+  label { display:block; font-size:.8em; color:var(--dim); margin:10px 0 4px; }
+  input { width:100%; padding:11px 12px; border-radius:9px; border:1px solid var(--line);
+    background:#11141c; color:var(--fg); font-size:1em; }
+  input.mono { font-family: ui-monospace, Menlo, Consolas, monospace; }
+  button { padding:10px 14px; border-radius:9px; border:1px solid var(--line); background:var(--panel2);
+    color:var(--fg); font-size:.95em; }
+  button.primary { width:100%; margin-top:14px; background:var(--accent-dim); border-color:var(--accent); color:#cdddff; font-weight:600; }
+  button.del { border-color:#5a2a33; color:var(--bad); background:transparent; }
+  .err { color:var(--bad); font-size:.85em; min-height:1.1em; margin-top:6px; }
+  .empty { color:var(--dim); font-size:.9em; }
+</style>
+</head>
+<body>
+<iframe id="frame" title="atc"></iframe>
+
+<div id="servers" class="hidden">
+  <div class="logo">atc</div>
+  <h2>Your servers</h2>
+  <div id="list"></div>
+
+  <div class="card">
+    <h2 style="margin-top:0">Add a server</h2>
+    <label for="sName">Name (optional)</label>
+    <input id="sName" placeholder="home">
+    <label for="sUrl">atc link (https, with token)</label>
+    <input id="sUrl" class="mono" inputmode="url" autocapitalize="off" autocorrect="off" spellcheck="false"
+           placeholder="https://host.tailnet.ts.net/?token=…">
+    <button class="primary" onclick="addServer()">Add &amp; connect</button>
+    <div class="err" id="err"></div>
+  </div>
+</div>
+
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+const frame = $('frame');
+let servers = load('atc-servers', []);
+let backPending = false, backTimer = null;
+
+function load(k, d) { try { return JSON.parse(localStorage.getItem(k)) || d; } catch (e) { return d; } }
+function save(k, v) { localStorage.setItem(k, JSON.stringify(v)); }
+function serversVisible() { return !$('servers').classList.contains('hidden'); }
+
+function showServers() { renderServers(); $('servers').classList.remove('hidden'); }
+function hideServers() { $('servers').classList.add('hidden'); }
+
+function connect(url) {
+  if (!url) return;
+  localStorage.setItem('atc-last', url);
+  hideServers();
+  // Force a (re)load even if it's the same URL, WITHOUT touching the iframe's
+  // cross-origin contentWindow (that throws a SecurityError).
+  frame.src = 'about:blank';
+  setTimeout(() => { frame.src = url; }, 0);
+}
+
+function addServer() {
+  const url = $('sUrl').value.trim();
+  const name = $('sName').value.trim();
+  let u;
+  try { u = new URL(url); } catch (e) { $('err').textContent = 'That is not a valid URL.'; return; }
+  if (u.protocol !== 'https:') { $('err').textContent = 'Use an https:// tailnet address.'; return; }
+  if (!servers.some(s => s.url === url)) {
+    servers.push({ name: name || u.hostname, url });
+    save('atc-servers', servers);
+  }
+  $('sUrl').value = ''; $('sName').value = ''; $('err').textContent = '';
+  connect(url);
+}
+
+function deleteServer(url) {
+  servers = servers.filter(s => s.url !== url);
+  save('atc-servers', servers);
+  renderServers();
+}
+
+function renderServers() {
+  const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+  const list = $('list');
+  list.innerHTML = servers.length ? servers.map((s, i) => `
+    <div class="card srv">
+      <div class="meta"><div class="name">${esc(s.name)}</div><div class="url">${esc(s.url)}</div></div>
+      <button class="open" data-i="${i}">Open</button>
+      <button class="del" data-i="${i}">✕</button>
+    </div>`).join('') : `<div class="empty">No servers yet — add one below. Tip: on the desktop web UI, open 📱 → "copy app link".</div>`;
+  // Wire handlers by index — avoids injecting URLs into inline onclick strings.
+  list.querySelectorAll('button.open').forEach(b => b.onclick = () => { const s = servers[+b.dataset.i]; if (s) connect(s.url); });
+  list.querySelectorAll('button.del').forEach(b => b.onclick = () => { const s = servers[+b.dataset.i]; if (s) deleteServer(s.url); });
+}
+
+// Hardware Back (relayed from the iframe-hosted atc UI). If a server is open,
+// ask the atc page to pop one nav level; if it's already at its board, show
+// the Servers screen. On the Servers screen, Back exits the app.
+function handleBack() {
+  if (serversVisible()) { exitApp(); return; }
+  if (!frame.src) { exitApp(); return; }
+  backPending = true;
+  try { frame.contentWindow.postMessage({ type: 'atc-back' }, '*'); } catch (e) {}
+  clearTimeout(backTimer);
+  backTimer = setTimeout(() => { if (backPending) { backPending = false; showServers(); } }, 350);
+}
+window.addEventListener('message', (e) => {
+  if (e.data && e.data.type === 'atc-back-result') {
+    backPending = false; clearTimeout(backTimer);
+    if (!e.data.handled) showServers(); // atc was at its board → go to Servers
+  }
+});
+
+function exitApp() {
+  const App = window.Capacitor && Capacitor.Plugins && Capacitor.Plugins.App;
+  if (App && App.exitApp) App.exitApp(); else showServers();
+}
+const App = window.Capacitor && Capacitor.Plugins && Capacitor.Plugins.App;
+if (App && App.addListener) App.addListener('backButton', handleBack);
+
+// Launch: reconnect to the last server, else show the Servers screen.
+const last = localStorage.getItem('atc-last');
+if (last) connect(last); else showServers();
+</script>
+</body>
+</html>

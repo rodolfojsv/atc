@@ -3,9 +3,11 @@ package web
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -67,6 +69,23 @@ func TestIndexServedWithoutAuth(t *testing.T) {
 	}
 }
 
+func TestServiceWorkerServedWithoutAuth(t *testing.T) {
+	_, ts := testServer(t)
+	resp := get(t, ts.URL+"/sw.js", "")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("sw.js: status %d, want 200", resp.StatusCode)
+	}
+	if !strings.Contains(resp.Header.Get("Content-Type"), "javascript") {
+		t.Fatalf("sw.js content-type %q", resp.Header.Get("Content-Type"))
+	}
+	// The worker must be allowed to claim the whole origin, else
+	// registration with scope "/" is rejected by the browser.
+	if resp.Header.Get("Service-Worker-Allowed") != "/" {
+		t.Fatalf("Service-Worker-Allowed = %q, want /", resp.Header.Get("Service-Worker-Allowed"))
+	}
+}
+
 func TestMetaAndEmptySessions(t *testing.T) {
 	_, ts := testServer(t)
 	resp := get(t, ts.URL+"/api/meta", "secret")
@@ -104,6 +123,92 @@ func TestCreateValidation(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("missing repo: status %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestClientID(t *testing.T) {
+	mk := func(v string, set bool) *http.Request {
+		r := httptest.NewRequest("POST", "/api/sessions", nil)
+		if set {
+			r.Header.Set("X-Atc-Client", v)
+		}
+		return r
+	}
+	if got := clientID(mk("  dev-abc  ", true)); got != "dev-abc" {
+		t.Fatalf("trim: got %q, want dev-abc", got)
+	}
+	if got := clientID(mk("", false)); got != "" {
+		t.Fatalf("absent header: got %q, want empty", got)
+	}
+	if got := clientID(mk(strings.Repeat("x", 200), true)); len(got) != 64 {
+		t.Fatalf("cap: len %d, want 64", len(got))
+	}
+}
+
+func TestAppLatest404WhenNoAPK(t *testing.T) {
+	_, ts := testServer(t)
+	resp := get(t, ts.URL+"/api/app/latest?token=secret", "")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("no APK configured: status %d, want 404", resp.StatusCode)
+	}
+}
+
+func TestAppLatestAndDownload(t *testing.T) {
+	cfg, err := config.Load(filepath.Join(t.TempDir(), "none.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	apk := filepath.Join(t.TempDir(), "atc.apk")
+	if err := os.WriteFile(apk, []byte("PK\x03\x04 fake apk bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Web.APKPath = apk
+	cfg.Web.APKVersion = "1.2.3"
+	s := New(supervisor.New(cfg, bus.New()), cfg, "secret")
+	ts := httptest.NewServer(s.mux)
+	t.Cleanup(ts.Close)
+
+	resp := get(t, ts.URL+"/api/app/latest?token=secret", "")
+	defer resp.Body.Close()
+	var info appInfo
+	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+		t.Fatal(err)
+	}
+	if info.Version != "1.2.3" || info.Size == 0 || len(info.SHA256) != 64 {
+		t.Fatalf("latest = %+v", info)
+	}
+
+	dl := get(t, ts.URL+"/api/app/download?token=secret", "")
+	defer dl.Body.Close()
+	if dl.StatusCode != http.StatusOK {
+		t.Fatalf("download status %d", dl.StatusCode)
+	}
+	if ct := dl.Header.Get("Content-Type"); ct != "application/vnd.android.package-archive" {
+		t.Fatalf("download content-type %q", ct)
+	}
+	if cd := dl.Header.Get("Content-Disposition"); !strings.Contains(cd, "atc-1.2.3.apk") {
+		t.Fatalf("download disposition %q", cd)
+	}
+}
+
+func TestAppQR(t *testing.T) {
+	_, ts := testServer(t)
+	// Missing data -> 400.
+	bad := get(t, ts.URL+"/api/app/qr?token=secret", "")
+	bad.Body.Close()
+	if bad.StatusCode != http.StatusBadRequest {
+		t.Fatalf("no data: status %d, want 400", bad.StatusCode)
+	}
+	// Valid data -> a PNG image.
+	resp := get(t, ts.URL+"/api/app/qr?token=secret&data=https%3A%2F%2Fexample.ts.net%2F%3Ftoken%3Dx", "")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || resp.Header.Get("Content-Type") != "image/png" {
+		t.Fatalf("qr: status %d type %s", resp.StatusCode, resp.Header.Get("Content-Type"))
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if len(body) < 8 || string(body[1:4]) != "PNG" {
+		t.Fatalf("qr body not a PNG (len %d)", len(body))
 	}
 }
 

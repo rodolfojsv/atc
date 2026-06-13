@@ -217,6 +217,8 @@ type NewSessionOptions struct {
 	Prompt      string // optional first prompt
 	ReadOnly    bool   // plan mode: the agent inspects but never modifies
 	AutoApprove bool   // start in allow-all (deny-list still gates Copilot)
+	CreatedBy   string // opaque per-device clientId of the creator (web/app); "" for TUI
+	NotifyTopic string // ntfy topic of the creator's device; "" for TUI/scheduler
 }
 
 // NewSession validates the target directory, registers a session
@@ -280,7 +282,7 @@ func (s *Supervisor) NewSession(opts NewSessionOptions) (*Session, error) {
 		Name: name, Repo: repo, Dir: repo, Backend: backendName,
 		Preset: presetName, ReadOnly: opts.ReadOnly, Model: model,
 		Created: time.Now(), status: StatusStarting, autoApprove: autoApprove,
-		category: category,
+		category: category, createdBy: opts.CreatedBy, notifyTopic: opts.NotifyTopic,
 	}
 	s.mu.Lock()
 	s.sessions = append(s.sessions, sess)
@@ -463,7 +465,8 @@ func (s *Supervisor) ResumeAll() int {
 			Preset: sv.Preset, ReadOnly: sv.ReadOnly, Model: sv.Model,
 			Created: sv.Created, BaseBranch: sv.BaseBranch, BaseCommit: sv.BaseCommit,
 			autoApprove: sv.AutoApprove, pinned: sv.Pinned, category: sv.Category,
-			status: StatusStarting, id: sv.ID,
+			createdBy: sv.CreatedBy, notifyTopic: sv.NotifyTopic,
+			status:    StatusStarting, id: sv.ID,
 		}
 		s.mu.Lock()
 		s.sessions = append(s.sessions, sess)
@@ -576,8 +579,9 @@ func (s *Supervisor) persist() {
 				Worktree: sess.Worktree, Branch: sess.Branch, Backend: sess.Backend,
 				Preset: sess.Preset, Model: firstNonEmpty(sess.usage.Model, sess.Model), ReadOnly: sess.ReadOnly,
 				AutoApprove: sess.autoApprove,
-				Pinned:      sess.pinned, Category: sess.category,
-				BaseBranch: sess.BaseBranch, BaseCommit: sess.BaseCommit,
+				Pinned:      sess.pinned, Category: sess.category, CreatedBy: sess.createdBy,
+				NotifyTopic: sess.notifyTopic,
+				BaseBranch:  sess.BaseBranch, BaseCommit: sess.BaseCommit,
 				Status: string(sess.status), Created: sess.Created,
 				InTokens: sess.usage.InputTokens, OutTokens: sess.usage.OutputTokens,
 				NanoAiu: sess.usage.NanoAiu, CostUSD: sess.usage.CostUSD,
@@ -637,8 +641,9 @@ func (s *Supervisor) WatchStore(ctx context.Context, interval time.Duration) {
 				Worktree: sv.Worktree, Branch: sv.Branch, Backend: backendName,
 				Preset: sv.Preset, ReadOnly: sv.ReadOnly, Model: sv.Model,
 				Created: sv.Created, BaseBranch: sv.BaseBranch, BaseCommit: sv.BaseCommit,
-				pinned: sv.Pinned, category: sv.Category,
-				status: StatusStarting, id: sv.ID,
+				pinned: sv.Pinned, category: sv.Category, createdBy: sv.CreatedBy,
+				notifyTopic: sv.NotifyTopic,
+				status:      StatusStarting, id: sv.ID,
 			}
 			s.mu.Lock()
 			s.sessions = append(s.sessions, sess)

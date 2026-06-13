@@ -1,0 +1,20 @@
+{
+  "name": "atc-mobile",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Capacitor Android shell that loads the atc web UI over your tailnet.",
+  "scripts": {
+    "add:android": "cap add android",
+    "sync": "cap sync android",
+    "open:android": "cap open android"
+  },
+  "dependencies": {
+    "@capacitor/android": "^6.2.0",
+    "@capacitor/app": "^6.0.2",
+    "@capacitor/core": "^6.2.0",
+    "@capacitor/preferences": "^6.0.3"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^6.2.0"
+  }
+}

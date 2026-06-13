@@ -38,6 +38,12 @@
   button:active { transform: translateY(1px); }
   button.primary { background: var(--accent-dim); border-color: var(--accent); color: #cdddff; font-weight: 600; }
   button.primary:hover { background: #44588a; }
+  .qrwrap { display: flex; justify-content: center; margin: 14px 0; }
+  .qrwrap img.qr { background: #fff; padding: 10px; border-radius: 10px; width: 220px; height: 220px; image-rendering: pixelated; }
+  .apppanel section { margin-bottom: 22px; }
+  .apppanel h3 { margin: 0 0 4px; }
+  .apppanel .row { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
+  .apppanel .sha { word-break: break-all; font-size: .78em; }
   button.good { border-color: var(--ok); color: var(--ok); }
   button.bad { border-color: var(--err); color: var(--err); }
   button.ghost { background: transparent; }
@@ -155,8 +161,10 @@
   .inputbar.drag { border-color: var(--accent); background: var(--panel2); }
   .inputbar textarea { background: transparent; border: none; padding: .35em .3em; max-height: 9em; overflow-y: auto; }
   .inputbar textarea:focus { outline: none; }
-  .actions { display: flex; gap: .5em; margin-top: .5em; align-items: center; }
+  .actions { display: flex; gap: .5em; margin-top: .5em; align-items: center; flex-wrap: wrap; }
   .actions .spacer { flex: 1; }
+  .morelist { display: flex; flex-direction: column; gap: .5em; }
+  .morelist button { width: 100%; text-align: left; padding: .75em .8em; font-size: 1em; }
   #stat { color: var(--dim); font-size: .82em; min-height: 1.3em; padding: 0 .2em; }
   #stat.err { color: var(--err); }
 
@@ -225,6 +233,7 @@
     <span class="crumb" id="crumb"></span>
     <span class="spacer"></span>
     <button id="notifyBtn" class="ghost icon" onclick="toggleNotify()" title="Notify on permission / done">🔔</button>
+    <button id="appBtn" class="ghost icon" onclick="openAppPanel()" title="Get the app / pair a device">📱</button>
     <span class="dot" id="live" title="live"></span>
   </header>
   <main>
@@ -262,6 +271,7 @@
           <label class="ck"><input type="checkbox" id="fReadOnly"> Read-only</label>
         </div>
         <label class="ck" style="width:100%"><input type="checkbox" id="fAuto"> ⚡ Auto-approve (runs unattended; deny-list still applies)</label>
+        <label class="ck" style="width:100%"><input type="checkbox" id="fNotify" checked> 🔔 Notify me about this session</label>
         <div>
           <label class="fld">First prompt <span style="text-transform:none">(optional — you can attach images)</span></label>
           <div class="thumbs" id="formThumbs"></div>
@@ -300,11 +310,8 @@
           <button class="ghost" onclick="showBoard()">← Board</button>
           <span class="spacer"></span>
           <button id="diffBtn" class="ghost" onclick="openDiff()">diff</button>
-          <button class="ghost" onclick="switchModel()">model</button>
-          <button class="ghost" onclick="renameSession()">rename</button>
-          <button id="autoBtn" class="ghost" onclick="toggleAuto()">auto</button>
           <button class="ghost bad" onclick="postAction('abort')">abort</button>
-          <button class="ghost bad" onclick="killSession()">kill</button>
+          <button class="ghost" onclick="openMore()" title="More actions">⋯</button>
         </div>
       </div>
       <input id="fileInput" type="file" multiple accept="image/*" class="hidden">
@@ -321,7 +328,8 @@
 'use strict';
 let token = localStorage.getItem('atc-token') || '';
 const q = new URLSearchParams(location.search);
-if (q.get('token')) { token = q.get('token'); localStorage.setItem('atc-token', token); history.replaceState(null, '', location.pathname); }
+const focusOnLoad = q.get('focus') || ''; // deep link target (e.g. tapped from an ntfy alert)
+if (q.get('token') || focusOnLoad) { if (q.get('token')) { token = q.get('token'); localStorage.setItem('atc-token', token); } history.replaceState(null, '', location.pathname); }
 const $ = id => document.getElementById(id);
 const fileInput = $('fileInput'), formFile = $('formFile');
 let current = null, currentAuto = false;
@@ -335,9 +343,43 @@ let curSession = null;     // latest focus session payload (for diff/merge/model
 let lastLink = '';         // url backing the link-preview modal's "open in new tab"
 let notifyOn = localStorage.getItem('atc-notify') === '1';
 let prevStatus = {}, notifySeeded = false; // status transitions for notifications
+let swReg = null;          // service-worker registration, backs notifications on Android
+
+// A stable per-device id so the server can tag the sessions THIS device
+// started (sessionJSON.createdBy), which is how notifications get scoped to
+// "my" sessions. Not a credential — the bearer token is still the gate.
+let clientId = localStorage.getItem('atc-client-id');
+if (!clientId) {
+  clientId = (crypto.randomUUID ? crypto.randomUUID() : 'c-' + Date.now() + '-' + Math.random().toString(16).slice(2));
+  localStorage.setItem('atc-client-id', clientId);
+}
+// A stable per-device ntfy topic so backgrounded push (via the ntfy app)
+// reaches THIS phone for the sessions it started. Sent on every request as
+// X-Atc-Notify-Topic; the server stamps it on new sessions.
+let ntfyTopic = localStorage.getItem('atc-ntfy-topic');
+if (!ntfyTopic) {
+  const rnd = crypto.randomUUID ? crypto.randomUUID().replace(/-/g, '') : (Date.now().toString(16) + Math.random().toString(16).slice(2));
+  ntfyTopic = 'atc-' + rnd.slice(0, 16);
+  localStorage.setItem('atc-ntfy-topic', ntfyTopic);
+}
+let ntfyCfg = { enabled: false, server: '', topic: '' }; // filled from /api/meta
+// The topic the phone subscribes to: the server's stable default topic when
+// configured (catches every session), else this device's own topic.
+function subTopic() { return ntfyCfg.topic || ntfyTopic; }
+
+// Sessions this device is watching even though it didn't start them (name set).
+let watchSet = new Set(JSON.parse(localStorage.getItem('atc-watch') || '[]'));
+function saveWatch() { localStorage.setItem('atc-watch', JSON.stringify([...watchSet])); }
+// Sessions this device explicitly silenced (unchecked "notify" at creation),
+// even though it started them — lets the new-session checkbox opt out.
+let mutedSet = new Set(JSON.parse(localStorage.getItem('atc-muted') || '[]'));
+function saveMuted() { localStorage.setItem('atc-muted', JSON.stringify([...mutedSet])); }
+// True when this device should be alerted about a session: I started it (and
+// didn't mute it), or I'm explicitly watching it.
+function mine(s) { return ((s.createdBy && s.createdBy === clientId) || watchSet.has(s.name)) && !mutedSet.has(s.name); }
 
 function api(path, opts = {}) {
-  opts.headers = Object.assign({ 'Authorization': 'Bearer ' + token }, opts.headers || {});
+  opts.headers = Object.assign({ 'Authorization': 'Bearer ' + token, 'X-Atc-Client': clientId, 'X-Atc-Notify-Topic': ntfyTopic }, opts.headers || {});
   return fetch(path, opts).then(async r => {
     if (r.status === 401) { showLogin('wrong or missing token'); throw new Error('unauthorized'); }
     const body = await r.json().catch(() => ({}));
@@ -365,6 +407,68 @@ function openModal(title, bodyHTML, footHTML) {
   $('overlay').classList.remove('hidden');
 }
 function closeModal() { $('overlay').classList.add('hidden'); $('modal').innerHTML = ''; }
+
+// ---- "App" panel: pair a device, and download the APK once one is built ----
+// QR codes are rendered server-side (/api/app/qr) so the page keeps zero JS
+// deps. The QR <img> authenticates via ?token= since it can't send a header.
+function qrImg(data, alt) {
+  const src = '/api/app/qr?token=' + encodeURIComponent(token) + '&data=' + encodeURIComponent(data);
+  return `<img class="qr" alt="${escAttr(alt)}" src="${escAttr(src)}" width="220" height="220">`;
+}
+// Background push: subscribe the off-the-shelf ntfy app to this device's
+// topic. atc pushes a session's alerts to the topic of whoever started it.
+function ntfySection() {
+  if (!ntfyCfg.enabled || !ntfyCfg.server) return '';
+  const sub = ntfyCfg.server.replace(/\/$/, '') + '/' + subTopic();
+  // Two QRs in this panel, clearly labelled: "Android app" (download) and
+  // this one, "Phone notifications" (subscribe the ntfy app to your topic).
+  return `<section>
+    <h3>Phone notifications (ntfy)</h3>
+    <p class="dim">Install the <b>ntfy</b> app and scan to subscribe — you'll get backgrounded push alerts for sessions you start. Enable <b>instant delivery</b> on the subscription (this is a self-hosted server, no Google).</p>
+    <div class="qrwrap">${qrImg(sub, 'ntfy subscribe QR code')}</div>
+    <p class="dim sha mono">${esc(sub)}</p>
+    <div class="row">
+      <button class="ghost" onclick="navigator.clipboard&&navigator.clipboard.writeText('${jsArg(sub)}');this.textContent='copied ✓'">copy topic URL</button>
+      <button class="ghost" onclick="ntfyTest(this)">send test</button>
+    </div>
+  </section>`;
+}
+async function ntfyTest(btn) {
+  btn.textContent = 'sending…';
+  try {
+    await fetch(ntfyCfg.server.replace(/\/$/, '') + '/' + subTopic(), {
+      method: 'POST', body: 'atc test — if you see this, push works ✓',
+      headers: { 'Title': 'atc test', 'Tags': 'bell' },
+    });
+    btn.textContent = 'sent ✓';
+  } catch (e) { btn.textContent = 'failed (auth?)'; }
+}
+async function openAppPanel() {
+  // One QR only — the APK download. ntfy (if enabled) is a text-only step.
+  openModal('Get the app', `<div class="apppanel">
+    <section id="apkSection"><h3>Android app</h3><p class="dim">checking for a build…</p></section>
+    ${ntfySection()}
+  </div>`);
+  try {
+    const info = await api('/api/app/latest');
+    const dlUrl = location.origin + '/api/app/download?token=' + token;
+    const size = info.size ? (info.size / 1e6).toFixed(1) + ' MB' : '';
+    $('apkSection').innerHTML = `
+      <h3>Android app</h3>
+      <p class="dim">Scan the QR on your phone to download (or tap the button). Then enable “Install unknown apps” for your browser and open the file.</p>
+      <div class="qrwrap">${qrImg(dlUrl, 'APK download QR code')}</div>
+      <div class="row">
+        <button class="primary" onclick="location.href='${jsArg('/api/app/download?token=' + token)}'">Download APK</button>
+        <button class="ghost" onclick="navigator.clipboard&&navigator.clipboard.writeText('${jsArg(location.origin + '/?token=' + token)}');this.textContent='link copied ✓'">copy app link</button>
+      </div>
+      <p class="dim">After installing, open the app and paste the copied link into its "atc link" field.</p>
+      <p>Version <b>${esc(info.version)}</b>${size ? ' · ' + esc(size) : ''}</p>
+      <p class="dim sha mono">sha256: ${esc(info.sha256 || '')}</p>`;
+  } catch (e) {
+    $('apkSection').innerHTML = `<h3>Android app</h3>
+      <p class="dim">No build published yet — set <span class="mono">web.apkPath</span> in config.json and restart atc.</p>`;
+  }
+}
 
 // ---- minimal, dependency-free markdown (assistant messages) ----
 // Everything is HTML-escaped before any tag is produced, and link hrefs
@@ -536,12 +640,49 @@ async function toggleNotify() {
     const p = Notification.permission === 'granted' ? 'granted' : await Notification.requestPermission();
     if (p !== 'granted') { alert('Notifications blocked in the browser.'); reflectNotifyBtn(); return; }
     notifyOn = true;
+    if (!swReg) await registerSW();
+    // Fire one immediately so it's obvious the pipeline works — surfaces a
+    // muted OS (Do-Not-Disturb / Focus) or blocked browser before you ever
+    // wait on a real session.
+    fireNotify('atc notifications on', "you'll be alerted when a session needs approval or finishes");
   } else { notifyOn = false; }
   localStorage.setItem('atc-notify', notifyOn ? '1' : '0');
   reflectNotifyBtn();
 }
+// ---- watch: opt into notifications for a session you didn't start ----
+// Sessions you started are watched implicitly (createdBy === clientId), so
+// the button reads "yours" there; for others it toggles membership in the
+// local watch set.
+function reflectWatchBtn(s) {
+  const own = !!(s && s.createdBy && s.createdBy === clientId);
+  const on = own || (s && watchSet.has(s.name));
+  const b = $('watchBtn');
+  if (!b) return;
+  b.textContent = own ? '🔔 yours' : (on ? '🔔 watching' : 'watch');
+  b.title = own ? "you started this — you're notified" : (on ? 'watching — click to stop' : 'notify me about this session');
+  b.classList.toggle('good', on);
+  b.disabled = own; // can't unwatch your own session
+}
+function toggleWatch() {
+  if (!current) return;
+  if (watchSet.has(current)) watchSet.delete(current); else watchSet.add(current);
+  saveWatch();
+  reflectWatchBtn(curSession);
+}
+
+// Register the service worker that backs notifications. Android Chrome
+// rejects `new Notification()` outright, so without this the bell only
+// vibrated. Needs a secure context (HTTPS or localhost) — over plain-HTTP
+// tailnet IPs navigator.serviceWorker is undefined and we fall back.
+async function registerSW() {
+  if (!('serviceWorker' in navigator)) return;
+  try { swReg = await navigator.serviceWorker.register('/sw.js'); }
+  catch (e) { swReg = null; }
+}
 function fireNotify(title, body) {
-  try { new Notification(title, { body: body || '' }); } catch (e) { /* ignore */ }
+  const opts = { body: body || '', tag: title, renotify: true };
+  if (swReg && swReg.showNotification) swReg.showNotification(title, opts).catch(() => {});
+  else { try { new Notification(title, opts); } catch (e) { /* ignore */ } }
   if (navigator.vibrate) navigator.vibrate(200);
 }
 // Independent of which view is open, so you're alerted even mid-session.
@@ -553,10 +694,14 @@ async function checkNotifications() {
   for (const s of list) {
     seen[s.name] = s.status;
     const watching = document.visibilityState === 'visible' && current === s.name;
-    if (notifySeeded && !watching) {
+    if (notifySeeded && !watching && mine(s)) {
       const prev = prevStatus[s.name];
+      // 'done' is a resting state entered only when a turn finishes, so any
+      // transition into it is a genuine completion — catching it from any
+      // prior status (not just 'working') covers turns shorter than the poll.
       if (s.status === 'waiting' && prev && prev !== 'waiting') fireNotify(s.name + ' needs approval', s.pending ? s.pending.summary : 'permission requested');
-      else if (s.status === 'done' && prev === 'working') fireNotify(s.name + ' finished', s.lastLine || '');
+      else if (s.status === 'done' && prev && prev !== 'done') fireNotify(s.name + ' finished', s.lastLine || '');
+      else if (s.status === 'error' && prev && prev !== 'error') fireNotify(s.name + ' errored', s.err || 'session errored');
     }
   }
   prevStatus = seen; notifySeeded = true;
@@ -770,8 +915,13 @@ async function createSession() {
   if (!repo) { alert('Pick a repository.'); return; }
   const text = $('fPrompt').value;
   const atts = formAttachments.slice();
+  const notify = $('fNotify').checked;
   try {
-    const s = await api('/api/sessions', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    const headers = { 'Content-Type': 'application/json' };
+    // Opting out: set the mute sentinel so the server skips push entirely
+    // for this session (even the default topic), and mute it client-side too.
+    if (!notify) headers['X-Atc-Notify-Topic'] = '-';
+    const s = await api('/api/sessions', { method: 'POST', headers,
       body: JSON.stringify({
         name: $('fName').value.trim(), nameHint: text, repo, backend: $('fBackend').value,
         model: $('fModel').value.trim(), worktree: $('fWorktree').checked, readOnly: $('fReadOnly').checked,
@@ -779,6 +929,9 @@ async function createSession() {
         // nameHint lets the server auto-name from the first prompt; the
         // prompt itself is sent after the session is ready so images can ride along
       }) });
+    if (notify) { watchSet.add(s.name); mutedSet.delete(s.name); }
+    else { mutedSet.add(s.name); watchSet.delete(s.name); }
+    saveWatch(); saveMuted();
     if (text.trim() || atts.length) pendingFirst = { name: s.name, text, atts };
     $('newSheet').classList.add('hidden');
     $('fName').value = ''; $('fPrompt').value = ''; formAttachments = []; renderThumbs();
@@ -825,8 +978,6 @@ async function pollFocus() {
   histList = data.transcript.filter(e => e.kind === 'user').map(e => e.text); // for ↑/↓ prompt recall
   currentAuto = s.autoApprove;
   $('crumb').textContent = `${s.name} · ${s.status}${s.model ? ' · ' + s.model : ''}${cost(s) ? ' · ' + cost(s) : ''}`;
-  $('autoBtn').textContent = s.autoApprove ? '⚡ auto' : 'auto';
-  $('autoBtn').classList.toggle('good', s.autoApprove);
 
   const html = data.transcript.map(renderEntry).join('');
   if (html !== lastRender) {
@@ -913,6 +1064,22 @@ async function toggleAuto() {
   try { await api('/api/sessions/' + encodeURIComponent(current) + '/auto',
     { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ on: !currentAuto }) }); pollFocus(); }
   catch (e) { setStat(e.message, true); }
+}
+// Secondary session actions live behind "⋯" so the bottom bar stays short
+// and never needs horizontal scrolling on a phone.
+function openMore() {
+  const s = curSession || {};
+  const own = !!(s.createdBy && s.createdBy === clientId);
+  const watching = own || watchSet.has(current);
+  openModal('Session · ' + (current || ''), `<div class="morelist">
+    <button class="ghost" onclick="closeModal();switchModel()">Switch model…</button>
+    <button class="ghost" onclick="closeModal();renameSession()">Rename…</button>
+    <button class="ghost${s.autoApprove ? ' good' : ''}" onclick="toggleAuto();closeModal()">${s.autoApprove ? '⚡ Auto-approve: on' : 'Auto-approve: off'}</button>
+    ${own
+      ? `<button class="ghost good" disabled>🔔 Notifications: on (you started this)</button>`
+      : `<button class="ghost${watching ? ' good' : ''}" onclick="toggleWatch();closeModal()">${watching ? '🔔 Watching — tap to stop' : 'Notify me about this session'}</button>`}
+    <button class="ghost bad" onclick="closeModal();killSession()">Kill session…</button>
+  </div>`, `<button class="ghost" onclick="closeModal()">Close</button>`);
 }
 async function renameSession() {
   const nn = prompt('Rename session:', current);
@@ -1075,22 +1242,45 @@ enterToSubmit($('fPrompt'), createSession);
 async function boot() {
   try {
     meta = await api('/api/meta');
+    if (meta.ntfy) ntfyCfg = meta.ntfy;
     $('login').classList.add('hidden'); $('app').classList.remove('hidden');
     const repoOpts = (meta.repos || []).map(r =>
       `<option value="${esc(r)}" ${r === meta.defaultRepo ? 'selected' : ''}>${esc(baseName(r))}</option>`).join('');
-    $('fRepo').innerHTML = repoOpts + `<option value="__custom__">Custom path…</option>`;
+    $('fRepo').innerHTML = repoOpts + `<option value="__scratch__">— No repo (scratch) —</option><option value="__custom__">Custom path…</option>`;
     onRepoChange();
     $('fBackend').innerHTML = (meta.backends || []).map(b => `<option ${b === meta.defaultBackend ? 'selected' : ''}>${esc(b)}</option>`).join('');
     if (meta.defaultModel) $('fModel').value = meta.defaultModel;
     $('fAuto').checked = !!meta.defaultAutoApprove;
     dropZone('formBar', formAttachments);
     dropZone('focusBar', attachments);
+    registerSW();
+    // In the Capacitor app the UI runs inside the shell's iframe, where the
+    // in-page bell can't get notification permission anyway — push there comes
+    // via ntfy, so hide the bell to avoid a dead/confusing button.
+    if (window.self !== window.top) $('notifyBtn').style.display = 'none';
     reflectNotifyBtn();
     if (!notifyTimer) notifyTimer = setInterval(checkNotifications, 4000); // runs in any view
-    showBoard();
+    if (focusOnLoad) openSession(focusOnLoad); else showBoard();
   } catch (e) { showLogin(e.message === 'unauthorized' ? 'wrong or missing token' : ''); }
 }
 let notifyTimer = null;
+
+// In the Capacitor app the atc UI runs inside the shell's iframe, so the
+// hardware Back button is captured by the shell (which has the Capacitor
+// bridge) and relayed here as a postMessage. We pop one level of in-app nav
+// (modal → new-sheet → session → board) and report whether we handled it; if
+// we're already at the board the shell shows its Servers screen.
+window.addEventListener('message', (e) => {
+  const d = e.data;
+  if (!d || d.type !== 'atc-back') return;
+  let handled = true;
+  if (modalOpen()) closeModal();
+  else if (!$('newSheet').classList.contains('hidden')) toggleNew();
+  else if (current) showBoard();
+  else handled = false; // at the board root — let the shell take over
+  (e.source || window.parent).postMessage({ type: 'atc-back-result', handled }, '*');
+});
+
 boot();
 </script>
 </body>

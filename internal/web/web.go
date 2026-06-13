@@ -19,6 +19,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -30,6 +32,9 @@ import (
 //go:embed index.html
 var indexHTML []byte
 
+//go:embed sw.js
+var serviceWorkerJS []byte
+
 const (
 	maxUploadBytes = 32 << 20 // whole multipart form
 	maxFileBytes   = 10 << 20 // per attachment
@@ -37,10 +42,11 @@ const (
 )
 
 type Server struct {
-	sup   *supervisor.Supervisor
-	cfg   *config.Config
-	token string
-	mux   *http.ServeMux
+	sup      *supervisor.Supervisor
+	cfg      *config.Config
+	token    string
+	mux      *http.ServeMux
+	apkCache apkHashCache
 }
 
 // New builds the server. An empty token gets a random per-run one;
@@ -82,6 +88,13 @@ func (s *Server) routes() {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write(indexHTML)
 	})
+	// The service worker is served unauthenticated (it carries no data and
+	// no token); it must live at the origin root so its scope covers "/".
+	s.mux.HandleFunc("GET /sw.js", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+		w.Header().Set("Service-Worker-Allowed", "/")
+		_, _ = w.Write(serviceWorkerJS)
+	})
 	api := func(pattern string, h http.HandlerFunc) {
 		s.mux.Handle(pattern, s.auth(h))
 	}
@@ -101,6 +114,9 @@ func (s *Server) routes() {
 	api("POST /api/sessions/{name}/merge", s.handleMerge)
 	api("POST /api/sessions/{name}/model", s.handleModel)
 	api("GET /api/sessions/{name}/file", s.handleFile)
+	api("GET /api/app/latest", s.handleAppLatest)
+	api("GET /api/app/download", s.handleAppDownload)
+	api("GET /api/app/qr", s.handleAppQR)
 }
 
 // auth accepts the token as a bearer header (fetch calls) or query
@@ -139,6 +155,7 @@ type sessionJSON struct {
 	AutoOK     bool      `json:"autoApprove"`
 	Pinned     bool      `json:"pinned,omitempty"`
 	Category   string    `json:"category,omitempty"`
+	CreatedBy  string    `json:"createdBy,omitempty"`
 	Created    time.Time `json:"created"`
 	SinceEvent float64   `json:"sinceEventSec,omitempty"`
 
@@ -178,7 +195,8 @@ func toSessionJSON(v supervisor.SessionView) sessionJSON {
 		Worktree: v.Worktree != "", Backend: v.Backend, Preset: v.Preset,
 		Model: v.Model, Status: string(v.Status), Intent: v.Intent,
 		Err: v.Err, LastLine: v.LastLine, ReadOnly: v.ReadOnly,
-		AutoOK: v.AutoApprove, Pinned: v.Pinned, Category: v.Category, Created: v.Created,
+		AutoOK: v.AutoApprove, Pinned: v.Pinned, Category: v.Category,
+		CreatedBy: v.CreatedBy, Created: v.Created,
 		SinceEvent:    v.SinceEvent.Seconds(),
 		InTokens:      v.Usage.InputTokens,
 		OutTokens:     v.Usage.OutputTokens,
@@ -239,6 +257,11 @@ func (s *Server) handleMeta(w http.ResponseWriter, _ *http.Request) {
 			"todayUsd": today.CostUSD, "todayAiu": today.NanoAiu / 1e9,
 			"monthUsd": month.CostUSD, "monthAiu": month.NanoAiu / 1e9,
 		},
+		"ntfy": map[string]any{
+			"enabled": s.cfg.Ntfy.Enabled,
+			"server":  ntfyServerURL(s.cfg.Ntfy),
+			"topic":   s.cfg.Ntfy.Topic, // server default topic (stable, catches all sessions)
+		},
 	})
 }
 
@@ -268,10 +291,23 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusBadRequest, "bad JSON: "+err.Error())
 		return
 	}
+	// "__scratch__" is the "no repo" option: run the agent in a throwaway
+	// scratch directory (~/.atc/scratch) for tasks that aren't tied to a
+	// codebase. It isn't a git repo, so worktree mode doesn't apply.
+	repo, scratch := req.Repo, false
+	if repo == "__scratch__" {
+		dir, err := scratchDir()
+		if err != nil {
+			jsonError(w, http.StatusInternalServerError, "scratch dir: "+err.Error())
+			return
+		}
+		repo, scratch = dir, true
+	}
 	sess, err := s.sup.NewSession(supervisor.NewSessionOptions{
-		Name: req.Name, NameHint: req.NameHint, Repo: req.Repo, Backend: req.Backend,
+		Name: req.Name, NameHint: req.NameHint, Repo: repo, Backend: req.Backend,
 		Preset: req.Preset, Model: req.Model, Prompt: req.Prompt,
-		UseWorktree: req.Worktree, ReadOnly: req.ReadOnly, AutoApprove: req.AutoApprove,
+		UseWorktree: req.Worktree && !scratch, ReadOnly: req.ReadOnly, AutoApprove: req.AutoApprove,
+		CreatedBy: clientID(r), NotifyTopic: notifyTopic(r),
 	})
 	if err != nil {
 		jsonError(w, http.StatusBadRequest, err.Error())
@@ -565,6 +601,50 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 		"content":  string(data),
 		"markdown": strings.HasSuffix(strings.ToLower(name), ".md"),
 	})
+}
+
+// clientID returns the caller's opaque per-device id from the X-Atc-Client
+// header (set by the web UI / app), trimmed and length-capped so a rogue
+// client can't bloat the session store. Empty when absent (e.g. curl, TUI).
+func clientID(r *http.Request) string {
+	id := strings.TrimSpace(r.Header.Get("X-Atc-Client"))
+	if len(id) > 64 {
+		id = id[:64]
+	}
+	return id
+}
+
+// notifyTopic returns the caller's per-device ntfy topic from the
+// X-Atc-Notify-Topic header, trimmed and length-capped. Empty when absent.
+func notifyTopic(r *http.Request) string {
+	t := strings.TrimSpace(r.Header.Get("X-Atc-Notify-Topic"))
+	if len(t) > 128 {
+		t = t[:128]
+	}
+	return t
+}
+
+// ntfyServerURL is the ntfy base URL the web UI shows for subscribing —
+// SubscribeURL if set, else Server, else ntfy.sh — without a trailing slash.
+func ntfyServerURL(c config.Ntfy) string {
+	s := strings.TrimRight(strings.TrimSpace(c.SubscribeURL), "/")
+	if s == "" {
+		s = strings.TrimRight(strings.TrimSpace(c.Server), "/")
+	}
+	if s == "" {
+		return "https://ntfy.sh"
+	}
+	return s
+}
+
+// scratchDir is the directory used for "no repo" sessions. Created on demand.
+func scratchDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(home, ".atc", "scratch")
+	return dir, os.MkdirAll(dir, 0o755)
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

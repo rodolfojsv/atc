@@ -25,6 +25,7 @@ import (
 	"github.com/rodolfojsv/atc/internal/bus"
 	"github.com/rodolfojsv/atc/internal/config"
 	"github.com/rodolfojsv/atc/internal/hooks"
+	"github.com/rodolfojsv/atc/internal/ntfy"
 	"github.com/rodolfojsv/atc/internal/sched"
 	"github.com/rodolfojsv/atc/internal/supervisor"
 	"github.com/rodolfojsv/atc/internal/tui"
@@ -110,6 +111,7 @@ func cmdTUI(argv []string) int {
 
 	sup := supervisor.New(cfg, b)
 	defer sup.Stop()
+	attachNtfy(b, sup, cfg, cfg.Web.Token)
 
 	m := tui.New(sup, cfg)
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
@@ -181,6 +183,7 @@ func cmdServe(argv []string) int {
 	hooks.New(cfg.Hooks).Attach(b)
 	sup := supervisor.New(cfg, b)
 	defer sup.Stop()
+	attachNtfy(b, sup, cfg, token)
 
 	srv := web.New(sup, cfg, token)
 	url, err := srv.Start(*addr)
@@ -205,6 +208,22 @@ func cmdServe(argv []string) int {
 	<-sig
 	fmt.Println("atc: shutting down (sessions stay resumable)")
 	return 0
+}
+
+// attachNtfy subscribes an ntfy push publisher to the bus when it's
+// enabled in config. atcToken is the effective web token (used only for
+// Approve/Deny action buttons). No-op when ntfy is disabled.
+func attachNtfy(b *bus.Bus, sup *supervisor.Supervisor, cfg *config.Config, atcToken string) {
+	if !cfg.Ntfy.Enabled {
+		return
+	}
+	pub := ntfy.New(cfg.Ntfy, atcToken, func(name string) string {
+		if s := sup.SessionByName(name); s != nil {
+			return s.View().NotifyTopic
+		}
+		return ""
+	})
+	b.Subscribe(pub.OnEvent)
 }
 
 // portOf extracts the port from a URL like http://127.0.0.1:8787/?token=…
