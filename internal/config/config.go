@@ -68,12 +68,16 @@ type Config struct {
 	DefaultRepo string   `json:"defaultRepo,omitempty"`
 	// DefaultBackend pre-selects the backend in the new-session forms
 	// ("copilot" or "claude"); empty falls back to the built-in default.
-	DefaultBackend string              `json:"defaultBackend,omitempty"`
-	Model          string              `json:"model,omitempty"`
-	Presets        map[string]Preset   `json:"presets,omitempty"`
-	Hooks          map[string][]string `json:"hooks,omitempty"`
-	Schedules      []Schedule          `json:"schedules,omitempty"`
-	Web            Web                 `json:"web,omitempty"`
+	DefaultBackend string `json:"defaultBackend,omitempty"`
+	// DefaultAutoApprove starts new sessions in allow-all (the ⚡ auto
+	// state) without a per-session toggle. Deny-list still gates Copilot;
+	// for Claude this means the process spawns in bypassPermissions.
+	DefaultAutoApprove bool                `json:"defaultAutoApprove,omitempty"`
+	Model              string              `json:"model,omitempty"`
+	Presets            map[string]Preset   `json:"presets,omitempty"`
+	Hooks              map[string][]string `json:"hooks,omitempty"`
+	Schedules          []Schedule          `json:"schedules,omitempty"`
+	Web                Web                 `json:"web,omitempty"`
 }
 
 // Path returns the default config file location:

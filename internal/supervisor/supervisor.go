@@ -175,6 +175,7 @@ type NewSessionOptions struct {
 	Model       string // overrides preset model, then config model
 	Prompt      string // optional first prompt
 	ReadOnly    bool   // plan mode: the agent inspects but never modifies
+	AutoApprove bool   // start in allow-all (deny-list still gates Copilot)
 }
 
 // NewSession validates the target directory, registers a session
@@ -227,10 +228,11 @@ func (s *Supervisor) NewSession(opts NewSessionOptions) (*Session, error) {
 		model = s.cfg.Model
 	}
 
+	autoApprove := opts.AutoApprove || s.cfg.DefaultAutoApprove
 	sess := &Session{
 		Name: name, Repo: repo, Dir: repo, Backend: backendName,
 		Preset: presetName, ReadOnly: opts.ReadOnly, Model: model,
-		Created: time.Now(), status: StatusStarting,
+		Created: time.Now(), status: StatusStarting, autoApprove: autoApprove,
 	}
 	s.mu.Lock()
 	s.sessions = append(s.sessions, sess)
@@ -259,11 +261,20 @@ func (s *Supervisor) uniqueName(name string) string {
 func (s *Supervisor) spec(sess *Session, model string) agent.SessionSpec {
 	sess.mu.Lock()
 	dir := sess.Dir
+	auto := sess.autoApprove
 	sess.mu.Unlock()
+	approval := s.cfg.Preset(sess.Preset).Approval
+	// A session started in auto-approve runs unattended: surface that to
+	// the backend's own permission mechanism too, so Claude (whose mode
+	// is fixed at launch) spawns in bypassPermissions rather than only
+	// flipping the Copilot runtime path. Deny-list still gates Copilot.
+	if auto {
+		approval = config.ApprovalAllowAll
+	}
 	return agent.SessionSpec{
 		WorkingDir:   dir,
 		Model:        model,
-		Approval:     s.cfg.Preset(sess.Preset).Approval,
+		Approval:     approval,
 		ReadOnly:     sess.ReadOnly,
 		OnEvent:      func(e agent.Event) { s.handleEvent(sess, e) },
 		OnPermission: s.permissionFunc(sess),
@@ -350,7 +361,8 @@ func (s *Supervisor) ResumeAll() int {
 			Worktree: sv.Worktree, Branch: sv.Branch, Backend: backendName,
 			Preset: sv.Preset, ReadOnly: sv.ReadOnly, Model: sv.Model,
 			Created: sv.Created, BaseBranch: sv.BaseBranch, BaseCommit: sv.BaseCommit,
-			status: StatusStarting, id: sv.ID,
+			autoApprove: sv.AutoApprove,
+			status:      StatusStarting, id: sv.ID,
 		}
 		s.mu.Lock()
 		s.sessions = append(s.sessions, sess)
@@ -462,7 +474,8 @@ func (s *Supervisor) persist() {
 				ID: sess.id, Name: sess.Name, Repo: sess.Repo, Dir: sess.Dir,
 				Worktree: sess.Worktree, Branch: sess.Branch, Backend: sess.Backend,
 				Preset: sess.Preset, Model: firstNonEmpty(sess.usage.Model, sess.Model), ReadOnly: sess.ReadOnly,
-				BaseBranch: sess.BaseBranch, BaseCommit: sess.BaseCommit,
+				AutoApprove: sess.autoApprove,
+				BaseBranch:  sess.BaseBranch, BaseCommit: sess.BaseCommit,
 				Status: string(sess.status), Created: sess.Created,
 				InTokens: sess.usage.InputTokens, OutTokens: sess.usage.OutputTokens,
 				NanoAiu: sess.usage.NanoAiu, CostUSD: sess.usage.CostUSD,

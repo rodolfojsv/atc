@@ -57,8 +57,8 @@
   .toolbar { display: flex; align-items: center; gap: .5em; margin-bottom: .8em; }
   .toolbar h2 { font-size: 1.05em; margin: 0; }
   .toolbar .spacer { flex: 1; }
-  .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r);
-    padding: .75em .85em; margin-bottom: .6em; cursor: pointer; transition: border-color .12s, transform .08s; }
+  .card { position: relative; background: var(--panel); border: 1px solid var(--line); border-radius: var(--r);
+    padding: .75em .85em; padding-right: 2.6em; margin-bottom: .6em; cursor: pointer; transition: border-color .12s, transform .08s; }
   .card:hover { border-color: var(--accent-dim); }
   .card:active { transform: scale(.995); }
   .card .top { display: flex; gap: .55em; align-items: center; flex-wrap: wrap; }
@@ -76,6 +76,18 @@
   @keyframes pulse { 50% { opacity: .5; } }
   .empty { color: var(--dim); text-align: center; padding: 2.5em 1em; }
   .empty button { margin-top: 1em; }
+  /* hold-to-delete ✕ */
+  .del { position: absolute; top: 7px; right: 7px; width: 30px; height: 30px; padding: 0;
+    border: none; border-radius: 50%; background: transparent; color: var(--faint);
+    display: flex; align-items: center; justify-content: center; cursor: pointer;
+    touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+  .del:hover { color: var(--err); background: rgba(247,118,142,.1); }
+  .del.arming { color: var(--err); background: rgba(247,118,142,.14); }
+  .del.gone { color: var(--err); }
+  .del .xmark { font-size: 14px; line-height: 1; pointer-events: none; }
+  .delsvg { position: absolute; inset: 0; width: 100%; height: 100%; transform: rotate(-90deg); pointer-events: none; }
+  .delsvg .ring { fill: none; stroke: var(--err); stroke-width: 2.5;
+    stroke-dasharray: 56.5; stroke-dashoffset: 56.5; }
   #spend { color: var(--faint); font-size: .8em; text-align: center; padding: 1.2em 0 .4em; }
 
   /* new-session sheet */
@@ -181,6 +193,7 @@
           <label class="ck"><input type="checkbox" id="fWorktree"> Worktree</label>
           <label class="ck"><input type="checkbox" id="fReadOnly"> Read-only</label>
         </div>
+        <label class="ck" style="width:100%"><input type="checkbox" id="fAuto"> ⚡ Auto-approve (runs unattended; deny-list still applies)</label>
         <div>
           <label class="fld">First prompt <span style="text-transform:none">(optional — you can attach images)</span></label>
           <div class="thumbs" id="formThumbs"></div>
@@ -208,7 +221,7 @@
       <div class="composer">
         <div class="thumbs" id="thumbs"></div>
         <div class="inputbar" id="focusBar">
-          <textarea id="prompt" placeholder="Message… (paste an image, ⌘/Ctrl+Enter to send)" rows="1"></textarea>
+          <textarea id="prompt" placeholder="Message… (Enter to send · Ctrl/Shift+Enter for newline)" rows="1"></textarea>
           <button class="icon ghost" title="attach image" onclick="fileInput.click()">📎</button>
           <button class="primary icon" onclick="sendPrompt()" title="send">➤</button>
         </div>
@@ -267,7 +280,55 @@ function cost(s) {
 }
 
 // ---- board ----
+// While a hold-to-delete is in progress we skip re-rendering so the
+// 2s poll can't wipe the card out from under the press.
+let holdActive = false;
+const HOLD_MS = 1100;
+
+function setupHold(btn) {
+  const name = btn.dataset.name;
+  const ring = btn.querySelector('.ring');
+  let timer = null;
+  const reset = () => {
+    if (timer) { clearTimeout(timer); timer = null; }
+    holdActive = false;
+    btn.classList.remove('arming');
+    ring.style.transition = 'none';
+    ring.style.strokeDashoffset = '56.5';
+  };
+  const start = ev => {
+    ev.preventDefault(); ev.stopPropagation();
+    holdActive = true;
+    btn.classList.add('arming');
+    // force the empty state, then animate the ring to full over HOLD_MS
+    ring.style.transition = 'none';
+    ring.style.strokeDashoffset = '56.5';
+    void ring.getBoundingClientRect();
+    ring.style.transition = `stroke-dashoffset ${HOLD_MS}ms linear`;
+    ring.style.strokeDashoffset = '0';
+    timer = setTimeout(fire, HOLD_MS);
+  };
+  const fire = async () => {
+    timer = null;
+    btn.classList.remove('arming'); btn.classList.add('gone');
+    if (navigator.vibrate) navigator.vibrate(30);
+    try {
+      await api('/api/sessions/' + encodeURIComponent(name) + '/kill',
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ removeWorktree: false }) });
+    } catch (e) { /* card stays; next poll reflects reality */ }
+    holdActive = false;
+    pollBoard();
+  };
+  btn.addEventListener('pointerdown', start);
+  btn.addEventListener('pointerup', reset);
+  btn.addEventListener('pointerleave', reset);
+  btn.addEventListener('pointercancel', reset);
+  btn.addEventListener('click', e => { e.stopPropagation(); e.preventDefault(); });
+  btn.addEventListener('contextmenu', e => e.preventDefault());
+}
+
 function renderBoard(list) {
+  if (holdActive) return; // don't disturb an in-progress hold
   const rows = $('rows');
   if (!list.length) {
     rows.innerHTML = `<div class="empty">No sessions yet.<br><button class="primary" onclick="toggleNew()">+ New session</button></div>`;
@@ -275,6 +336,10 @@ function renderBoard(list) {
   }
   rows.innerHTML = list.map(s => `
     <div class="card" onclick="openSession('${esc(s.name)}')">
+      <button class="del" data-name="${esc(s.name)}" title="Hold to delete" aria-label="Hold to delete">
+        <svg class="delsvg" viewBox="0 0 24 24"><circle class="ring" cx="12" cy="12" r="9"/></svg>
+        <span class="xmark">✕</span>
+      </button>
       <div class="top">
         <span class="name">${esc(s.name)}</span>
         <span class="pill ${esc(s.status)}">${esc(s.status)}${s.pendingCount ? ' ·' + s.pendingCount : ''}</span>
@@ -285,6 +350,7 @@ function renderBoard(list) {
         : s.err ? `<div class="last alert">✗ ${esc(s.err)}</div>`
         : s.lastLine ? `<div class="last">${esc(s.lastLine)}</div>` : ''}
     </div>`).join('');
+  rows.querySelectorAll('.del').forEach(setupHold);
 }
 async function pollBoard() {
   try {
@@ -322,6 +388,7 @@ async function createSession() {
       body: JSON.stringify({
         name: $('fName').value.trim(), repo, backend: $('fBackend').value,
         model: $('fModel').value.trim(), worktree: $('fWorktree').checked, readOnly: $('fReadOnly').checked,
+        autoApprove: $('fAuto').checked,
         // first prompt is sent after the session is ready so images can ride along
       }) });
     if (text.trim() || atts.length) pendingFirst = { name: s.name, text, atts };
@@ -453,6 +520,20 @@ document.addEventListener('paste', e => {
   if (into) pasteImages(e, into);
 });
 
+// Esc / Left arrow returns from a session to the board. Ignored while a
+// field is focused (there those keys edit text); Esc first blurs the
+// field so a second Esc goes back.
+document.addEventListener('keydown', e => {
+  if (!current || $('focus').classList.contains('hidden')) return;
+  const ae = document.activeElement;
+  const typing = ae && (ae.tagName === 'TEXTAREA' || ae.tagName === 'INPUT' || ae.tagName === 'SELECT');
+  if (e.key === 'Escape') {
+    if (typing) ae.blur(); else { e.preventDefault(); showBoard(); }
+  } else if (e.key === 'ArrowLeft' && !typing) {
+    e.preventDefault(); showBoard();
+  }
+});
+
 // drag & drop onto either input bar
 function dropZone(barId, into) {
   const bar = $(barId);
@@ -488,9 +569,25 @@ function sendPrompt() {
 }
 function autosize(t) { t.style.height = 'auto'; t.style.height = Math.min(t.scrollHeight, 9 * 16) + 'px'; }
 $('prompt').addEventListener('input', e => autosize(e.target));
-$('prompt').addEventListener('keydown', e => {
-  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); sendPrompt(); }
-});
+
+// Enter submits; Ctrl/Cmd/Shift+Enter inserts a newline. (isComposing
+// guards IME input so Enter doesn't submit mid-composition.)
+function enterToSubmit(t, submit) {
+  t.addEventListener('keydown', e => {
+    if (e.key !== 'Enter' || e.isComposing) return;
+    e.preventDefault();
+    if (e.ctrlKey || e.metaKey || e.shiftKey) {
+      const a = t.selectionStart, b = t.selectionEnd;
+      t.value = t.value.slice(0, a) + '\n' + t.value.slice(b);
+      t.selectionStart = t.selectionEnd = a + 1;
+      if (t.id === 'prompt') autosize(t);
+    } else {
+      submit();
+    }
+  });
+}
+enterToSubmit($('prompt'), sendPrompt);
+enterToSubmit($('fPrompt'), createSession);
 
 // ---- boot ----
 async function boot() {
@@ -503,6 +600,7 @@ async function boot() {
     onRepoChange();
     $('fBackend').innerHTML = (meta.backends || []).map(b => `<option ${b === meta.defaultBackend ? 'selected' : ''}>${esc(b)}</option>`).join('');
     if (meta.defaultModel) $('fModel').value = meta.defaultModel;
+    $('fAuto').checked = !!meta.defaultAutoApprove;
     dropZone('formBar', formAttachments);
     dropZone('focusBar', attachments);
     showBoard();

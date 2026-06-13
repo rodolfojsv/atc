@@ -181,6 +181,14 @@ func (m *Model) updateFocus(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	}
+	// Left arrow returns to the board when the prompt is empty (there's
+	// nothing to move the cursor over), complementing esc. With text in
+	// the box it keeps its normal cursor-movement behavior.
+	if msg.String() == "left" && strings.TrimSpace(m.input.Value()) == "" {
+		m.mode = modeBoard
+		m.input.Blur()
+		return m, nil
+	}
 	switch msg.String() {
 	case "esc":
 		m.mode = modeBoard
@@ -382,7 +390,7 @@ func (m *Model) viewFocus() string {
 		box = styleInputBoxFocused
 	}
 	b.WriteString(box.Width(m.width-2).Render(m.input.View()) + "\n")
-	bottom := keybar("esc", "board", "enter", "send", "ctrl+j", "newline", "ctrl+x", "abort", "wheel", "scroll")
+	bottom := keybar("esc/←", "board", "enter", "send", "ctrl+j", "newline", "ctrl+x", "abort", "wheel", "scroll")
 	if m.flash != "" {
 		bottom += "  " + styleFlash.Render(m.flash)
 	}
