@@ -123,6 +123,43 @@ func TestLiveSmoke(t *testing.T) {
 	}
 }
 
+// userContent must produce the API content-block shape Claude Code's
+// stream-JSON input expects: image blocks first, then the text block.
+func TestUserContentWithImages(t *testing.T) {
+	got := userContent("what is this?", []agent.Attachment{
+		{Name: "a.png", MediaType: "image/png", Data: []byte{1, 2, 3}},
+	})
+	raw, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var blocks []map[string]any
+	if err := json.Unmarshal(raw, &blocks); err != nil {
+		t.Fatalf("content is not a block array: %s", raw)
+	}
+	if len(blocks) != 2 {
+		t.Fatalf("want 2 blocks, got %d: %s", len(blocks), raw)
+	}
+	if blocks[0]["type"] != "image" {
+		t.Fatalf("first block %v, want image", blocks[0]["type"])
+	}
+	src := blocks[0]["source"].(map[string]any)
+	if src["type"] != "base64" || src["media_type"] != "image/png" || src["data"] != "AQID" {
+		t.Fatalf("bad image source: %v", src)
+	}
+	if blocks[1]["type"] != "text" || blocks[1]["text"] != "what is this?" {
+		t.Fatalf("bad text block: %v", blocks[1])
+	}
+}
+
+// Without attachments the content stays a plain string — the shape
+// every Claude Code version accepts.
+func TestUserContentPlain(t *testing.T) {
+	if got := userContent("hi", nil); got != "hi" {
+		t.Fatalf("got %v, want plain string", got)
+	}
+}
+
 func TestHistoryRestoresUsage(t *testing.T) {
 	cfgDir := t.TempDir()
 	t.Setenv("CLAUDE_CONFIG_DIR", cfgDir)

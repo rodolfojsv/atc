@@ -16,6 +16,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -122,12 +123,47 @@ func (s *session) ensureProc() error {
 func (s *session) Send(_ context.Context, prompt string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.writeUser(prompt)
+}
+
+// SendWithAttachments inlines images as base64 content blocks in the
+// stream-JSON user message, putting them directly in the model's
+// context — no temp files. Non-image attachments are the supervisor's
+// problem (it saves them to disk and references them in the prompt).
+func (s *session) SendWithAttachments(_ context.Context, prompt string, atts []agent.Attachment) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.writeUser(userContent(prompt, atts))
+}
+
+// userContent builds the API-shaped content for a user message: image
+// blocks first, then the text block.
+func userContent(prompt string, atts []agent.Attachment) any {
+	if len(atts) == 0 {
+		return prompt
+	}
+	var content []map[string]any
+	for _, a := range atts {
+		content = append(content, map[string]any{
+			"type": "image",
+			"source": map[string]any{
+				"type":       "base64",
+				"media_type": a.MediaType,
+				"data":       base64.StdEncoding.EncodeToString(a.Data),
+			},
+		})
+	}
+	return append(content, map[string]any{"type": "text", "text": prompt})
+}
+
+// writeUser sends one user message over stdin; the caller holds mu.
+func (s *session) writeUser(content any) error {
 	if err := s.ensureProc(); err != nil {
 		return err
 	}
 	msg := map[string]any{
 		"type":    "user",
-		"message": map[string]any{"role": "user", "content": prompt},
+		"message": map[string]any{"role": "user", "content": content},
 	}
 	line, err := json.Marshal(msg)
 	if err != nil {

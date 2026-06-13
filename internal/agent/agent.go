@@ -97,6 +97,31 @@ type SessionSpec struct {
 	OnPermission PermissionFunc
 }
 
+// Attachment is a file (typically an image) sent alongside a prompt.
+type Attachment struct {
+	Name      string // original filename, for transcript display
+	MediaType string // e.g. "image/png"
+	Data      []byte
+}
+
+// IsImage reports whether the attachment can go into an image content
+// block (the API accepts these four media types).
+func (a Attachment) IsImage() bool {
+	switch a.MediaType {
+	case "image/png", "image/jpeg", "image/gif", "image/webp":
+		return true
+	}
+	return false
+}
+
+// AttachmentSender is optionally implemented by sessions whose backend
+// can inline attachments into the model context (Claude's stream-JSON
+// image blocks). For backends without it, the supervisor saves
+// attachments to disk and references them by path in the prompt.
+type AttachmentSender interface {
+	SendWithAttachments(ctx context.Context, prompt string, atts []Attachment) error
+}
+
 type Session interface {
 	ID() string
 	// Send submits a user prompt; the response streams via OnEvent.
