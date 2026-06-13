@@ -160,6 +160,42 @@
   #stat { color: var(--dim); font-size: .82em; min-height: 1.3em; padding: 0 .2em; }
   #stat.err { color: var(--err); }
 
+  /* modal overlay (diff, link preview) */
+  .overlay { position: fixed; inset: 0; background: rgba(0,0,0,.62); z-index: 50;
+    display: flex; align-items: center; justify-content: center; padding: 1em; }
+  .modal { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r);
+    width: 100%; max-width: 920px; max-height: 90vh; display: flex; flex-direction: column; overflow: hidden; }
+  .modal .mhead { display: flex; align-items: center; gap: .5em; padding: .65em .9em; border-bottom: 1px solid var(--line); }
+  .modal .mtitle { font-weight: 600; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .modal .mbody { overflow: auto; padding: .6em .9em; }
+  .modal .mfoot { display: flex; gap: .5em; justify-content: flex-end; padding: .65em .9em; border-top: 1px solid var(--line); }
+  .modal pre.diff { white-space: pre; font-size: .8em; line-height: 1.45; margin: 0; }
+  .modal pre.diff .add { color: var(--ok); }
+  .modal pre.diff .del { color: var(--err); }
+  .modal pre.diff .hunk { color: var(--accent); }
+  .modal iframe { width: 100%; height: 68vh; border: 0; background: #fff; border-radius: 8px; }
+  .linkurl { word-break: break-all; color: var(--dim); font-size: .82em; margin-bottom: .6em; }
+  .modal .hint { color: var(--faint); font-size: .8em; margin-top: .5em; }
+  #notifyBtn.on { color: var(--accent); }
+
+  /* rendered markdown in assistant messages */
+  .e.assistant.md { line-height: 1.5; }
+  .md > :first-child { margin-top: 0; }
+  .md > :last-child { margin-bottom: 0; }
+  .md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { margin: .7em 0 .35em; line-height: 1.25; }
+  .md h1 { font-size: 1.3em; } .md h2 { font-size: 1.18em; } .md h3 { font-size: 1.06em; }
+  .md h4, .md h5, .md h6 { font-size: 1em; color: var(--dim); }
+  .md p { margin: .5em 0; }
+  .md ul, .md ol { margin: .4em 0; padding-left: 1.4em; }
+  .md li { margin: .15em 0; }
+  .md code { background: var(--bg2); border: 1px solid var(--line); border-radius: 5px; padding: .05em .35em; font-size: .9em; }
+  .md pre.code { background: var(--bg2); border: 1px solid var(--line); border-radius: 9px;
+    padding: .6em .8em; overflow-x: auto; margin: .5em 0; }
+  .md pre.code, .md pre.code * { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .86em; }
+  .md blockquote { margin: .5em 0; padding: .1em .9em; border-left: 3px solid var(--line); color: var(--dim); }
+  .md hr { border: 0; border-top: 1px solid var(--line); margin: .8em 0; }
+  .md a.mdlink { color: var(--accent); text-decoration: underline; cursor: pointer; }
+
   /* login */
   #login { max-width: 380px; margin: 16vh auto; display: grid; gap: .8em; padding: 0 1.2em; text-align: center; }
   #login h1 { color: var(--accent); margin: 0; font-size: 1.6em; }
@@ -183,6 +219,7 @@
     <span class="logo" onclick="showBoard()">atc</span>
     <span class="crumb" id="crumb"></span>
     <span class="spacer"></span>
+    <button id="notifyBtn" class="ghost icon" onclick="toggleNotify()" title="Notify on permission / done">🔔</button>
     <span class="dot" id="live" title="live"></span>
   </header>
   <main>
@@ -257,6 +294,8 @@
         <div class="actions">
           <button class="ghost" onclick="showBoard()">← Board</button>
           <span class="spacer"></span>
+          <button id="diffBtn" class="ghost hidden" onclick="openDiff()">diff</button>
+          <button class="ghost" onclick="switchModel()">model</button>
           <button class="ghost" onclick="renameSession()">rename</button>
           <button id="autoBtn" class="ghost" onclick="toggleAuto()">auto</button>
           <button class="ghost bad" onclick="postAction('abort')">abort</button>
@@ -266,6 +305,11 @@
       <input id="fileInput" type="file" multiple accept="image/*" class="hidden">
     </div>
   </main>
+
+  <!-- shared modal overlay (diff / link preview) -->
+  <div id="overlay" class="overlay hidden" onclick="if (event.target === this) closeModal()">
+    <div class="modal" id="modal"></div>
+  </div>
 </div>
 
 <script>
@@ -282,6 +326,10 @@ let formAttachments = [];  // new-session queue
 let pendingFirst = null;   // {name, text, atts} — sent once the session is ready
 let timer = null, meta = {};
 let histList = [], histIdx = -1, histDraft = ''; // ↑/↓ prompt recall in the focus composer
+let curSession = null;     // latest focus session payload (for diff/merge/model)
+let lastLink = '';         // url backing the link-preview modal's "open in new tab"
+let notifyOn = localStorage.getItem('atc-notify') === '1';
+let prevStatus = {}, notifySeeded = false; // status transitions for notifications
 
 function api(path, opts = {}) {
   opts.headers = Object.assign({ 'Authorization': 'Bearer ' + token }, opts.headers || {});
@@ -293,7 +341,149 @@ function api(path, opts = {}) {
   });
 }
 function esc(s) { const d = document.createElement('span'); d.textContent = s == null ? '' : s; return d.innerHTML; }
+function escAttr(s) { return esc(s).replace(/"/g, '&quot;'); }
 function live(on) { $('live').classList.toggle('live', on); }
+
+// ---- modal overlay (diff, link preview) ----
+function modalOpen() { return !$('overlay').classList.contains('hidden'); }
+function openModal(title, bodyHTML, footHTML) {
+  $('modal').innerHTML =
+    `<div class="mhead"><span class="mtitle">${esc(title)}</span>` +
+    `<button class="ghost icon" onclick="closeModal()" title="close">✕</button></div>` +
+    `<div class="mbody">${bodyHTML}</div>` +
+    (footHTML ? `<div class="mfoot">${footHTML}</div>` : '');
+  $('overlay').classList.remove('hidden');
+}
+function closeModal() { $('overlay').classList.add('hidden'); $('modal').innerHTML = ''; }
+
+// ---- minimal, dependency-free markdown (assistant messages) ----
+// Everything is HTML-escaped before any tag is produced, and link hrefs
+// are scheme-checked, so rendering model output can't inject markup.
+function mdEscape(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+function safeHref(u) {
+  const t = u.trim();
+  if (/^(https?:|mailto:)/i.test(t)) return t;          // explicit safe schemes
+  if (!/^[a-z][\w+.-]*:/i.test(t)) return t;            // scheme-less = relative/anchor, allow
+  return null;                                          // reject javascript:, data:, etc.
+}
+function mdInline(s) {
+  const codes = [];
+  s = s.replace(/`([^`]+)`/g, (m, c) => { codes.push(c); return '' + (codes.length - 1) + ''; });
+  s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (m, text, url) => {
+    const h = safeHref(url);
+    return h ? `<a href="${escAttr(h)}" class="mdlink">${text}</a>` : m;
+  });
+  s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>').replace(/__([^_]+)__/g, '<strong>$1</strong>');
+  s = s.replace(/(^|[^*])\*([^*\s][^*]*?)\*/g, '$1<em>$2</em>');
+  s = s.replace(/(^|[^\w_])_([^_\s][^_]*?)_(?![\w])/g, '$1<em>$2</em>');
+  return s.replace(/(\d+)/g, (m, i) => `<code>${codes[+i]}</code>`);
+}
+function renderMarkdown(src) {
+  src = String(src).replace(/\r\n?/g, '\n');
+  const blocks = [];
+  src = src.replace(/```[^\n]*\n?([\s\S]*?)```/g, (m, code) => {
+    blocks.push(code.replace(/\n$/, '')); return '' + (blocks.length - 1) + '';
+  });
+  const out = []; let list = null, para = [];
+  const flushPara = () => { if (para.length) { out.push('<p>' + para.map(l => mdInline(mdEscape(l))).join('<br>') + '</p>'); para = []; } };
+  const flushList = () => { if (list) { out.push(`<${list.type}>` + list.items.map(it => '<li>' + mdInline(mdEscape(it)) + '</li>').join('') + `</${list.type}>`); list = null; } };
+  for (const raw of src.split('\n')) {
+    let m = raw.match(/^(\d+)$/);
+    if (m) { flushPara(); flushList(); out.push('<pre class="code">' + mdEscape(blocks[+m[1]]) + '</pre>'); continue; }
+    if (/^\s*$/.test(raw)) { flushPara(); flushList(); continue; }
+    if (m = raw.match(/^(#{1,6})\s+(.*)$/)) { flushPara(); flushList(); const n = m[1].length; out.push(`<h${n}>` + mdInline(mdEscape(m[2])) + `</h${n}>`); continue; }
+    if (/^\s*([-*+])\s+/.test(raw)) { flushPara(); if (!list || list.type !== 'ul') { flushList(); list = { type: 'ul', items: [] }; } list.items.push(raw.replace(/^\s*[-*+]\s+/, '')); continue; }
+    if (/^\s*\d+\.\s+/.test(raw)) { flushPara(); if (!list || list.type !== 'ol') { flushList(); list = { type: 'ol', items: [] }; } list.items.push(raw.replace(/^\s*\d+\.\s+/, '')); continue; }
+    if (m = raw.match(/^\s*>\s?(.*)$/)) { flushPara(); flushList(); out.push('<blockquote>' + mdInline(mdEscape(m[1])) + '</blockquote>'); continue; }
+    if (/^\s*([-*_])\1{2,}\s*$/.test(raw)) { flushPara(); flushList(); out.push('<hr>'); continue; }
+    flushList(); para.push(raw);
+  }
+  flushPara(); flushList();
+  return out.join('');
+}
+// Links open in an in-app modal (iframe + open-in-new-tab fallback) so a
+// click never navigates away from the session.
+function openLink(url) {
+  lastLink = url;
+  const http = /^https?:/i.test(url);
+  const body = `<div class="linkurl mono">${esc(url)}</div>` +
+    (http ? `<iframe src="${escAttr(url)}" sandbox="allow-scripts allow-same-origin allow-popups allow-forms"></iframe>` +
+      `<div class="hint">Some sites block embedding — use “Open in new tab” if it stays blank.</div>` : '');
+  openModal('link', body,
+    `<button class="ghost" onclick="closeModal()">Close</button>` +
+    `<button class="primary" onclick="window.open(lastLink, '_blank', 'noopener')">Open in new tab ↗</button>`);
+}
+
+// ---- diff / merge / model ----
+function colorDiff(text) {
+  return mdEscape(text).split('\n').map(l => {
+    if (l.startsWith('@@')) return `<span class="hunk">${l}</span>`;
+    if (l.startsWith('+')) return `<span class="add">${l}</span>`;
+    if (l.startsWith('-')) return `<span class="del">${l}</span>`;
+    return l;
+  }).join('\n');
+}
+async function openDiff() {
+  if (!current) return;
+  try {
+    const d = await api('/api/sessions/' + encodeURIComponent(current) + '/diff');
+    const base = (curSession || {}).baseBranch || 'base';
+    openModal('diff · ' + current, `<pre class="diff">${colorDiff(d.diff || '(no changes)')}</pre>`,
+      `<button class="ghost" onclick="closeModal()">Close</button>` +
+      `<button class="primary" onclick="doMerge()">Merge into ${esc(base)}</button>`);
+  } catch (e) { setStat(e.message, true); }
+}
+async function doMerge() {
+  const base = (curSession || {}).baseBranch || 'base';
+  if (!confirm('Commit all changes in this worktree and merge into ' + base + '?')) return;
+  try {
+    await api('/api/sessions/' + encodeURIComponent(current) + '/merge', { method: 'POST', body: '{}' });
+    closeModal(); setStat('merged into ' + base + ' — kill with worktree removal to clean up'); pollFocus();
+  } catch (e) { alert(e.message); }
+}
+async function switchModel() {
+  const m = prompt('Switch model to (e.g. gpt-5, claude-sonnet-4-6):', (curSession || {}).model || '');
+  if (m === null || !m.trim()) return;
+  try {
+    await api('/api/sessions/' + encodeURIComponent(current) + '/model',
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: m.trim() }) });
+    pollFocus();
+  } catch (e) { setStat(e.message, true); }
+}
+
+// ---- notifications: alert when a session needs approval or finishes ----
+function reflectNotifyBtn() { $('notifyBtn').classList.toggle('on', notifyOn && ('Notification' in window) && Notification.permission === 'granted'); }
+async function toggleNotify() {
+  if (!('Notification' in window)) { alert('This browser has no notifications.'); return; }
+  if (!notifyOn) {
+    const p = Notification.permission === 'granted' ? 'granted' : await Notification.requestPermission();
+    if (p !== 'granted') { alert('Notifications blocked in the browser.'); reflectNotifyBtn(); return; }
+    notifyOn = true;
+  } else { notifyOn = false; }
+  localStorage.setItem('atc-notify', notifyOn ? '1' : '0');
+  reflectNotifyBtn();
+}
+function fireNotify(title, body) {
+  try { new Notification(title, { body: body || '' }); } catch (e) { /* ignore */ }
+  if (navigator.vibrate) navigator.vibrate(200);
+}
+// Independent of which view is open, so you're alerted even mid-session.
+async function checkNotifications() {
+  if (!notifyOn || !('Notification' in window) || Notification.permission !== 'granted') return;
+  let list;
+  try { list = await api('/api/sessions'); } catch (e) { return; }
+  const seen = {};
+  for (const s of list) {
+    seen[s.name] = s.status;
+    const watching = document.visibilityState === 'visible' && current === s.name;
+    if (notifySeeded && !watching) {
+      const prev = prevStatus[s.name];
+      if (s.status === 'waiting' && prev && prev !== 'waiting') fireNotify(s.name + ' needs approval', s.pending ? s.pending.summary : 'permission requested');
+      else if (s.status === 'done' && prev === 'working') fireNotify(s.name + ' finished', s.lastLine || '');
+    }
+  }
+  prevStatus = seen; notifySeeded = true;
+}
 
 function showLogin(msg) {
   clearInterval(timer);
@@ -554,11 +744,13 @@ async function pollFocus() {
     return;
   }
   const s = data.session;
+  curSession = s;
   histList = data.transcript.filter(e => e.kind === 'user').map(e => e.text); // for ↑/↓ prompt recall
   currentAuto = s.autoApprove;
   $('crumb').textContent = `${s.name} · ${s.status}${s.model ? ' · ' + s.model : ''}${cost(s) ? ' · ' + cost(s) : ''}`;
   $('autoBtn').textContent = s.autoApprove ? '⚡ auto' : 'auto';
   $('autoBtn').classList.toggle('good', s.autoApprove);
+  $('diffBtn').classList.toggle('hidden', !s.worktree); // diff/merge only apply to worktree sessions
 
   const html = data.transcript.map(renderEntry).join('');
   if (html !== lastRender) {
@@ -609,8 +801,16 @@ function renderEntry(e) {
   }
   const cls = { assistant: 'assistant', tool: 'tool', system: 'system', error: 'error' }[e.kind] || 'system';
   const cursor = e.partial ? '<span class="cursor"> ▍</span>' : '';
+  if (e.kind === 'assistant') return `<div class="e assistant md">${renderMarkdown(e.text)}${cursor}</div>`;
   return `<div class="e ${cls}">${esc(e.text)}${cursor}</div>`;
 }
+// Links in rendered markdown open in the in-app modal, never navigating away.
+$('transcript').addEventListener('click', e => {
+  const a = e.target.closest('a.mdlink');
+  if (!a) return;
+  e.preventDefault();
+  openLink(a.getAttribute('href'));
+});
 function setStat(msg, isErr) { const el = $('stat'); el.textContent = msg || ''; el.className = isErr ? 'err' : ''; }
 
 // answerQuestion sends the chosen option text as the answer (which the
@@ -700,6 +900,7 @@ document.addEventListener('paste', e => {
 // Left arrow also goes back, but only when not typing (there it moves
 // the cursor).
 document.addEventListener('keydown', e => {
+  if (modalOpen()) { if (e.key === 'Escape') { e.preventDefault(); closeModal(); } return; }
   if (!current || $('focus').classList.contains('hidden')) return;
   const ae = document.activeElement;
   const typing = ae && (ae.tagName === 'TEXTAREA' || ae.tagName === 'INPUT' || ae.tagName === 'SELECT');
@@ -806,9 +1007,12 @@ async function boot() {
     $('fAuto').checked = !!meta.defaultAutoApprove;
     dropZone('formBar', formAttachments);
     dropZone('focusBar', attachments);
+    reflectNotifyBtn();
+    if (!notifyTimer) notifyTimer = setInterval(checkNotifications, 4000); // runs in any view
     showBoard();
   } catch (e) { showLogin(e.message === 'unauthorized' ? 'wrong or missing token' : ''); }
 }
+let notifyTimer = null;
 boot();
 </script>
 </body>
