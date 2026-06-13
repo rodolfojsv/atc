@@ -1,0 +1,359 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>atc — agent traffic control</title>
+<style>
+  :root {
+    --bg: #14161a; --panel: #1c1f26; --line: #2c313c;
+    --fg: #d8dee9; --dim: #7b8496; --accent: #7aa2f7;
+    --ok: #9ece6a; --warn: #e0af68; --err: #f7768e;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+    font: 15px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  header { display: flex; align-items: center; gap: .6em; padding: .55em .8em;
+    border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--bg); z-index: 5; }
+  header h1 { font-size: 1em; margin: 0; color: var(--accent); }
+  header .crumb { color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  header button { margin-left: auto; }
+  main { padding: .8em; max-width: 980px; margin: 0 auto; }
+  button { background: var(--panel); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 6px; padding: .35em .8em; font: inherit; cursor: pointer; }
+  button:active { background: var(--line); }
+  button.primary { border-color: var(--accent); color: var(--accent); }
+  button.good { border-color: var(--ok); color: var(--ok); }
+  button.bad { border-color: var(--err); color: var(--err); }
+  input, textarea, select { background: var(--panel); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 6px; padding: .4em .6em; font: inherit; width: 100%; }
+  textarea { resize: vertical; min-height: 3.2em; }
+  .row { background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    padding: .6em .8em; margin-bottom: .55em; cursor: pointer; }
+  .row .top { display: flex; gap: .7em; align-items: baseline; flex-wrap: wrap; }
+  .row .name { color: var(--accent); font-weight: 600; }
+  .row .meta, .row .last { color: var(--dim); font-size: .85em; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
+  .badge { font-size: .78em; padding: .05em .55em; border-radius: 9px; border: 1px solid var(--line); }
+  .st-working { color: var(--warn); border-color: var(--warn); }
+  .st-waiting { color: var(--err); border-color: var(--err); animation: pulse 1.2s infinite; }
+  .st-done { color: var(--ok); border-color: var(--ok); }
+  .st-error, .st-closed { color: var(--err); }
+  .st-idle, .st-starting { color: var(--dim); }
+  @keyframes pulse { 50% { opacity: .45; } }
+  #transcript { display: flex; flex-direction: column; gap: .5em; padding-bottom: 1em; }
+  .e { white-space: pre-wrap; word-break: break-word; border-radius: 8px; padding: .45em .7em; }
+  .e.user { background: #1f2a3a; border-left: 3px solid var(--accent); }
+  .e.assistant { background: var(--panel); }
+  .e.tool, .e.system { color: var(--dim); font-size: .85em; padding: .1em .7em; }
+  .e.error { color: var(--err); }
+  .e .cursor { color: var(--dim); animation: pulse .9s infinite; }
+  #perm { background: #3a2330; border: 1px solid var(--err); border-radius: 8px; padding: .7em; margin: .6em 0; }
+  #perm pre { white-space: pre-wrap; word-break: break-word; color: var(--dim); font-size: .85em; margin: .4em 0; }
+  #perm .btns { display: flex; gap: .5em; flex-wrap: wrap; }
+  #composer { position: sticky; bottom: 0; background: var(--bg); padding: .6em 0 .8em; }
+  #chips { display: flex; gap: .4em; flex-wrap: wrap; margin-bottom: .35em; }
+  .chip { background: var(--panel); border: 1px solid var(--accent); border-radius: 9px;
+    font-size: .8em; padding: .1em .6em; cursor: pointer; }
+  #composer .bar { display: flex; gap: .5em; align-items: flex-end; }
+  #stat { color: var(--dim); font-size: .85em; padding: .3em .1em; min-height: 1.4em; }
+  #newform { background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    padding: .8em; margin-bottom: .8em; display: grid; gap: .5em; }
+  #newform .two { display: grid; grid-template-columns: 1fr 1fr; gap: .5em; }
+  label.ck { display: inline-flex; gap: .4em; align-items: center; color: var(--dim); }
+  label.ck input { width: auto; }
+  footer { color: var(--dim); font-size: .8em; text-align: center; padding: 1em; }
+  #login { max-width: 420px; margin: 18vh auto; display: grid; gap: .6em; padding: 0 1em; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div id="login" class="hidden">
+  <h1>atc</h1>
+  <p style="color:var(--dim)">Paste the access token printed by <code>atc serve</code>:</p>
+  <input id="tokenInput" type="password" placeholder="token" autocomplete="off">
+  <button class="primary" onclick="saveToken()">Connect</button>
+</div>
+
+<div id="app" class="hidden">
+  <header>
+    <h1 onclick="showBoard()" style="cursor:pointer">atc</h1>
+    <span class="crumb" id="crumb"></span>
+    <button id="hdrBtn" onclick="toggleNew()">+ new</button>
+  </header>
+  <main>
+    <div id="board">
+      <div id="newform" class="hidden">
+        <input id="fName" placeholder="session name (optional)">
+        <input id="fRepo" placeholder="repo path" list="repoList"><datalist id="repoList"></datalist>
+        <div class="two">
+          <select id="fBackend"></select>
+          <input id="fModel" placeholder="model (optional)">
+        </div>
+        <div class="two">
+          <label class="ck"><input type="checkbox" id="fWorktree"> worktree</label>
+          <label class="ck"><input type="checkbox" id="fReadOnly"> read-only (plan)</label>
+        </div>
+        <textarea id="fPrompt" placeholder="first prompt (optional)"></textarea>
+        <button class="primary" onclick="createSession()">Launch</button>
+      </div>
+      <div id="rows"></div>
+      <footer id="spend"></footer>
+    </div>
+
+    <div id="focus" class="hidden">
+      <div id="transcript"></div>
+      <div id="perm" class="hidden"></div>
+      <div id="composer">
+        <div id="chips"></div>
+        <div class="bar">
+          <textarea id="prompt" placeholder="prompt… (paste images directly)" rows="2"></textarea>
+          <button onclick="fileInput.click()" title="attach">📎</button>
+          <button class="primary" onclick="sendPrompt()">Send</button>
+        </div>
+        <div id="stat"></div>
+        <div class="bar" style="margin-top:.3em">
+          <button onclick="showBoard()">← board</button>
+          <button class="bad" onclick="postAction('abort')">abort</button>
+          <button id="autoBtn" onclick="toggleAuto()">auto</button>
+          <button class="bad" onclick="killSession()">kill</button>
+        </div>
+      </div>
+      <input id="fileInput" type="file" multiple accept="image/*" class="hidden">
+    </div>
+  </main>
+</div>
+
+<script>
+'use strict';
+let token = localStorage.getItem('atc-token') || '';
+const q = new URLSearchParams(location.search);
+if (q.get('token')) {
+  token = q.get('token');
+  localStorage.setItem('atc-token', token);
+  history.replaceState(null, '', location.pathname);
+}
+const $ = id => document.getElementById(id);
+const fileInput = $('fileInput');
+let current = null;        // focused session name
+let currentAuto = false;
+let attachments = [];      // File objects queued for the next send
+let timer = null;
+
+function api(path, opts = {}) {
+  opts.headers = Object.assign({ 'Authorization': 'Bearer ' + token }, opts.headers || {});
+  return fetch(path, opts).then(async r => {
+    if (r.status === 401) { showLogin(); throw new Error('unauthorized'); }
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(body.error || r.statusText);
+    return body;
+  });
+}
+
+function showLogin() { clearInterval(timer); $('login').classList.remove('hidden'); $('app').classList.add('hidden'); }
+function saveToken() {
+  token = $('tokenInput').value.trim();
+  localStorage.setItem('atc-token', token);
+  boot();
+}
+
+function esc(s) { const d = document.createElement('span'); d.textContent = s; return d.innerHTML; }
+function cost(s) {
+  const parts = [];
+  if (s.costUsd > 0) parts.push('$' + s.costUsd.toFixed(2));
+  if (s.nanoAiu > 0) parts.push((s.nanoAiu / 1e9).toFixed(2) + ' AIC');
+  if (s.inTokens + s.outTokens > 0) parts.push(Math.round((s.inTokens + s.outTokens) / 1000) + 'k tok');
+  return parts.join(' · ');
+}
+
+// --- board ---------------------------------------------------------
+function renderBoard(list) {
+  const rows = $('rows');
+  if (!list.length) { rows.innerHTML = '<p style="color:var(--dim)">No sessions. Hit “+ new”.</p>'; return; }
+  rows.innerHTML = list.map(s => `
+    <div class="row" onclick="openSession('${esc(s.name)}')">
+      <div class="top">
+        <span class="name">${esc(s.name)}</span>
+        <span class="badge st-${esc(s.status)}">${esc(s.status)}${s.pendingCount ? ' ' + s.pendingCount : ''}</span>
+        <span class="meta">${esc(s.backend)}${s.model ? ' · ' + esc(s.model) : ''}${s.readOnly ? ' · 🔒' : ''}${s.autoApprove ? ' · ⚡' : ''}</span>
+        <span class="meta">${cost(s)}</span>
+      </div>
+      <div class="meta">${esc(s.repo)}${s.branch ? ' @ ' + esc(s.branch) : ''}</div>
+      ${s.pending ? `<div class="last" style="color:var(--err)">⚠ ${esc(s.pending.summary)}</div>`
+        : s.err ? `<div class="last" style="color:var(--err)">✗ ${esc(s.err)}</div>`
+        : s.lastLine ? `<div class="last">${esc(s.lastLine)}</div>` : ''}
+    </div>`).join('');
+}
+
+async function pollBoard() {
+  try {
+    renderBoard(await api('/api/sessions'));
+    const m = await api('/api/meta');
+    const sp = m.spend;
+    const f = [];
+    if (sp.todayUsd > 0 || sp.monthUsd > 0) f.push(`$${sp.todayUsd.toFixed(2)} today · $${sp.monthUsd.toFixed(2)} month`);
+    if (sp.todayAiu > 0 || sp.monthAiu > 0) f.push(`${sp.todayAiu.toFixed(1)} AIC today · ${sp.monthAiu.toFixed(1)} month`);
+    $('spend').textContent = f.join('  ·  ');
+  } catch (e) { /* keep last view */ }
+}
+
+function showBoard() {
+  current = null;
+  clearInterval(timer);
+  $('focus').classList.add('hidden');
+  $('board').classList.remove('hidden');
+  $('crumb').textContent = '';
+  $('hdrBtn').classList.remove('hidden');
+  pollBoard();
+  timer = setInterval(pollBoard, 2000);
+}
+
+function toggleNew() { $('newform').classList.toggle('hidden'); }
+
+async function createSession() {
+  try {
+    const s = await api('/api/sessions', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: $('fName').value.trim(), repo: $('fRepo').value.trim(),
+        backend: $('fBackend').value, model: $('fModel').value.trim(),
+        prompt: $('fPrompt').value, worktree: $('fWorktree').checked, readOnly: $('fReadOnly').checked,
+      }) });
+    $('newform').classList.add('hidden');
+    $('fName').value = $('fPrompt').value = '';
+    openSession(s.name);
+  } catch (e) { alert(e.message); }
+}
+
+// --- focus ---------------------------------------------------------
+function openSession(name) {
+  current = name;
+  clearInterval(timer);
+  $('board').classList.add('hidden');
+  $('focus').classList.remove('hidden');
+  $('hdrBtn').classList.add('hidden');
+  $('transcript').innerHTML = '';
+  pollFocus();
+  timer = setInterval(pollFocus, 1000);
+}
+
+let lastRender = '';
+async function pollFocus() {
+  if (!current) return;
+  let data;
+  try { data = await api('/api/sessions/' + encodeURIComponent(current)); }
+  catch (e) { $('stat').textContent = e.message; return; }
+  const s = data.session;
+  currentAuto = s.autoApprove;
+  $('crumb').textContent = `${s.name} · ${s.status}${s.model ? ' · ' + s.model : ''}`;
+  $('autoBtn').textContent = s.autoApprove ? 'auto ⚡' : 'auto';
+
+  const html = data.transcript.map(e =>
+    `<div class="e ${e.kind}">${esc(e.text)}${e.partial ? '<span class="cursor"> ▍</span>' : ''}</div>`).join('');
+  if (html !== lastRender) {
+    const el = $('transcript');
+    const stick = window.innerHeight + window.scrollY >= document.body.offsetHeight - 80;
+    el.innerHTML = html;
+    lastRender = html;
+    if (stick) window.scrollTo(0, document.body.scrollHeight);
+  }
+
+  const perm = $('perm');
+  if (s.pending) {
+    perm.classList.remove('hidden');
+    perm.innerHTML = `⚠ <b>${esc(s.pending.summary)}</b>${s.pendingCount > 1 ? ` (+${s.pendingCount - 1} queued)` : ''}
+      <pre>${esc((s.pending.detail || []).join('\n'))}</pre>
+      <div class="btns">
+        <button class="good" onclick="respond('approve')">approve</button>
+        <button onclick="respond('approve-session')">always (session)</button>
+        <button class="bad" onclick="respond('deny')">deny</button>
+      </div>`;
+  } else {
+    perm.classList.add('hidden');
+  }
+}
+
+async function respond(decision) {
+  try { await api('/api/sessions/' + encodeURIComponent(current) + '/respond',
+    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ decision }) });
+    pollFocus();
+  } catch (e) { $('stat').textContent = e.message; }
+}
+
+async function postAction(action) {
+  try { await api('/api/sessions/' + encodeURIComponent(current) + '/' + action, { method: 'POST', body: '{}' }); }
+  catch (e) { $('stat').textContent = e.message; }
+}
+
+async function killSession() {
+  if (!confirm(`Kill session “${current}”? It is removed from the board and won't resume.`)) return;
+  try {
+    await api('/api/sessions/' + encodeURIComponent(current) + '/kill',
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    showBoard();
+  } catch (e) { $('stat').textContent = e.message; }
+}
+
+async function toggleAuto() {
+  try { await api('/api/sessions/' + encodeURIComponent(current) + '/auto',
+    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ on: !currentAuto }) });
+    pollFocus();
+  } catch (e) { $('stat').textContent = e.message; }
+}
+
+// --- attachments ---------------------------------------------------
+function renderChips() {
+  $('chips').innerHTML = attachments.map((f, i) =>
+    `<span class="chip" title="remove" onclick="attachments.splice(${i},1);renderChips()">🖼 ${esc(f.name)} ✕</span>`).join('');
+}
+fileInput.addEventListener('change', () => {
+  attachments.push(...fileInput.files);
+  fileInput.value = '';
+  renderChips();
+});
+document.addEventListener('paste', e => {
+  if (!current) return;
+  for (const item of e.clipboardData.items) {
+    if (item.type.startsWith('image/')) {
+      const f = item.getAsFile();
+      const ext = item.type.split('/')[1] || 'png';
+      attachments.push(new File([f], `pasted-${Date.now() % 100000}.${ext}`, { type: item.type }));
+    }
+  }
+  renderChips();
+});
+
+async function sendPrompt() {
+  const text = $('prompt').value;
+  if (!text.trim() && !attachments.length) return;
+  const fd = new FormData();
+  fd.append('text', text);
+  for (const f of attachments) fd.append('files', f, f.name);
+  $('stat').textContent = 'sending…';
+  try {
+    await api('/api/sessions/' + encodeURIComponent(current) + '/prompt', { method: 'POST', body: fd });
+    $('prompt').value = '';
+    attachments = [];
+    renderChips();
+    $('stat').textContent = '';
+    pollFocus();
+  } catch (e) { $('stat').textContent = '✗ ' + e.message; }
+}
+$('prompt').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); sendPrompt(); }
+});
+
+// --- boot ----------------------------------------------------------
+async function boot() {
+  try {
+    const m = await api('/api/meta');
+    $('login').classList.add('hidden');
+    $('app').classList.remove('hidden');
+    $('repoList').innerHTML = (m.repos || []).map(r => `<option value="${esc(r)}">`).join('');
+    $('fBackend').innerHTML = (m.backends || []).map(b => `<option>${esc(b)}</option>`).join('');
+    showBoard();
+  } catch (e) { showLogin(); }
+}
+boot();
+</script>
+</body>
+</html>

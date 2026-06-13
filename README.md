@@ -43,6 +43,7 @@ Design priorities, in order:
 - **Hooks** — map events (`session-started`, `waiting-on-permission`, `finished`, `error`, `tool-call`) to commands in config. Built-in Windows toast notifications; sample hooks for Teams webhooks and tool-call audit logs.
 - **Usage panel** — per-session input/output token totals, **billed AI Credits** (AIC column — actual nano-AIU reported by the runtime per request; there is no fixed tokens→AIC rate, it varies by model multiplier and billing batches), and a context-fill gauge, powered by the SDK's `AssistantUsage` / `SessionUsageInfo` events.
 - **Scheduled prompts** — cron-style schedules that launch a session with a canned prompt and preset: nightly dependency audit, morning PR triage. Results flow through the same board, notifications, and hooks.
+- **Web UI (optional)** — `atc --serve` adds a browser frontend over the *same* live sessions the TUI drives; `atc serve` runs it headless (no terminal). The board, transcripts, prompting, and the permission approve/deny flow all work from a phone. Its headline feature is **image attachments**: pick a file or paste a screenshot straight into the prompt. For Claude sessions the image goes inline into the model's context (base64 content blocks); other backends get the image saved under `<dir>/.atc-attachments/` and referenced by path. Localhost-bound and bearer-token protected — reach it from elsewhere via `tailscale serve` (tailnet-only HTTPS), never a public listener. See [Web UI](#web-ui).
 
 ## Status
 
@@ -177,6 +178,45 @@ Notes for both:
 
 Maintenance: editing a schedule's **prompt/repo/preset** needs nothing (config is read at fire time); changing its **cron** or **name** needs `atc schedule install` again (it overwrites); removing one from config needs `atc schedule uninstall` *before* you delete it (or `schtasks /Delete /TN atc\<name>` after). If you move `atc.exe`, re-run `install` — the task records the absolute path.
 
+## Web UI
+
+A browser frontend over the same supervisor the TUI uses — built for two things the terminal can't do well: driving sessions from your phone, and **attaching images to a prompt**.
+
+Two ways to run it:
+
+```
+atc --serve          # the TUI, plus the web server alongside it
+atc serve            # headless: web only, no terminal (laptop-lid-closed case)
+```
+
+Both print a tokenized URL at startup, e.g. `http://127.0.0.1:8787/?token=ab12…`. Open that once and the browser remembers the token. `atc serve` runs the full machinery — sessions resume, schedules fire, hooks run, and permission requests wait for an answer from the browser, exactly like the TUI.
+
+**What you can do from the browser:** see the live board (status, model, cost, pending-permission badges), open a session and watch its transcript stream, send prompts, **approve/deny/always-allow permission requests**, toggle auto-approve, abort, kill, and launch new sessions (repo/backend/model/worktree/read-only).
+
+**Images.** Click 📎 to pick files, or just **paste a screenshot** into the prompt box. For **Claude** sessions the image is inlined into the model's context as a base64 content block — no file written. For backends that can't take inline images (and for non-image files anywhere), the file is saved under `<session dir>/.atc-attachments/` and its path is appended to the prompt so the agent reads it with its file tools. Limits: 6 files/prompt, 10 MB each.
+
+**Reaching it from your phone — tailnet only.** Leave atc bound to localhost and put Tailscale in front:
+
+```
+tailscale serve --bg 8787      # tailnet-only HTTPS with a real cert
+tailscale serve off            # when you're done for the session
+```
+
+This exposes nothing on your LAN and opens no public listener — only devices on your tailnet (your phone, signed into the same account) can reach it, over HTTPS. **Do not** bind atc itself to `0.0.0.0` to "make it reachable"; that defeats the token-over-localhost model. Since this serves work-repo transcripts over your tailnet, treat turning it on like the Teams two-way idea — worth a nod to IT first.
+
+Config (all optional):
+
+```json
+{
+  "web": {
+    "addr": "127.0.0.1:8787",   // listen address; keep it on localhost
+    "token": "pick-your-own"    // omit for a fresh random token each run
+  }
+}
+```
+
+Flags override config: `atc serve --addr 127.0.0.1:9000 --token mytoken`. A stable `token` in config keeps the URL constant so a phone bookmark keeps working across restarts; omit it and a new token is minted (and printed) each run.
+
 ## Diagnostics
 
 atc writes no logs by default. When something misbehaves, enable the diagnostic log:
@@ -191,7 +231,7 @@ Permission lifecycle entries are the most useful: every request logs `permission
 
 ## Security posture
 
-- Local-only: `atc` opens **zero listening ports** and makes no network calls of its own; all network traffic belongs to the Copilot runtime it supervises.
+- Local-only by default: without `--serve`/`serve`, `atc` opens **zero listening ports** and makes no network calls of its own; all network traffic belongs to the Copilot runtime it supervises. The web UI is opt-in, binds to localhost, and is bearer-token gated — expose it across machines only via `tailscale serve` (tailnet-only), never a public bind.
 - `atc` never reads, stores, or forwards credentials — authentication is handled entirely by the Copilot CLI/SDK.
 - `allow-all` is per-preset and deny-list-gated, never the global default.
 - Hooks run only commands you wrote into your own config.

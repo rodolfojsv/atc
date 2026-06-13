@@ -33,6 +33,17 @@ type Schedule struct {
 	Prompt   string `json:"prompt"`
 }
 
+// Web configures the optional local web UI (atc serve / atc --serve).
+// It binds to localhost by default; expose it on a tailnet with
+// `tailscale serve` rather than binding to a network interface.
+type Web struct {
+	// Addr is the listen address (default "127.0.0.1:8787").
+	Addr string `json:"addr,omitempty"`
+	// Token protects the API. Empty means a random token is generated
+	// each run and printed at startup; set one here to keep stable URLs.
+	Token string `json:"token,omitempty"`
+}
+
 type Config struct {
 	// WorktreeRoot is where per-session worktrees are created.
 	// Empty means ~/.atc/worktrees/<repo>/<session>.
@@ -59,6 +70,7 @@ type Config struct {
 	Presets     map[string]Preset   `json:"presets,omitempty"`
 	Hooks       map[string][]string `json:"hooks,omitempty"`
 	Schedules   []Schedule          `json:"schedules,omitempty"`
+	Web         Web                 `json:"web,omitempty"`
 }
 
 // Path returns the default config file location:
