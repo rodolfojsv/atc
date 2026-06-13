@@ -97,6 +97,9 @@ func (s *Server) routes() {
 	api("POST /api/sessions/{name}/pin", s.handlePin)
 	api("POST /api/sessions/{name}/category", s.handleCategory)
 	api("POST /api/sessions/{name}/rename", s.handleRename)
+	api("GET /api/sessions/{name}/diff", s.handleDiff)
+	api("POST /api/sessions/{name}/merge", s.handleMerge)
+	api("POST /api/sessions/{name}/model", s.handleModel)
 }
 
 // auth accepts the token as a bearer header (fetch calls) or query
@@ -122,6 +125,7 @@ type sessionJSON struct {
 	Repo       string    `json:"repo"`
 	Dir        string    `json:"dir"`
 	Branch     string    `json:"branch,omitempty"`
+	BaseBranch string    `json:"baseBranch,omitempty"`
 	Worktree   bool      `json:"worktree"`
 	Backend    string    `json:"backend"`
 	Preset     string    `json:"preset,omitempty"`
@@ -169,7 +173,7 @@ type entryJSON struct {
 
 func toSessionJSON(v supervisor.SessionView) sessionJSON {
 	out := sessionJSON{
-		Name: v.Name, Repo: v.Repo, Dir: v.Dir, Branch: v.Branch,
+		Name: v.Name, Repo: v.Repo, Dir: v.Dir, Branch: v.Branch, BaseBranch: v.BaseBranch,
 		Worktree: v.Worktree != "", Backend: v.Backend, Preset: v.Preset,
 		Model: v.Model, Status: string(v.Status), Intent: v.Intent,
 		Err: v.Err, LastLine: v.LastLine, ReadOnly: v.ReadOnly,
@@ -495,6 +499,54 @@ func (s *Server) handleRename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true, "name": sess.View().Name})
+}
+
+func (s *Server) handleDiff(w http.ResponseWriter, r *http.Request) {
+	sess := s.session(w, r)
+	if sess == nil {
+		return
+	}
+	diff, err := s.sup.Diff(sess)
+	if err != nil {
+		jsonError(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"diff": diff})
+}
+
+func (s *Server) handleMerge(w http.ResponseWriter, r *http.Request) {
+	sess := s.session(w, r)
+	if sess == nil {
+		return
+	}
+	if err := s.sup.Merge(sess); err != nil {
+		jsonError(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+func (s *Server) handleModel(w http.ResponseWriter, r *http.Request) {
+	sess := s.session(w, r)
+	if sess == nil {
+		return
+	}
+	var req struct {
+		Model string `json:"model"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		jsonError(w, http.StatusBadRequest, "bad JSON: "+err.Error())
+		return
+	}
+	if strings.TrimSpace(req.Model) == "" {
+		jsonError(w, http.StatusBadRequest, "model is required")
+		return
+	}
+	if err := s.sup.SwitchModel(sess, strings.TrimSpace(req.Model)); err != nil {
+		jsonError(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "model": sess.View().Model})
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
