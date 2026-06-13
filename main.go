@@ -14,7 +14,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"runtime/debug"
+	"strings"
+	"syscall"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -25,6 +28,7 @@ import (
 	"github.com/rodolfojsv/atc/internal/sched"
 	"github.com/rodolfojsv/atc/internal/supervisor"
 	"github.com/rodolfojsv/atc/internal/tui"
+	"github.com/rodolfojsv/atc/internal/web"
 )
 
 var version = "0.1.0-dev"
@@ -64,6 +68,8 @@ func main() {
 			os.Exit(cmdRun(args[1:]))
 		case "schedule":
 			os.Exit(cmdSchedule(args[1:]))
+		case "serve":
+			os.Exit(cmdServe(args[1:]))
 		}
 	}
 	os.Exit(cmdTUI(args))
@@ -74,6 +80,7 @@ func cmdTUI(argv []string) int {
 	configPath := fs.String("config", "", "config file (default: OS config dir /atc/config.json)")
 	showVersion := fs.Bool("version", false, "print version and exit")
 	debugFlag := fs.Bool("debug", false, "diagnostic log at debug level (overrides config logLevel)")
+	serveFlag := fs.Bool("serve", false, "also serve the web UI (config web.addr, default 127.0.0.1:8787)")
 	_ = fs.Parse(argv)
 
 	if *showVersion {
@@ -123,11 +130,93 @@ func cmdTUI(argv []string) int {
 		return 1
 	}
 
+	if *serveFlag {
+		srv := web.New(sup, cfg, cfg.Web.Token)
+		url, err := srv.Start(cfg.Web.Addr)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "atc: web:", err)
+			return 1
+		}
+		// Visible in the TUI footer flash; the full tokenized URL also
+		// lands in scrollback above the alt screen.
+		fmt.Fprintln(os.Stderr, "atc: web UI at", url)
+		go func() { p.Send(tui.NewFlash("web UI: " + url)) }()
+	}
+
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "atc:", err)
 		return 1
 	}
 	return 0
+}
+
+// cmdServe runs the supervisor with the web UI as its only frontend —
+// no TUI. Sessions resume, schedules fire, and permission requests wait
+// for an answer from the browser, exactly like the TUI flow.
+func cmdServe(argv []string) int {
+	fs := flag.NewFlagSet("atc serve", flag.ExitOnError)
+	configPath := fs.String("config", "", "config file (default: OS config dir /atc/config.json)")
+	addr := fs.String("addr", "", "listen address (default: config web.addr, else 127.0.0.1:8787)")
+	tokenFlag := fs.String("token", "", "access token (default: config web.token, else random per run)")
+	debugFlag := fs.Bool("debug", false, "diagnostic log at debug level")
+	_ = fs.Parse(argv)
+
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "atc:", err)
+		return 1
+	}
+	if *debugFlag {
+		cfg.LogLevel = "debug"
+	}
+	if *addr == "" {
+		*addr = cfg.Web.Addr
+	}
+	token := *tokenFlag
+	if token == "" {
+		token = cfg.Web.Token
+	}
+
+	b := bus.New()
+	hooks.New(cfg.Hooks).Attach(b)
+	sup := supervisor.New(cfg, b)
+	defer sup.Stop()
+
+	srv := web.New(sup, cfg, token)
+	url, err := srv.Start(*addr)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "atc: web:", err)
+		return 1
+	}
+	fmt.Println("atc web UI:", url)
+	fmt.Println("tailnet access: `tailscale serve --bg " + portOf(url) + "` (and `tailscale serve off` when done)")
+
+	sup.ResumeAll()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go sup.WatchStore(ctx, 3*time.Second)
+	if err := startSchedules(ctx, cfg, sup); err != nil {
+		fmt.Fprintln(os.Stderr, "atc:", err)
+		return 1
+	}
+
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	<-sig
+	fmt.Println("atc: shutting down (sessions stay resumable)")
+	return 0
+}
+
+// portOf extracts the port from a URL like http://127.0.0.1:8787/?token=…
+func portOf(url string) string {
+	rest := strings.TrimPrefix(url, "http://")
+	if i := strings.IndexByte(rest, '/'); i >= 0 {
+		rest = rest[:i]
+	}
+	if i := strings.LastIndexByte(rest, ':'); i >= 0 {
+		return rest[i+1:]
+	}
+	return "8787"
 }
 
 func startSchedules(ctx context.Context, cfg *config.Config, sup *supervisor.Supervisor) error {

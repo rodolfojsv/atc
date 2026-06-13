@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -201,6 +202,9 @@ func (s *Supervisor) NewSession(opts NewSessionOptions) (*Session, error) {
 	backendName := opts.Backend
 	if backendName == "" {
 		backendName = preset.Backend
+	}
+	if backendName == "" {
+		backendName = s.cfg.DefaultBackend
 	}
 	if backendName == "" {
 		backendName = DefaultBackend
@@ -547,6 +551,95 @@ func (s *Supervisor) Prompt(sess *Session, text string) error {
 		s.poke()
 	}
 	return err
+}
+
+// SessionByName finds a session by its (unique) board name.
+func (s *Supervisor) SessionByName(name string) *Session {
+	for _, sess := range s.Sessions() {
+		if sess.Name == name {
+			return sess
+		}
+	}
+	return nil
+}
+
+// PromptWith sends a user message with file attachments. Images go
+// inline (base64 content blocks) when the backend supports it; anything
+// else is saved under <session dir>/.atc-attachments and referenced by
+// path in the prompt, which every backend can read with its file tools.
+func (s *Supervisor) PromptWith(sess *Session, text string, atts []agent.Attachment) error {
+	if len(atts) == 0 {
+		return s.Prompt(sess, text)
+	}
+	ag := sess.agentSession()
+	if ag == nil {
+		return errors.New("session is still starting")
+	}
+
+	var inline, onDisk []agent.Attachment
+	sender, canInline := ag.(agent.AttachmentSender)
+	for _, a := range atts {
+		if canInline && a.IsImage() {
+			inline = append(inline, a)
+		} else {
+			onDisk = append(onDisk, a)
+		}
+	}
+
+	prompt := text
+	if len(onDisk) > 0 {
+		paths, err := s.saveAttachments(sess, onDisk)
+		if err != nil {
+			return err
+		}
+		prompt += "\n\nAttached files (read them from disk):\n- " + strings.Join(paths, "\n- ")
+	}
+
+	names := make([]string, len(atts))
+	for i, a := range atts {
+		names[i] = a.Name
+	}
+	sess.appendEntry(EntryUser, text+"\n📎 "+strings.Join(names, ", "))
+	sess.addHistory(text)
+	sess.setStatus(StatusWorking)
+	s.log.Log(logx.Info, "session.prompt_attachments", map[string]any{
+		"session": sess.Name, "inline": len(inline), "onDisk": len(onDisk),
+	})
+	s.poke()
+
+	var err error
+	if len(inline) > 0 {
+		err = sender.SendWithAttachments(context.Background(), prompt, inline)
+	} else {
+		err = ag.Send(context.Background(), prompt)
+	}
+	if err != nil {
+		sess.setError(fmt.Sprintf("send failed: %v", err))
+		s.poke()
+	}
+	return err
+}
+
+// saveAttachments writes attachments into the session's working dir so
+// the agent can read them; returns paths relative to that dir.
+func (s *Supervisor) saveAttachments(sess *Session, atts []agent.Attachment) ([]string, error) {
+	sess.mu.Lock()
+	base := sess.Dir
+	sess.mu.Unlock()
+	dir := filepath.Join(base, ".atc-attachments")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, err
+	}
+	var paths []string
+	stamp := time.Now().Format("150405")
+	for i, a := range atts {
+		name := fmt.Sprintf("%s-%d-%s", stamp, i+1, filepath.Base(a.Name))
+		if err := os.WriteFile(filepath.Join(dir, name), a.Data, 0o644); err != nil {
+			return nil, err
+		}
+		paths = append(paths, filepath.Join(".atc-attachments", name))
+	}
+	return paths, nil
 }
 
 // Note drops an informational line into the session transcript.

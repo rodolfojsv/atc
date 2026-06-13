@@ -27,6 +27,10 @@ type RefreshMsg struct{}
 
 type flashMsg struct{ text string }
 
+// NewFlash builds a footer flash message that callers outside the
+// package (e.g. main, announcing the web UI URL) can p.Send().
+func NewFlash(text string) tea.Msg { return flashMsg{text: text} }
+
 type mode int
 
 const (
