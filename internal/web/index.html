@@ -436,8 +436,14 @@ function pasteImages(e, into) {
   }
   if (got) { e.preventDefault(); renderThumbs(); }
 }
-$('prompt').addEventListener('paste', e => pasteImages(e, attachments));
-$('fPrompt').addEventListener('paste', e => pasteImages(e, formAttachments));
+// Catch a pasted image anywhere on the page (not just when the prompt
+// box is focused) and route it to whichever composer is open.
+document.addEventListener('paste', e => {
+  const inFocus = current && !$('focus').classList.contains('hidden');
+  const formOpen = !$('newSheet').classList.contains('hidden');
+  const into = inFocus ? attachments : (formOpen ? formAttachments : null);
+  if (into) pasteImages(e, into);
+});
 
 // drag & drop onto either input bar
 function dropZone(barId, into) {
