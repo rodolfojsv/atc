@@ -2,11 +2,49 @@ package supervisor
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/rodolfojsv/atc/internal/config"
 	"time"
 )
+
+func TestAutoName(t *testing.T) {
+	for _, c := range []struct{ prompt, repo, want string }{
+		{"Fix the login flow please", "/home/rodo/atc", "Fix-the-login-flow-please"},
+		{"one two three four five six seven eight", "/r", "one-two-three-four-five-six"}, // capped to 6 words
+		{"", "/home/rodo/Development/atc", "atc"},                                        // no prompt → repo base
+		{"   ", "/x/my-repo", "my-repo"},
+	} {
+		if got := autoName(c.prompt, c.repo); got != c.want {
+			t.Errorf("autoName(%q,%q) = %q, want %q", c.prompt, c.repo, got, c.want)
+		}
+	}
+	if got := autoName("", ""); !strings.HasPrefix(got, "session-") {
+		t.Errorf("no prompt or repo: got %q, want session- fallback", got)
+	}
+}
+
+func TestRename(t *testing.T) {
+	s := New(testConfig(t), nil)
+	s.store = store{path: filepath.Join(t.TempDir(), "sessions.json")}
+	a := &Session{Name: "alpha", id: "a1", status: StatusWorking}
+	b := &Session{Name: "beta", id: "b1", status: StatusWorking}
+	s.sessions = []*Session{a, b}
+
+	if err := s.Rename(a, "Fancy Name!"); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	if a.View().Name != "Fancy-Name" {
+		t.Errorf("name not slugged: %q", a.View().Name)
+	}
+	if err := s.Rename(a, "beta"); err == nil {
+		t.Error("rename onto an existing name should error")
+	}
+	if err := s.Rename(a, "   "); err == nil {
+		t.Error("empty rename should error")
+	}
+}
 
 func TestStoreRoundtrip(t *testing.T) {
 	st := store{path: filepath.Join(t.TempDir(), "sessions.json")}
@@ -63,6 +101,42 @@ func TestPersistMergesForeignEntries(t *testing.T) {
 		if sv.ID == "foreign-1" {
 			t.Fatal("killed session resurrected from disk")
 		}
+	}
+}
+
+// Pin and category are board-organization metadata that must survive a
+// persist→load cycle and drive the supervisor's mutators / Categories().
+func TestPinCategoryRoundtripAndMutators(t *testing.T) {
+	st := store{path: filepath.Join(t.TempDir(), "sessions.json")}
+	s := New(testConfig(t), nil)
+	s.store = st
+	pinned := &Session{Name: "alpha", Repo: "/a", Dir: "/a", id: "a1", status: StatusWorking, pinned: true, category: "smib"}
+	plain := &Session{Name: "beta", Repo: "/b", Dir: "/b", id: "b1", status: StatusWorking, category: "invitably"}
+	s.sessions = []*Session{pinned, plain}
+
+	// Categories: distinct, sorted, empty excluded.
+	if got := s.Categories(); len(got) != 2 || got[0] != "invitably" || got[1] != "smib" {
+		t.Fatalf("Categories() = %v, want [invitably smib]", got)
+	}
+
+	// Mutators persist; reload must reflect the change (whitespace trimmed).
+	s.SetCategory(plain, "  scratch  ")
+	s.SetPinned(plain, true)
+	byID := map[string]savedSession{}
+	for _, sv := range st.load() {
+		byID[sv.ID] = sv
+	}
+	if sv := byID["a1"]; !sv.Pinned || sv.Category != "smib" {
+		t.Fatalf("alpha not persisted: %+v", sv)
+	}
+	if sv := byID["b1"]; !sv.Pinned || sv.Category != "scratch" {
+		t.Fatalf("beta mutation not persisted: %+v", sv)
+	}
+
+	// Clearing the category empties it (omitempty → absent on disk, reads "").
+	s.SetCategory(plain, "")
+	if plain.View().Category != "" {
+		t.Fatalf("category not cleared: %q", plain.View().Category)
 	}
 }
 

@@ -125,6 +125,11 @@ type Session struct {
 	history     []string  // prompts sent, for arrow-up recall
 	approvals   []approvalRule
 
+	// Organization metadata (user-set; affects board layout only):
+	// pinned floats a session to the top, category groups it.
+	pinned   bool
+	category string
+
 	ag agent.Session
 }
 
@@ -141,6 +146,8 @@ type SessionView struct {
 	Question                                           *QuestionView
 	AutoApprove                                        bool
 	ReadOnly                                           bool
+	Pinned                                             bool
+	Category                                           string
 	Created                                            time.Time
 	SinceEvent                                         time.Duration // time since the last backend event (0 = none yet)
 }
@@ -199,6 +206,7 @@ func (s *Session) View() SessionView {
 		Branch: s.Branch, Backend: s.Backend, Preset: s.Preset, Status: s.status,
 		BaseBranch: s.BaseBranch, Intent: s.intent, Err: s.errMsg, Usage: s.usage,
 		AutoApprove: s.autoApprove, ReadOnly: s.ReadOnly, Created: s.Created,
+		Pinned: s.pinned, Category: s.category,
 	}
 	if len(s.pending) > 0 {
 		head := s.pending[0]
@@ -339,6 +347,20 @@ func (s *Session) SetAutoApprove(on bool) {
 	if on {
 		s.RespondAll(agent.ApproveOnce, "")
 	}
+}
+
+// setPinned / setCategory update board-organization metadata under the
+// session lock. Callers (the supervisor) persist and wake the UI after.
+func (s *Session) setPinned(on bool) {
+	s.mu.Lock()
+	s.pinned = on
+	s.mu.Unlock()
+}
+
+func (s *Session) setCategory(category string) {
+	s.mu.Lock()
+	s.category = category
+	s.mu.Unlock()
 }
 
 func (s *Session) Status() Status {

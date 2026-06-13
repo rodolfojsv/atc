@@ -73,6 +73,15 @@
   .pill.error, .pill.closed { color: var(--err); border-color: var(--err); }
   .pill.idle, .pill.starting { color: var(--dim); }
   .tag { font-size: .76em; color: var(--faint); }
+  /* board grouping + per-card organize chips */
+  .section { display: flex; align-items: center; gap: .5em; margin: 1em .2em .45em;
+    color: var(--accent); font-size: .76em; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; }
+  .section:first-child { margin-top: .2em; }
+  .section .cnt { color: var(--faint); font-weight: 400; }
+  .chip { font: inherit; font-size: .72em; padding: .12em .6em; border-radius: 20px; line-height: 1.5;
+    border: 1px solid var(--line); background: transparent; color: var(--dim); cursor: pointer; }
+  .chip:hover { border-color: var(--accent-dim); }
+  .chip.pin.on { color: var(--accent); border-color: var(--accent-dim); }
   @keyframes pulse { 50% { opacity: .5; } }
   .empty { color: var(--dim); text-align: center; padding: 2.5em 1em; }
   .empty button { margin-top: 1em; }
@@ -236,6 +245,7 @@
         <div class="actions">
           <button class="ghost" onclick="showBoard()">← Board</button>
           <span class="spacer"></span>
+          <button class="ghost" onclick="renameSession()">rename</button>
           <button id="autoBtn" class="ghost" onclick="toggleAuto()">auto</button>
           <button class="ghost bad" onclick="postAction('abort')">abort</button>
           <button class="ghost bad" onclick="killSession()">kill</button>
@@ -335,14 +345,24 @@ function setupHold(btn) {
   btn.addEventListener('contextmenu', e => e.preventDefault());
 }
 
-function renderBoard(list) {
-  if (holdActive) return; // don't disturb an in-progress hold
-  const rows = $('rows');
-  if (!list.length) {
-    rows.innerHTML = `<div class="empty">No sessions yet.<br><button class="primary" onclick="toggleNew()">+ New session</button></div>`;
-    return;
-  }
-  rows.innerHTML = list.map(s => `
+// groupSessions arranges the board: a Pinned band first (pinned of any
+// category), then categories alphabetically with Uncategorized last —
+// mirroring the TUI.
+function groupSessions(list) {
+  const pinned = list.filter(s => s.pinned);
+  const byCat = {};
+  list.filter(s => !s.pinned).forEach(s => { const c = s.category || ''; (byCat[c] = byCat[c] || []).push(s); });
+  const cats = Object.keys(byCat).sort((a, b) => {
+    if ((a === '') !== (b === '')) return a === '' ? 1 : -1; // Uncategorized last
+    return a < b ? -1 : a > b ? 1 : 0;
+  });
+  const groups = [];
+  if (pinned.length) groups.push({ title: 'Pinned', sessions: pinned });
+  cats.forEach(c => groups.push({ title: c || 'Uncategorized', sessions: byCat[c] }));
+  return groups;
+}
+function cardHTML(s) {
+  return `
     <div class="card" onclick="openSession('${esc(s.name)}')">
       <button class="del" data-name="${esc(s.name)}" title="Hold to delete" aria-label="Hold to delete">
         <svg class="delsvg" viewBox="0 0 24 24"><circle class="ring" cx="12" cy="12" r="9"/></svg>
@@ -352,17 +372,55 @@ function renderBoard(list) {
         <span class="name">${esc(s.name)}</span>
         <span class="pill ${esc(s.status)}">${esc(s.status)}${s.pendingCount ? ' ·' + s.pendingCount : ''}</span>
         <span class="tag">${esc(s.backend)}${s.model ? ' · ' + esc(s.model) : ''}${s.readOnly ? ' · 🔒' : ''}${s.autoApprove ? ' · ⚡' : ''}</span>
+        <span class="spacer" style="flex:1"></span>
+        <button class="chip pin${s.pinned ? ' on' : ''}" title="${s.pinned ? 'Unpin' : 'Pin'}"
+          onclick="event.stopPropagation(); togglePin('${esc(s.name)}', ${!s.pinned})">📌</button>
+        <button class="chip" title="Set category"
+          onclick="event.stopPropagation(); setCategory('${esc(s.name)}')">${s.category ? esc(s.category) : '+ category'}</button>
       </div>
       <div class="sub">${esc(s.repo)}${s.branch ? ' @ ' + esc(s.branch) : ''}${cost(s) ? ' · ' + cost(s) : ''}</div>
       ${s.pending ? `<div class="last alert">⚠ ${esc(s.pending.summary)}</div>`
         : s.err ? `<div class="last alert">✗ ${esc(s.err)}</div>`
         : s.lastLine ? `<div class="last">${esc(s.lastLine)}</div>` : ''}
-    </div>`).join('');
+    </div>`;
+}
+function renderBoard(list) {
+  if (holdActive) return; // don't disturb an in-progress hold
+  const rows = $('rows');
+  if (!list.length) {
+    rows.innerHTML = `<div class="empty">No sessions yet.<br><button class="primary" onclick="toggleNew()">+ New session</button></div>`;
+    return;
+  }
+  const groups = groupSessions(list);
+  const showHeaders = groups.length > 1 || groups[0].title !== 'Uncategorized';
+  rows.innerHTML = groups.map(g =>
+    (showHeaders ? `<div class="section">${esc(g.title)}<span class="cnt">${g.sessions.length}</span></div>` : '') +
+    g.sessions.map(cardHTML).join('')).join('');
   rows.querySelectorAll('.del').forEach(setupHold);
 }
+// togglePin / setCategory: organize the board (persisted server-side).
+async function togglePin(name, on) {
+  try {
+    await api('/api/sessions/' + encodeURIComponent(name) + '/pin',
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pinned: on }) });
+    pollBoard();
+  } catch (e) { /* next poll reflects reality */ }
+}
+async function setCategory(name) {
+  const cur = (boardList.find(s => s.name === name) || {}).category || '';
+  const cat = prompt('Category for ' + name + ' (blank to clear):', cur);
+  if (cat === null) return;
+  try {
+    await api('/api/sessions/' + encodeURIComponent(name) + '/category',
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ category: cat.trim() }) });
+    pollBoard();
+  } catch (e) { alert(e.message); }
+}
+let boardList = [];
 async function pollBoard() {
   try {
-    renderBoard(await api('/api/sessions'));
+    boardList = await api('/api/sessions');
+    renderBoard(boardList);
     const m = await api('/api/meta'); const sp = m.spend; const f = [];
     if (sp.todayUsd > 0 || sp.monthUsd > 0) f.push(`$${sp.todayUsd.toFixed(2)} today · $${sp.monthUsd.toFixed(2)} month`);
     if (sp.todayAiu > 0 || sp.monthAiu > 0) f.push(`${sp.todayAiu.toFixed(1)} AIC today · ${sp.monthAiu.toFixed(1)} month`);
@@ -400,10 +458,11 @@ async function createSession() {
   try {
     const s = await api('/api/sessions', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        name: $('fName').value.trim(), repo, backend: $('fBackend').value,
+        name: $('fName').value.trim(), nameHint: text, repo, backend: $('fBackend').value,
         model: $('fModel').value.trim(), worktree: $('fWorktree').checked, readOnly: $('fReadOnly').checked,
         autoApprove: $('fAuto').checked,
-        // first prompt is sent after the session is ready so images can ride along
+        // nameHint lets the server auto-name from the first prompt; the
+        // prompt itself is sent after the session is ready so images can ride along
       }) });
     if (text.trim() || atts.length) pendingFirst = { name: s.name, text, atts };
     $('newSheet').classList.add('hidden');
@@ -516,6 +575,17 @@ async function toggleAuto() {
   try { await api('/api/sessions/' + encodeURIComponent(current) + '/auto',
     { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ on: !currentAuto }) }); pollFocus(); }
   catch (e) { setStat(e.message, true); }
+}
+async function renameSession() {
+  const nn = prompt('Rename session:', current);
+  if (nn === null || !nn.trim()) return;
+  try {
+    const r = await api('/api/sessions/' + encodeURIComponent(current) + '/rename',
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: nn.trim() }) });
+    if (drafts[current]) { drafts[r.name] = drafts[current]; delete drafts[current]; }
+    current = r.name; lastRender = '';
+    pollFocus();
+  } catch (e) { setStat(e.message, true); }
 }
 async function killSession() {
   if (!confirm(`Kill “${current}”? Removed from the board, won't resume.`)) return;

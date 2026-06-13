@@ -35,6 +35,8 @@ type savedSession struct {
 	Model       string    `json:"model,omitempty"`
 	ReadOnly    bool      `json:"readOnly,omitempty"`
 	AutoApprove bool      `json:"autoApprove,omitempty"`
+	Pinned      bool      `json:"pinned,omitempty"`
+	Category    string    `json:"category,omitempty"`
 	BaseBranch  string    `json:"baseBranch,omitempty"`
 	BaseCommit  string    `json:"baseCommit,omitempty"`
 	Status      string    `json:"status,omitempty"` // session status at last persist

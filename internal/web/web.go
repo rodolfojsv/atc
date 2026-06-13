@@ -94,6 +94,9 @@ func (s *Server) routes() {
 	api("POST /api/sessions/{name}/abort", s.handleAbort)
 	api("POST /api/sessions/{name}/kill", s.handleKill)
 	api("POST /api/sessions/{name}/auto", s.handleAuto)
+	api("POST /api/sessions/{name}/pin", s.handlePin)
+	api("POST /api/sessions/{name}/category", s.handleCategory)
+	api("POST /api/sessions/{name}/rename", s.handleRename)
 }
 
 // auth accepts the token as a bearer header (fetch calls) or query
@@ -129,6 +132,8 @@ type sessionJSON struct {
 	LastLine   string    `json:"lastLine,omitempty"`
 	ReadOnly   bool      `json:"readOnly"`
 	AutoOK     bool      `json:"autoApprove"`
+	Pinned     bool      `json:"pinned,omitempty"`
+	Category   string    `json:"category,omitempty"`
 	Created    time.Time `json:"created"`
 	SinceEvent float64   `json:"sinceEventSec,omitempty"`
 
@@ -168,7 +173,7 @@ func toSessionJSON(v supervisor.SessionView) sessionJSON {
 		Worktree: v.Worktree != "", Backend: v.Backend, Preset: v.Preset,
 		Model: v.Model, Status: string(v.Status), Intent: v.Intent,
 		Err: v.Err, LastLine: v.LastLine, ReadOnly: v.ReadOnly,
-		AutoOK: v.AutoApprove, Created: v.Created,
+		AutoOK: v.AutoApprove, Pinned: v.Pinned, Category: v.Category, Created: v.Created,
 		SinceEvent:    v.SinceEvent.Seconds(),
 		InTokens:      v.Usage.InputTokens,
 		OutTokens:     v.Usage.OutputTokens,
@@ -223,6 +228,7 @@ func (s *Server) handleMeta(w http.ResponseWriter, _ *http.Request) {
 		"repos":              s.cfg.Repos,
 		"backends":           s.sup.Backends(),
 		"presets":            presets,
+		"categories":         s.sup.Categories(),
 		"defaultRepo":        defaultRepo,
 		"defaultBackend":     defaultBackend,
 		"defaultModel":       s.cfg.Model,
@@ -246,6 +252,7 @@ func (s *Server) handleList(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Name        string `json:"name"`
+		NameHint    string `json:"nameHint"`
 		Repo        string `json:"repo"`
 		Backend     string `json:"backend"`
 		Preset      string `json:"preset"`
@@ -260,7 +267,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sess, err := s.sup.NewSession(supervisor.NewSessionOptions{
-		Name: req.Name, Repo: req.Repo, Backend: req.Backend,
+		Name: req.Name, NameHint: req.NameHint, Repo: req.Repo, Backend: req.Backend,
 		Preset: req.Preset, Model: req.Model, Prompt: req.Prompt,
 		UseWorktree: req.Worktree, ReadOnly: req.ReadOnly, AutoApprove: req.AutoApprove,
 	})
@@ -440,6 +447,57 @@ func (s *Server) handleAuto(w http.ResponseWriter, r *http.Request) {
 	}
 	sess.SetAutoApprove(req.On)
 	writeJSON(w, map[string]any{"ok": true})
+}
+
+func (s *Server) handlePin(w http.ResponseWriter, r *http.Request) {
+	sess := s.session(w, r)
+	if sess == nil {
+		return
+	}
+	var req struct {
+		Pinned bool `json:"pinned"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		jsonError(w, http.StatusBadRequest, "bad JSON: "+err.Error())
+		return
+	}
+	s.sup.SetPinned(sess, req.Pinned)
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+func (s *Server) handleCategory(w http.ResponseWriter, r *http.Request) {
+	sess := s.session(w, r)
+	if sess == nil {
+		return
+	}
+	var req struct {
+		Category string `json:"category"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		jsonError(w, http.StatusBadRequest, "bad JSON: "+err.Error())
+		return
+	}
+	s.sup.SetCategory(sess, req.Category)
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+func (s *Server) handleRename(w http.ResponseWriter, r *http.Request) {
+	sess := s.session(w, r)
+	if sess == nil {
+		return
+	}
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		jsonError(w, http.StatusBadRequest, "bad JSON: "+err.Error())
+		return
+	}
+	if err := s.sup.Rename(sess, req.Name); err != nil {
+		jsonError(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "name": sess.View().Name})
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
