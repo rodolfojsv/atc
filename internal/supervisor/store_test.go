@@ -42,9 +42,9 @@ func TestReadSessionFile(t *testing.T) {
 
 func TestAutoName(t *testing.T) {
 	for _, c := range []struct{ prompt, repo, want string }{
-		{"Fix the login flow please", "/home/rodo/atc", "Fix the login flow please"},     // spaces kept
+		{"Fix the login flow please", "/home/user/atc", "Fix the login flow please"},     // spaces kept
 		{"one two three four five six seven eight", "/r", "one two three four five six"}, // capped to 6 words
-		{"", "/home/rodo/Development/atc", "atc"},                                        // no prompt → repo base
+		{"", "/home/user/Development/atc", "atc"},                                        // no prompt → repo base
 		{"   ", "/x/my-repo", "my-repo"},
 	} {
 		if got := autoName(c.prompt, c.repo); got != c.want {
@@ -61,7 +61,7 @@ func TestDefaultCategory(t *testing.T) {
 	cfg.CategoryByRepo = map[string]string{"smib-12362": "smib", "/abs/special": "proj"}
 	s := New(cfg, nil)
 	for _, c := range []struct{ repo, want string }{
-		{"/home/rodo/Development/atc", "atc"}, // base name by default
+		{"/home/user/Development/atc", "atc"}, // base name by default
 		{"/work/smib-12362", "smib"},          // config override by base name
 		{"/abs/special", "proj"},              // config override by full path
 	} {

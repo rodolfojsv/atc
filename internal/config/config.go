@@ -42,6 +42,45 @@ type Web struct {
 	// Token protects the API. Empty means a random token is generated
 	// each run and printed at startup; set one here to keep stable URLs.
 	Token string `json:"token,omitempty"`
+	// APKPath points at a built Android APK to serve from the "App" tab
+	// (GET /api/app/download); empty or missing means the tab shows
+	// "no build yet". APKVersion is the human label shown beside it.
+	APKPath    string `json:"apkPath,omitempty"`
+	APKVersion string `json:"apkVersion,omitempty"`
+}
+
+// Ntfy configures outbound push notifications via an ntfy server
+// (https://ntfy.sh or self-hosted). atc only ever POSTs outbound — the
+// phone subscribes to its topic in the ntfy app — so this adds no inbound
+// surface. Notifications are scoped to whoever started a session via a
+// per-device topic; Topic is the fallback when a session has none.
+type Ntfy struct {
+	Enabled bool `json:"enabled,omitempty"`
+	// Server is the ntfy base URL atc POSTs to (default https://ntfy.sh).
+	// For a self-hosted server this can be a fast localhost URL.
+	Server string `json:"server,omitempty"`
+	// SubscribeURL is the ntfy base URL the *phone* uses to subscribe,
+	// shown in the web "App" panel. Defaults to Server. Set this when atc
+	// posts to localhost but the phone reaches ntfy over the tailnet
+	// (e.g. Server=http://127.0.0.1:2586, SubscribeURL=https://host.ts.net:8443).
+	SubscribeURL string `json:"subscribeUrl,omitempty"`
+	// Topic is the fallback topic used when a session carries no
+	// per-device topic (e.g. TUI/scheduler sessions). Optional.
+	Topic string `json:"topic,omitempty"`
+	// Token is an optional ntfy access token (Bearer) for protected
+	// topics on a self-hosted server.
+	Token string `json:"token,omitempty"`
+	// ServerName labels the notification title (default the OS hostname),
+	// so one phone can tell which atc instance fired the alert.
+	ServerName string `json:"serverName,omitempty"`
+	// PublicURL is atc's own tailnet URL (e.g.
+	// https://myhost.tailnet.ts.net). When set, notifications get a
+	// tap-to-open deep link to the session in the web UI.
+	PublicURL string `json:"publicUrl,omitempty"`
+	// Actions adds Approve/Deny buttons to permission notifications.
+	// These embed the atc bearer token in the message, so only enable
+	// them with a self-hosted ntfy you trust — never on ntfy.sh.
+	Actions bool `json:"actions,omitempty"`
 }
 
 type Config struct {
@@ -83,6 +122,7 @@ type Config struct {
 	Hooks              map[string][]string `json:"hooks,omitempty"`
 	Schedules          []Schedule          `json:"schedules,omitempty"`
 	Web                Web                 `json:"web,omitempty"`
+	Ntfy               Ntfy                `json:"ntfy,omitempty"`
 }
 
 // Path returns the default config file location:

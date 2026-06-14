@@ -1,0 +1,12 @@
+{
+  "appId": "com.rodolfojsv.atc",
+  "appName": "atc",
+  "webDir": "www",
+  "android": {
+    "allowMixedContent": false
+  },
+  "server": {
+    "androidScheme": "https",
+    "allowNavigation": ["*"]
+  }
+}

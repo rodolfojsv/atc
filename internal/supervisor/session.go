@@ -130,6 +130,15 @@ type Session struct {
 	pinned   bool
 	category string
 
+	// createdBy is the opaque per-device clientId of whoever started the
+	// session (web/app). Empty for TUI- and scheduler-started sessions.
+	// Used to scope notifications to "my" sessions; never shown as text.
+	createdBy string
+	// notifyTopic is the ntfy topic of the device that started the
+	// session, so push notifications reach that phone. Empty = fall back
+	// to the configured default topic (or no push).
+	notifyTopic string
+
 	ag agent.Session
 }
 
@@ -148,6 +157,8 @@ type SessionView struct {
 	ReadOnly                                           bool
 	Pinned                                             bool
 	Category                                           string
+	CreatedBy                                          string // per-device clientId of the creator; "" for TUI/scheduler
+	NotifyTopic                                        string // ntfy topic of the creator's device; "" = none
 	Created                                            time.Time
 	SinceEvent                                         time.Duration // time since the last backend event (0 = none yet)
 }
@@ -206,7 +217,8 @@ func (s *Session) View() SessionView {
 		Branch: s.Branch, Backend: s.Backend, Preset: s.Preset, Status: s.status,
 		BaseBranch: s.BaseBranch, Intent: s.intent, Err: s.errMsg, Usage: s.usage,
 		AutoApprove: s.autoApprove, ReadOnly: s.ReadOnly, Created: s.Created,
-		Pinned: s.pinned, Category: s.category,
+		Pinned: s.pinned, Category: s.category, CreatedBy: s.createdBy,
+		NotifyTopic: s.notifyTopic,
 	}
 	if len(s.pending) > 0 {
 		head := s.pending[0]
