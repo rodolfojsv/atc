@@ -190,6 +190,38 @@ func (m Manager) Remove(repo, dir, branch string) error {
 	return nil
 }
 
+// IgnoreLocally adds pattern to the repo's .git/info/exclude (the local,
+// uncommitted ignore list) so atc scratch files like saved attachments
+// never show up in status or get swept into a `git add -A`. It's a no-op
+// when dir isn't a git repo (e.g. a scratch session) and idempotent: the
+// pattern is appended only if not already present.
+func (m Manager) IgnoreLocally(dir, pattern string) error {
+	excl, err := git(dir, "rev-parse", "--git-path", "info/exclude")
+	if err != nil {
+		return nil // not a git repo; nothing to ignore
+	}
+	if !filepath.IsAbs(excl) {
+		excl = filepath.Join(dir, excl)
+	}
+	if data, err := os.ReadFile(excl); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.TrimSpace(line) == pattern {
+				return nil
+			}
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(excl), 0o755); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(excl, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = f.WriteString(pattern + "\n")
+	return err
+}
+
 func git(repo string, args ...string) (string, error) {
 	cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
 	out, err := cmd.CombinedOutput()

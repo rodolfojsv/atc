@@ -119,6 +119,39 @@ func TestDiffAndMerge(t *testing.T) {
 	}
 }
 
+// IgnoreLocally hides a pattern from git status (and thus from add -A),
+// is idempotent, and is a harmless no-op outside a repo.
+func TestIgnoreLocally(t *testing.T) {
+	repo := initRepo(t)
+	m := Manager{}
+	if err := os.MkdirAll(filepath.Join(repo, ".atc-attachments"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(repo, ".atc-attachments"), "shot.png", "x")
+
+	if err := m.IgnoreLocally(repo, ".atc-attachments/"); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.IgnoreLocally(repo, ".atc-attachments/"); err != nil { // idempotent
+		t.Fatal(err)
+	}
+	out, err := exec.Command("git", "-C", repo, "status", "--porcelain").CombinedOutput()
+	if err != nil {
+		t.Fatalf("git status: %v %s", err, out)
+	}
+	if strings.Contains(string(out), ".atc-attachments") {
+		t.Fatalf("attachments not ignored, status: %q", out)
+	}
+	excl, _ := os.ReadFile(filepath.Join(repo, ".git", "info", "exclude"))
+	if n := strings.Count(string(excl), ".atc-attachments/"); n != 1 {
+		t.Fatalf("pattern written %d times, want 1", n)
+	}
+	// No-op (no error) when the dir isn't a git repo.
+	if err := m.IgnoreLocally(t.TempDir(), ".atc-attachments/"); err != nil {
+		t.Fatalf("non-repo should be a no-op, got %v", err)
+	}
+}
+
 func writeFile(t *testing.T, dir, name, content string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {

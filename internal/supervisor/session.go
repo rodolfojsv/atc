@@ -39,6 +39,19 @@ type Entry struct {
 	Kind    EntryKind
 	Text    string
 	Partial bool
+	// Attachments are files the user sent with this prompt, persisted
+	// under the session's .atc-attachments dir so the UI can show them
+	// (and removed when the session is killed). Only set on EntryUser.
+	Attachments []EntryAttachment
+}
+
+// EntryAttachment points at a saved attachment by its path relative to
+// the session's working directory, with enough metadata for the UI to
+// render it (thumbnail for images, a named link otherwise).
+type EntryAttachment struct {
+	Name      string // original filename, for display
+	MediaType string // e.g. "image/png"
+	Path      string // relative to the session dir, e.g. .atc-attachments/…
 }
 
 // Usage accumulates token and cost numbers from backend usage events.
@@ -467,13 +480,19 @@ func (s *Session) finishMessage(content string) {
 }
 
 func (s *Session) appendEntry(kind EntryKind, text string) {
+	s.appendEntryWith(Entry{Kind: kind, Text: text})
+}
+
+// appendEntryWith appends a fully-formed entry (used when it carries more
+// than text, e.g. a user prompt with attachments).
+func (s *Session) appendEntryWith(e Entry) {
 	s.mu.Lock()
 	// Flush any in-flight stream first so ordering stays sane.
 	if s.streamBuf != "" {
 		s.transcript = append(s.transcript, Entry{Kind: EntryAssistant, Text: strings.TrimRight(s.streamBuf, "\n")})
 		s.streamBuf = ""
 	}
-	s.transcript = append(s.transcript, Entry{Kind: kind, Text: text})
+	s.transcript = append(s.transcript, e)
 	s.trimLocked()
 	s.mu.Unlock()
 }

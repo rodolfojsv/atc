@@ -466,7 +466,7 @@ func (s *Supervisor) ResumeAll() int {
 			Created: sv.Created, BaseBranch: sv.BaseBranch, BaseCommit: sv.BaseCommit,
 			autoApprove: sv.AutoApprove, pinned: sv.Pinned, category: sv.Category,
 			createdBy: sv.CreatedBy, notifyTopic: sv.NotifyTopic,
-			status:    StatusStarting, id: sv.ID,
+			status: StatusStarting, id: sv.ID,
 		}
 		s.mu.Lock()
 		s.sessions = append(s.sessions, sess)
@@ -742,38 +742,42 @@ func (s *Supervisor) PromptWith(sess *Session, text string, atts []agent.Attachm
 		return errors.New("session is still starting")
 	}
 
-	var inline, onDisk []agent.Attachment
+	// Persist every attachment under the session dir so the UI can show
+	// it for the life of the session (cleaned up on Kill). The saved
+	// paths line up with atts by index.
+	saved, err := s.saveAttachments(sess, atts)
+	if err != nil {
+		return err
+	}
+
+	var inline []agent.Attachment
+	var diskRefs []string
 	sender, canInline := ag.(agent.AttachmentSender)
-	for _, a := range atts {
+	for i, a := range atts {
 		if canInline && a.IsImage() {
-			inline = append(inline, a)
+			inline = append(inline, a) // also sent inline so the model sees it
 		} else {
-			onDisk = append(onDisk, a)
+			diskRefs = append(diskRefs, saved[i].Path) // referenced by path for non-inline backends
 		}
 	}
 
 	prompt := text
-	if len(onDisk) > 0 {
-		paths, err := s.saveAttachments(sess, onDisk)
-		if err != nil {
-			return err
-		}
-		prompt += "\n\nAttached files (read them from disk):\n- " + strings.Join(paths, "\n- ")
+	if len(diskRefs) > 0 {
+		prompt += "\n\nAttached files (read them from disk):\n- " + strings.Join(diskRefs, "\n- ")
 	}
 
 	names := make([]string, len(atts))
 	for i, a := range atts {
 		names[i] = a.Name
 	}
-	sess.appendEntry(EntryUser, text+"\n📎 "+strings.Join(names, ", "))
+	sess.appendEntryWith(Entry{Kind: EntryUser, Text: text + "\n📎 " + strings.Join(names, ", "), Attachments: saved})
 	sess.addHistory(text)
 	sess.setStatus(StatusWorking)
 	s.log.Log(logx.Info, "session.prompt_attachments", map[string]any{
-		"session": sess.Name, "inline": len(inline), "onDisk": len(onDisk),
+		"session": sess.Name, "inline": len(inline), "onDisk": len(diskRefs),
 	})
 	s.poke()
 
-	var err error
 	if len(inline) > 0 {
 		err = sender.SendWithAttachments(context.Background(), prompt, inline)
 	} else {
@@ -787,8 +791,10 @@ func (s *Supervisor) PromptWith(sess *Session, text string, atts []agent.Attachm
 }
 
 // saveAttachments writes attachments into the session's working dir so
-// the agent can read them; returns paths relative to that dir.
-func (s *Supervisor) saveAttachments(sess *Session, atts []agent.Attachment) ([]string, error) {
+// the agent can read them and the UI can show them; returns one
+// EntryAttachment per input (same order), with a path relative to the
+// session dir.
+func (s *Supervisor) saveAttachments(sess *Session, atts []agent.Attachment) ([]EntryAttachment, error) {
 	sess.mu.Lock()
 	base := sess.Dir
 	sess.mu.Unlock()
@@ -796,16 +802,25 @@ func (s *Supervisor) saveAttachments(sess *Session, atts []agent.Attachment) ([]
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
-	var paths []string
+	// Keep these atc scratch files out of git status and any `git add -A`
+	// (e.g. on merge) so a session's screenshots aren't committed.
+	if err := s.trees.IgnoreLocally(base, ".atc-attachments/"); err != nil {
+		s.log.Log(logx.Info, "session.attachments_ignore_failed", map[string]any{"session": sess.Name, "err": err.Error()})
+	}
+	saved := make([]EntryAttachment, len(atts))
 	stamp := time.Now().Format("150405")
 	for i, a := range atts {
 		name := fmt.Sprintf("%s-%d-%s", stamp, i+1, filepath.Base(a.Name))
 		if err := os.WriteFile(filepath.Join(dir, name), a.Data, 0o644); err != nil {
 			return nil, err
 		}
-		paths = append(paths, filepath.Join(".atc-attachments", name))
+		saved[i] = EntryAttachment{
+			Name:      a.Name,
+			MediaType: a.MediaType,
+			Path:      filepath.Join(".atc-attachments", name),
+		}
 	}
-	return paths, nil
+	return saved, nil
 }
 
 // Rename changes a session's board name. The worktree, branch and
@@ -924,12 +939,18 @@ func (s *Supervisor) Kill(sess *Session, removeWorktree bool) {
 	}
 	sess.setStatus(StatusClosed)
 	sess.mu.Lock()
-	repo, worktree, branch, id := sess.Repo, sess.Worktree, sess.Branch, sess.id
+	repo, worktree, branch, id, dir := sess.Repo, sess.Worktree, sess.Branch, sess.id, sess.Dir
 	sess.mu.Unlock()
 	if id != "" {
 		s.mu.Lock()
 		s.killed[id] = true
 		s.mu.Unlock()
+	}
+	// Drop saved attachments. For a worktree session this lives inside the
+	// worktree removed below, but direct/scratch sessions keep their dir,
+	// so clean it up explicitly either way.
+	if dir != "" {
+		_ = os.RemoveAll(filepath.Join(dir, ".atc-attachments"))
 	}
 	if removeWorktree && worktree != "" {
 		if err := s.trees.Remove(repo, worktree, branch); err != nil {
@@ -1065,6 +1086,52 @@ func (s *Supervisor) ReadSessionFile(sess *Session, rel string) (string, []byte,
 	}
 	if fi.Size() > maxFileReadBytes {
 		return "", nil, fmt.Errorf("file is larger than %dMB", maxFileReadBytes>>20)
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		return "", nil, err
+	}
+	return filepath.Base(target), data, nil
+}
+
+// maxAttachmentBytes caps an attachment the web UI can fetch back. It
+// matches the per-file upload limit so anything that was accepted can be
+// served again.
+const maxAttachmentBytes = 10 << 20
+
+// ReadAttachment serves the bytes of a previously saved attachment,
+// confined to the session's .atc-attachments dir (rel must point inside
+// it; "../" escapes are refused). Returns the base name and raw bytes;
+// the caller decides the content type.
+func (s *Supervisor) ReadAttachment(sess *Session, rel string) (string, []byte, error) {
+	sess.mu.Lock()
+	base := sess.Dir
+	sess.mu.Unlock()
+	if base == "" {
+		return "", nil, errors.New("session has no directory yet")
+	}
+	root := filepath.Join(base, ".atc-attachments")
+	rel = strings.TrimSpace(rel)
+	if rel == "" {
+		return "", nil, errors.New("path is required")
+	}
+	target := rel
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(base, target)
+	}
+	target = filepath.Clean(target)
+	if r, err := filepath.Rel(root, target); err != nil || r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) {
+		return "", nil, errors.New("path is outside the attachments directory")
+	}
+	fi, err := os.Stat(target)
+	if err != nil {
+		return "", nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return "", nil, errors.New("not a regular file")
+	}
+	if fi.Size() > maxAttachmentBytes {
+		return "", nil, fmt.Errorf("file is larger than %dMB", maxAttachmentBytes>>20)
 	}
 	data, err := os.ReadFile(target)
 	if err != nil {
