@@ -1,6 +1,6 @@
 # atc — agent traffic control
 
-A terminal manager for running and supervising **multiple GitHub Copilot agent sessions in parallel** — one window, many agents, each in its own git worktree, with at-a-glance status, desktop notifications, usage tracking, and scheduled prompts.
+A manager for running and supervising **multiple AI coding-agent sessions in parallel** — **GitHub Copilot and Claude Code, side by side** — one window, many agents, each in its own git worktree, with at-a-glance status, cross-device notifications, usage tracking, and scheduled prompts. Drive it from the **terminal (TUI)**, the **browser**, or an **Android app**.
 
 Think of it as the control tower: agents take off, fly their missions, and hold for clearance — you watch the board and only step in when one of them is blocked.
 
@@ -20,12 +20,12 @@ Think of it as the control tower: agents take off, fly their missions, and hold 
 
 GitHub Copilot CLI has no standing multi-session manager ([copilot-cli#2966](https://github.com/github/copilot-cli/issues/2966) is open with no timeline). `/fleet` fans out subagents inside one session, but there's no control tower for independent, long-running agents across repos and worktrees.
 
-`atc` is built on the [GitHub Copilot SDK](https://github.com/github/copilot-sdk) (Go), which drives the same agent runtime as Copilot CLI through **structured events** — streaming output, tool calls, permission requests, usage metrics — instead of scraping a terminal. Your existing Copilot login and billing apply unchanged.
+`atc` is built on the [GitHub Copilot SDK](https://github.com/github/copilot-sdk) (Go), which drives the same agent runtime as Copilot CLI through **structured events** — streaming output, tool calls, permission requests, usage metrics — instead of scraping a terminal. Your existing Copilot login and billing apply unchanged. A second backend drives **[Claude Code](https://claude.com/claude-code)** (headless, stream-JSON), so Copilot and Claude agents share the same board, the same approval flow, and the same remote clients.
 
 Design priorities, in order:
 
-1. **Minimal trust surface.** Single static Go binary. Dependencies: Go stdlib, [Bubble Tea](https://github.com/charmbracelet/bubbletea), and GitHub's own SDK. No npm tree, no telemetry, **no network listener** — strictly local.
-2. **Never babysit a blocked agent.** Permission requests surface on the board and fire a Windows toast the moment any agent is waiting.
+1. **Minimal trust surface.** Single static Go binary. Core dependencies: Go stdlib, [Bubble Tea](https://github.com/charmbracelet/bubbletea), and GitHub's own SDK. No npm tree, no telemetry. **No network listener by default** — the optional web UI and phone push are opt-in and **tailnet-only**, never a public bind.
+2. **Never babysit a blocked agent.** Permission requests surface on the board and fire a notification the moment any agent is waiting — a desktop toast, a browser notification, or a **phone push** that lands even with everything closed.
 3. **Extensible without plugins.** Every lifecycle event can invoke a user-configured subprocess hook (PowerShell, Python, anything) with the event as JSON on stdin.
 
 ## Features
@@ -43,17 +43,21 @@ Design priorities, in order:
 - **Hooks** — map events (`session-started`, `waiting-on-permission`, `finished`, `error`, `tool-call`) to commands in config. Built-in Windows toast notifications; sample hooks for Teams webhooks and tool-call audit logs.
 - **Usage panel** — per-session input/output token totals, **billed AI Credits** (AIC column — actual nano-AIU reported by the runtime per request; there is no fixed tokens→AIC rate, it varies by model multiplier and billing batches), and a context-fill gauge, powered by the SDK's `AssistantUsage` / `SessionUsageInfo` events.
 - **Scheduled prompts** — cron-style schedules that launch a session with a canned prompt and preset: nightly dependency audit, morning PR triage. Results flow through the same board, notifications, and hooks.
-- **Web UI (optional)** — `atc --serve` adds a browser frontend over the *same* live sessions the TUI drives; `atc serve` runs it headless (no terminal). The board, transcripts, prompting, and the permission approve/deny flow all work from a phone. Its headline feature is **image attachments**: pick a file or paste a screenshot straight into the prompt. For Claude sessions the image goes inline into the model's context (base64 content blocks); other backends get the image saved under `<dir>/.atc-attachments/` and referenced by path. Localhost-bound and bearer-token protected — reach it from elsewhere via `tailscale serve` (tailnet-only HTTPS), never a public listener. See [Web UI](#web-ui).
+- **Web UI (optional)** — `atc --serve` adds a browser frontend over the *same* live sessions the TUI drives; `atc serve` runs it headless (no terminal). Everything works from a phone: the live board, streaming transcripts, prompting, and the **approve / deny / always-allow** permission flow. Plus **image attachments** (pick or paste a screenshot — inlined for Claude, saved + path-referenced otherwise), **markdown rendering** with GFM tables, **diff + merge** of a worktree session, **mid-session model switch**, **clickable file mentions** (scoped to the session dir), and an in-app link-preview modal. Localhost-bound and bearer-token protected — reach it from elsewhere via `tailscale serve` (tailnet-only HTTPS), never a public listener. See [Web UI](#web-ui).
+- **Android app (optional)** — a thin [Capacitor](https://capacitorjs.com) shell that loads the web UI over your tailnet, installable from a QR in the web "App" tab. A **Servers** screen stores multiple atc instances and switches between them; hardware Back maps to in-app navigation. The app reuses the web UI verbatim, so every feature above is on your phone. Build it yourself with `scripts/build-apk.sh` (Dockerized, self-signed). See [Android app & push notifications](#android-app--push-notifications).
+- **Phone push (ntfy)** — background notifications via [ntfy](https://ntfy.sh) (self-hosted or ntfy.sh): when an agent **needs approval / finishes / errors**, atc makes an outbound POST and the ntfy app alerts your phone — even with atc and the browser closed. Scoped to the sessions you started (per-device topic) with a server-wide default topic as a catch-all, and **Approve/Deny buttons right on the notification**. Outbound-only — no inbound listener, no public tunnel.
 
 ## Status
 
-**Alpha — first working build.** Implemented and compiling; awaiting validation against a real Copilot seat (the Phase 0 smoke test happens on first run):
+**Beta — in daily use** on real Copilot and Claude seats (Linux and Windows).
 
-- [ ] **Phase 0** — validate: SDK hello-world against a work Copilot seat; observe permission + usage events
+- [x] **Phase 0** — validated: SDK against a real seat; permission + usage events observed in practice
 - [x] **Phase 1** — MVP: session board, spawn/kill, attach/detach, prompts
 - [x] **Phase 2** — worktree-per-session, permission surfacing, approval policy, config, session persistence (sessions are recorded in `~/.atc/sessions.json` and resumed on the next run)
-- [x] **Phase 3** — hooks, usage panel, scheduled prompts; toasts via the sample `hooks/toast.ps1` *(quota panel: not yet)*
-- Later: remote-control API (deliberately deferred until the security story is settled — when it lands it will be tailnet-bound with bearer auth, never a public tunnel)
+- [x] **Phase 3** — hooks, usage panel, scheduled prompts; desktop toasts via the sample `hooks/toast.ps1` *(quota panel: not yet)*
+- [x] **Phase 4** — web UI: board, transcripts, prompting + images, approvals, markdown/tables, diff/merge, model switch, file mentions — all phone-ready over `tailscale serve`
+- [x] **Phase 5** — Android app (Capacitor shell, multi-server) and **phone push via ntfy** (per-session scoping, Approve/Deny from the notification)
+- Later: a formal remote-control HTTP API (the web UI already covers remote control; a dedicated API stays deferred until there's a need it doesn't meet)
 
 ## Keys
 
@@ -67,11 +71,12 @@ Design priorities, in order:
 
 ## Requirements
 
-- A GitHub Copilot subscription (any tier — `atc` uses your existing seat and meters exactly like Copilot CLI)
-- [Copilot CLI](https://github.com/github/copilot-cli) installed, on PATH, and logged in (`atc` drives it via the SDK; your stored login is reused)
-- Optional: [Claude Code](https://claude.com/claude-code) installed and logged in, for `backend: claude` sessions
+- At least one backend, on PATH and logged in:
+  - **[Copilot CLI](https://github.com/github/copilot-cli)** — needs a GitHub Copilot subscription (any tier); `atc` drives it via the SDK and reuses your stored login, metering exactly like Copilot CLI.
+  - and/or **[Claude Code](https://claude.com/claude-code)** — for `backend: claude` sessions.
 - Git (for worktree management)
-- Windows 10/11 (primary target — Windows Terminal recommended), Linux/macOS expected to work via Bubble Tea but untested for now
+- **Linux and Windows 10/11** are both used day-to-day (Windows Terminal recommended on Windows); macOS is expected to work via Bubble Tea but is less exercised.
+- *Optional, for phone access:* [Tailscale](https://tailscale.com) (to reach the web UI / app over your tailnet) and an [ntfy](https://ntfy.sh) server + the ntfy app (for background push). Both are opt-in.
 
 ## Build
 
@@ -198,7 +203,7 @@ Both print a tokenized URL at startup, e.g. `http://127.0.0.1:8787/?token=ab12�
 
 Rule of thumb: want both views *live* → run `atc --serve`. Running them as separate processes (e.g. a headless `atc serve` plus an occasional TUI) is fine too; you just get settled-session hand-off rather than live mirroring.
 
-**What you can do from the browser:** see the live board (status, model, cost, pending-permission badges), open a session and watch its transcript stream, send prompts, **approve/deny/always-allow permission requests**, toggle auto-approve, abort, kill, and launch new sessions (repo/backend/model/worktree/read-only).
+**What you can do from the browser:** see the live board (status, model, cost, pending-permission badges, pin/category grouping), open a session and watch its **markdown-rendered** transcript stream (GFM tables, clickable `.md` file mentions, link-preview modal), send prompts, **approve/deny/always-allow permission requests**, toggle auto-approve, **review the diff and merge** a worktree session, **switch the model mid-session**, abort, kill, rename, and launch new sessions (repo/backend/model/worktree/read-only, or a no-repo *scratch* session). The **📱 App** tab hosts the APK download, device pairing, and ntfy subscribe — see [Android app & push notifications](#android-app--push-notifications).
 
 **Images.** Click 📎 to pick files, or just **paste a screenshot** into the prompt box. For **Claude** sessions the image is inlined into the model's context as a base64 content block — no file written. For backends that can't take inline images (and for non-image files anywhere), the file is saved under `<session dir>/.atc-attachments/` and its path is appended to the prompt so the agent reads it with its file tools. Limits: 6 files/prompt, 10 MB each.
 
@@ -224,6 +229,53 @@ Config (all optional):
 
 Flags override config: `atc serve --addr 127.0.0.1:9000 --token mytoken`. A stable `token` in config keeps the URL constant so a phone bookmark keeps working across restarts; omit it and a new token is minted (and printed) each run.
 
+## Android app & push notifications
+
+Two opt-in pieces turn the phone view into a real app with background alerts. Both are **tailnet-only and outbound-only** — atc never opens an inbound port for them.
+
+### The "App" tab
+
+When the web UI is up, the header's **📱 App** button opens a panel with:
+- **Android app** — version, size, SHA-256, a **Download APK** button, a **download QR** to scan from the phone, and a **copy app link** button (the URL you paste into the app on first launch). Appears once you point `web.apkPath` at a built APK.
+- **Phone notifications (ntfy)** — a **subscribe QR** + topic URL and a **send-test** button (appears when ntfy is enabled).
+
+The APK download and the QR endpoint sit behind the same bearer token as the rest of the UI; the QR is rendered server-side (tiny `rsc.io/qr`, no client-side JS deps).
+
+### The Android app
+
+The app is a thin Capacitor shell that loads the live web UI over your tailnet — so it's always in sync with the server and needs no rebuild when atc updates. On first launch you paste your atc link (`https://<host>.ts.net/?token=…`); a **Servers** screen stores it and any others, so you can keep several atc instances and switch between them (one visible at a time). Hardware **Back** maps to in-app navigation (session → board → Servers). Background notifications come from ntfy, below.
+
+**Build it** (needs Docker; produces a self-signed `build/atc.apk`):
+
+```sh
+ATC_KEYSTORE_PASSWORD=your-pass ./scripts/build-apk.sh
+```
+
+First run builds a ~2 GB toolchain image (Node + JDK + Android SDK) once; later builds take a couple of minutes. **Back up the keystore and its password** (`~/.android/atc-release.keystore`) — the same pair is required to ship updates. Then set `web.apkPath` to the APK and `web.apkVersion` to a label, and restart atc; the App tab serves it.
+
+### Push via ntfy
+
+atc publishes session events to an [ntfy](https://ntfy.sh) topic; the **ntfy phone app** (not the website) delivers them as real push notifications, even with atc and the browser fully closed.
+
+```jsonc
+{
+  "ntfy": {
+    "enabled": true,
+    "server":  "http://127.0.0.1:2586",                 // where atc POSTs (self-hosted = localhost)
+    "subscribeUrl": "https://myhost.tailnet.ts.net:8443", // what the phone subscribes to (shown in the App tab)
+    "topic":   "atc-<something-unguessable>",            // stable default topic; catches every session
+    "serverName": "myhost",                               // labels the notification title
+    "publicUrl":  "https://myhost.tailnet.ts.net",        // for tap-to-open deep links + action buttons
+    "actions": true                                        // Approve/Deny buttons (self-hosted only — see below)
+  }
+}
+```
+
+- **Which events:** `waiting-on-permission`, `finished`, `error`. Title is `<serverName> · <session> <event>`; tapping deep-links to the session.
+- **Scoping:** each device gets its own topic (sessions you start notify *you*); the configured `topic` is a server-wide catch-all so a single subscribed phone reliably gets everything. A new-session **"Notify me"** checkbox (default on) can mute a session.
+- **Approve/Deny from the notification:** with `actions: true`, permission alerts carry buttons that POST back to atc. They embed the atc token in the message, so **only enable `actions` with a self-hosted ntfy you trust** — never on ntfy.sh.
+- **Self-hosted ntfy** is the on-ethos choice (single Go binary, no Google): run `ntfy serve`, expose it with `tailscale serve --https=8443 http://127.0.0.1:2586`, and in the phone's ntfy app **subscribe on your server** (not the default ntfy.sh) with **Instant Delivery** enabled — required for background push without Firebase. Or point `server` at `https://ntfy.sh` for battery-friendly FCM delivery at the cost of routing through Google.
+
 ## Diagnostics
 
 atc writes no logs by default. When something misbehaves, enable the diagnostic log:
@@ -238,7 +290,8 @@ Permission lifecycle entries are the most useful: every request logs `permission
 
 ## Security posture
 
-- Local-only by default: without `--serve`/`serve`, `atc` opens **zero listening ports** and makes no network calls of its own; all network traffic belongs to the Copilot runtime it supervises. The web UI is opt-in, binds to localhost, and is bearer-token gated — expose it across machines only via `tailscale serve` (tailnet-only), never a public bind.
+- Local-only by default: without `--serve`/`serve`, `atc` opens **zero listening ports** and makes no network calls of its own; all network traffic belongs to the agent runtime it supervises. The web UI is opt-in, binds to localhost, and is bearer-token gated — expose it across machines only via `tailscale serve` (tailnet-only), never a public bind.
+- Push notifications (ntfy), when enabled, are **outbound POSTs only** — they add no inbound listener. Self-host ntfy on the tailnet to keep everything local; the notification body carries no secret unless you opt into `actions` (Approve/Deny buttons), which is why those are for trusted self-hosted servers only.
 - `atc` never reads, stores, or forwards credentials — authentication is handled entirely by the Copilot CLI/SDK.
 - `allow-all` is per-preset and deny-list-gated, never the global default.
 - Hooks run only commands you wrote into your own config.
@@ -247,6 +300,7 @@ Permission lifecycle entries are the most useful: every request logs `permission
 
 - [CCManager](https://github.com/kbwo/ccmanager) — prior art for the multi-agent TUI pattern; `atc` exists for the SDK-events-instead-of-PTY-scraping approach and a from-source trust story.
 - [Bubble Tea](https://github.com/charmbracelet/bubbletea) / [Lip Gloss](https://github.com/charmbracelet/lipgloss) — the TUI foundation.
+- [Capacitor](https://capacitorjs.com) (Android shell), [ntfy](https://ntfy.sh) (push), and [Tailscale](https://tailscale.com) (tailnet access) — the phone story.
 
 ## License
 
