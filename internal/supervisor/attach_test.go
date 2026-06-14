@@ -153,8 +153,9 @@ func TestPromptWithSavesToDiskForPlainBackend(t *testing.T) {
 	}
 }
 
-// A backend with AttachmentSender gets images inline; nothing lands on
-// disk and the prompt text stays clean.
+// A backend with AttachmentSender gets images inline and the prompt text
+// stays clean (no on-disk file reference), but a copy is still persisted
+// so the UI can show it.
 func TestPromptWithInlinesImagesWhenSupported(t *testing.T) {
 	s := New(testConfig(t), bus.New())
 	dir := t.TempDir()
@@ -168,10 +169,39 @@ func TestPromptWithInlinesImagesWhenSupported(t *testing.T) {
 		t.Fatalf("image not sent inline: %+v", ag.sentAtts)
 	}
 	if ag.sentText != "what is this?" {
-		t.Fatalf("prompt text altered: %q", ag.sentText)
+		t.Fatalf("prompt text altered (should not reference disk path): %q", ag.sentText)
 	}
-	if _, err := os.Stat(filepath.Join(dir, ".atc-attachments")); !os.IsNotExist(err) {
-		t.Fatal("inline path should not write files")
+	// The inline image is also saved for the UI and recorded on the entry.
+	files, err := os.ReadDir(filepath.Join(dir, ".atc-attachments"))
+	if err != nil || len(files) != 1 {
+		t.Fatalf("inline image not persisted for viewing: %v (%d files)", err, len(files))
+	}
+	entries := sess.Transcript()
+	last := entries[len(entries)-1]
+	if len(last.Attachments) != 1 || last.Attachments[0].Name != "shot.png" ||
+		!strings.HasPrefix(last.Attachments[0].Path, ".atc-attachments") {
+		t.Fatalf("entry attachment metadata missing: %+v", last.Attachments)
+	}
+}
+
+// Killing a session removes its saved attachments from disk.
+func TestKillRemovesAttachments(t *testing.T) {
+	s := New(testConfig(t), bus.New())
+	dir := t.TempDir()
+	ag := &fakeInlineAgent{}
+	sess := &Session{Name: "x", Dir: dir, Preset: "default", status: StatusIdle, ag: ag}
+	s.sessions = append(s.sessions, sess)
+
+	if err := s.PromptWith(sess, "look", []agent.Attachment{png()}); err != nil {
+		t.Fatal(err)
+	}
+	attDir := filepath.Join(dir, ".atc-attachments")
+	if _, err := os.Stat(attDir); err != nil {
+		t.Fatalf("attachments not written: %v", err)
+	}
+	s.Kill(sess, false)
+	if _, err := os.Stat(attDir); !os.IsNotExist(err) {
+		t.Fatalf("attachments dir survived kill: %v", err)
 	}
 }
 

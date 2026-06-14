@@ -17,8 +17,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -114,6 +116,7 @@ func (s *Server) routes() {
 	api("POST /api/sessions/{name}/merge", s.handleMerge)
 	api("POST /api/sessions/{name}/model", s.handleModel)
 	api("GET /api/sessions/{name}/file", s.handleFile)
+	api("GET /api/sessions/{name}/attachment", s.handleAttachment)
 	api("GET /api/app/latest", s.handleAppLatest)
 	api("GET /api/app/download", s.handleAppDownload)
 	api("GET /api/app/qr", s.handleAppQR)
@@ -184,9 +187,17 @@ type questionJSON struct {
 }
 
 type entryJSON struct {
-	Kind    string `json:"kind"`
-	Text    string `json:"text"`
-	Partial bool   `json:"partial,omitempty"`
+	Kind        string           `json:"kind"`
+	Text        string           `json:"text"`
+	Partial     bool             `json:"partial,omitempty"`
+	Attachments []attachmentJSON `json:"attachments,omitempty"`
+}
+
+type attachmentJSON struct {
+	Name    string `json:"name"`
+	Type    string `json:"type"` // media type, e.g. "image/png"
+	URL     string `json:"url"`  // fetch the saved bytes back
+	IsImage bool   `json:"isImage"`
 }
 
 func toSessionJSON(v supervisor.SessionView) sessionJSON {
@@ -329,10 +340,21 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 	if sess == nil {
 		return
 	}
+	name := sess.Name
 	entries := sess.Transcript()
 	transcript := make([]entryJSON, 0, len(entries))
 	for _, e := range entries {
-		transcript = append(transcript, entryJSON{Kind: kindString(e.Kind), Text: e.Text, Partial: e.Partial})
+		ej := entryJSON{Kind: kindString(e.Kind), Text: e.Text, Partial: e.Partial}
+		for _, a := range e.Attachments {
+			ej.Attachments = append(ej.Attachments, attachmentJSON{
+				Name:    a.Name,
+				Type:    a.MediaType,
+				IsImage: strings.HasPrefix(a.MediaType, "image/"),
+				URL: "/api/sessions/" + url.PathEscape(name) +
+					"/attachment?path=" + url.QueryEscape(a.Path),
+			})
+		}
+		transcript = append(transcript, ej)
 	}
 	writeJSON(w, map[string]any{
 		"session":    toSessionJSON(sess.View()),
@@ -601,6 +623,28 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 		"content":  string(data),
 		"markdown": strings.HasSuffix(strings.ToLower(name), ".md"),
 	})
+}
+
+// handleAttachment serves the raw bytes of a saved prompt attachment so
+// the UI can show the image the user sent. Confined to the session's
+// .atc-attachments dir by the supervisor.
+func (s *Server) handleAttachment(w http.ResponseWriter, r *http.Request) {
+	sess := s.session(w, r)
+	if sess == nil {
+		return
+	}
+	name, data, err := s.sup.ReadAttachment(sess, r.URL.Query().Get("path"))
+	if err != nil {
+		jsonError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	ct := mime.TypeByExtension(filepath.Ext(name))
+	if ct == "" {
+		ct = http.DetectContentType(data)
+	}
+	w.Header().Set("Content-Type", ct)
+	w.Header().Set("Cache-Control", "private, max-age=86400")
+	_, _ = w.Write(data)
 }
 
 // clientID returns the caller's opaque per-device id from the X-Atc-Client

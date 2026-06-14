@@ -156,6 +156,12 @@
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .thumb .x { position: absolute; top: 2px; right: 2px; background: rgba(0,0,0,.6); color: #fff;
     border-radius: 50%; width: 18px; height: 18px; line-height: 18px; text-align: center; font-size: 12px; cursor: pointer; }
+  /* attachments shown inside a sent user message */
+  .thumbs.entry { margin: .5em 0 0; }
+  .thumbs.entry .thumb { cursor: pointer; }
+  .thumbs.entry .thumb.file { padding: .4em .7em; font-size: .8em; color: var(--dim);
+    max-width: 12em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-decoration: none; }
+  img.attfull { max-width: 100%; max-height: 78vh; display: block; margin: 0 auto; border-radius: 6px; }
   .inputbar { display: flex; gap: .5em; align-items: flex-end;
     background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); padding: .5em; }
   .inputbar.drag { border-color: var(--accent); background: var(--panel2); }
@@ -1024,8 +1030,20 @@ async function pollFocus() {
 
 function renderEntry(e) {
   if (e.kind === 'user') {
-    // surface attached image names as inline note; thumbnails aren't stored server-side
-    return `<div class="e user">${esc(e.text)}</div>`;
+    // Drop the trailing "📎 name, name" line — the attachments render as
+    // thumbnails below instead.
+    let text = e.text;
+    if (e.attachments && e.attachments.length) text = text.replace(/\n📎[^\n]*$/, '');
+    let atts = '';
+    if (e.attachments && e.attachments.length) {
+      // <img>/links can't send the bearer header, so authenticate via ?token=.
+      const auth = u => u + '&token=' + encodeURIComponent(token);
+      atts = '<div class="thumbs entry">' + e.attachments.map(a => a.isImage
+        ? `<a class="thumb attlink" data-url="${esc(auth(a.url))}" title="${esc(a.name)}"><img src="${esc(auth(a.url))}" alt="${esc(a.name)}"></a>`
+        : `<a class="thumb attlink file" data-url="${esc(auth(a.url))}" title="${esc(a.name)}">${esc(a.name)}</a>`
+      ).join('') + '</div>';
+    }
+    return `<div class="e user">${esc(text)}${atts}</div>`;
   }
   const cls = { assistant: 'assistant', tool: 'tool', system: 'system', error: 'error' }[e.kind] || 'system';
   const cursor = e.partial ? '<span class="cursor"> ▍</span>' : '';
@@ -1035,6 +1053,15 @@ function renderEntry(e) {
 // Links and file mentions in the transcript open in the in-app modal,
 // never navigating away.
 $('transcript').addEventListener('click', e => {
+  const att = e.target.closest('a.attlink');
+  if (att) {
+    e.preventDefault();
+    const url = att.dataset.url, name = att.getAttribute('title') || 'attachment';
+    if (att.classList.contains('file')) { openLink(url); return; }
+    openModal(name, `<img class="attfull" src="${esc(url)}" alt="${esc(name)}">`,
+      `<button class="ghost" onclick="closeModal()">Close</button>`);
+    return;
+  }
   const fl = e.target.closest('a.filelink');
   if (fl) { e.preventDefault(); openFile(fl.dataset.path); return; }
   const a = e.target.closest('a.mdlink');
