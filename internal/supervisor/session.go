@@ -128,6 +128,7 @@ type Session struct {
 	errMsg      string
 	transcript  []Entry
 	streamBuf   string // in-flight assistant message (deltas)
+	shownStream string // text from the in-flight message already committed to the transcript (flushed from streamBuf by an interleaved entry), so finishMessage won't re-append it
 	usage       Usage
 	pending     []*Permission // FIFO queue; index 0 is surfaced in the UI
 	question    *agent.Question
@@ -468,12 +469,33 @@ func (s *Session) appendStream(delta string) {
 
 // finishMessage replaces the streamed buffer with the authoritative
 // full message content.
+//
+// If an interleaved entry (a tool start, a tool failure, …) flushed part
+// of this same message out of streamBuf before the authoritative content
+// arrived, that prefix is already in the transcript; the backend's full
+// content repeats it. Append only the portion not yet shown so the text
+// isn't duplicated. This guard is backend-neutral: in the normal ordering
+// (the message arrives before any tool, so nothing was flushed mid-stream)
+// shownStream is empty and the full content is appended unchanged.
 func (s *Session) finishMessage(content string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.streamBuf = ""
+	shown := strings.TrimRight(s.shownStream, "\n")
+	s.shownStream = ""
 	if content == "" {
 		return
+	}
+	if shown != "" {
+		if strings.TrimRight(content, "\n") == shown {
+			return // the whole message was already committed via flushes
+		}
+		if rest := strings.TrimPrefix(content, shown); rest != content {
+			content = strings.TrimLeft(rest, "\n")
+			if strings.TrimSpace(content) == "" {
+				return
+			}
+		}
 	}
 	s.transcript = append(s.transcript, Entry{Kind: EntryAssistant, Text: strings.TrimRight(content, "\n")})
 	s.trimLocked()
@@ -487,10 +509,17 @@ func (s *Session) appendEntry(kind EntryKind, text string) {
 // than text, e.g. a user prompt with attachments).
 func (s *Session) appendEntryWith(e Entry) {
 	s.mu.Lock()
-	// Flush any in-flight stream first so ordering stays sane.
+	// Flush any in-flight stream first so ordering stays sane. Remember the
+	// flushed text so the authoritative finishMessage doesn't re-append it.
 	if s.streamBuf != "" {
 		s.transcript = append(s.transcript, Entry{Kind: EntryAssistant, Text: strings.TrimRight(s.streamBuf, "\n")})
+		s.shownStream += s.streamBuf
 		s.streamBuf = ""
+	}
+	// A user prompt opens a new turn; any earlier flushed assistant text is
+	// final and must not be deduped against the next message.
+	if e.Kind == EntryUser {
+		s.shownStream = ""
 	}
 	s.transcript = append(s.transcript, e)
 	s.trimLocked()
