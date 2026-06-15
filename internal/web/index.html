@@ -167,6 +167,18 @@
   .inputbar.drag { border-color: var(--accent); background: var(--panel2); }
   .inputbar textarea { background: transparent; border: none; padding: .35em .3em; max-height: 9em; overflow-y: auto; }
   .inputbar textarea:focus { outline: none; }
+  /* "/" command and "@" file completion popup, above the input bar */
+  .completion { background: var(--panel2); border: 1px solid var(--line); border-radius: 10px;
+    margin-bottom: .4em; overflow: hidden; max-height: 14em; overflow-y: auto; }
+  .completion .crow { padding: .5em .7em; cursor: pointer; font-size: .9em; white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis; border-bottom: 1px solid var(--line); }
+  .completion .crow:last-child { border-bottom: none; }
+  .completion .crow.sel, .completion .crow:hover { background: var(--accent-dim); color: #cdddff; }
+  .completion .crow .cdesc { color: var(--dim); font-size: .92em; }
+  .completion .crow.sel .cdesc { color: #aac3ff; }
+  .skillrow { padding: .45em .2em; font-size: .85em; color: var(--fg); border-bottom: 1px solid var(--line);
+    word-break: break-word; }
+  .skillrow:last-child { border-bottom: none; }
   .actions { display: flex; gap: .5em; margin-top: .5em; align-items: center; flex-wrap: wrap; }
   .actions .spacer { flex: 1; }
   .morelist { display: flex; flex-direction: column; gap: .5em; }
@@ -306,6 +318,7 @@
       <div id="transcript"></div>
       <div class="composer">
         <div class="thumbs" id="thumbs"></div>
+        <div id="completion" class="completion hidden"></div>
         <div class="inputbar" id="focusBar">
           <textarea id="prompt" placeholder="Message… (Enter to send · Ctrl/Shift+Enter for newline)" rows="1"></textarea>
           <button class="icon ghost" title="attach image" onclick="fileInput.click()">📎</button>
@@ -346,6 +359,8 @@ let pendingFirst = null;   // {name, text, atts} — sent once the session is re
 let timer = null, meta = {};
 let histList = [], histIdx = -1, histDraft = ''; // ↑/↓ prompt recall in the focus composer
 let curSession = null;     // latest focus session payload (for diff/merge/model)
+let comp = null;           // active "/"|"@" completion: {kind, token, items, sel}
+let compData = null, compDataFor = null, compFetching = false; // cached completion lists per session
 let lastLink = '';         // url backing the link-preview modal's "open in new tab"
 let notifyOn = localStorage.getItem('atc-notify') === '1';
 let prevStatus = {}, notifySeeded = false; // status transitions for notifications
@@ -960,6 +975,7 @@ function openSession(name) {
   const d = drafts[name] || { text: '', atts: [] };
   $('prompt').value = d.text || '';
   attachments = (d.atts || []).slice();
+  comp = null; renderComp(); // drop any stale completion popup from the prior session
   autosize($('prompt')); renderThumbs();
   pollFocus(); timer = setInterval(pollFocus, 1000);
 }
@@ -1101,12 +1117,29 @@ function openMore() {
   openModal('Session · ' + (current || ''), `<div class="morelist">
     <button class="ghost" onclick="closeModal();switchModel()">Switch model…</button>
     <button class="ghost" onclick="closeModal();renameSession()">Rename…</button>
+    <button class="ghost" onclick="closeModal();showSkills()">Skills &amp; commands…</button>
     <button class="ghost${s.autoApprove ? ' good' : ''}" onclick="toggleAuto();closeModal()">${s.autoApprove ? '⚡ Auto-approve: on' : 'Auto-approve: off'}</button>
     ${own
       ? `<button class="ghost good" disabled>🔔 Notifications: on (you started this)</button>`
       : `<button class="ghost${watching ? ' good' : ''}" onclick="toggleWatch();closeModal()">${watching ? '🔔 Watching — tap to stop' : 'Notify me about this session'}</button>`}
     <button class="ghost bad" onclick="closeModal();killSession()">Kill session…</button>
   </div>`, `<button class="ghost" onclick="closeModal()">Close</button>`);
+}
+// Show the repo's skills, agents, commands, and instruction files. These
+// are loaded by the agent itself — skills/agents are model-invoked when
+// relevant, "/" commands you type; atc only surfaces what's available.
+async function showSkills() {
+  let d;
+  try {
+    d = (compDataFor === current && compData) ? compData
+      : await api('/api/sessions/' + encodeURIComponent(current) + '/complete');
+    compData = d; compDataFor = current;
+  } catch (e) { setStat(e.message, true); return; }
+  const items = d.skills || [];
+  const body = items.length
+    ? '<div>' + items.map(s => `<div class="skillrow">${esc(s)}</div>`).join('') + '</div>'
+    : '<div class="hint">No skills, agents, commands, or instruction files found in this repo.</div>';
+  openModal('Skills & commands', body, '<button class="ghost" onclick="closeModal()">Close</button>');
 }
 async function renameSession() {
   const nn = prompt('Rename session:', current);
@@ -1217,11 +1250,106 @@ function sendPrompt() {
   if (!text.trim() && !attachments.length) return;
   const atts = attachments.slice(); attachments = [];
   $('prompt').value = ''; autosize($('prompt')); renderThumbs();
+  comp = null; renderComp();
   histIdx = -1; histDraft = '';
   sendMessage(text, atts);
 }
 function autosize(t) { t.style.height = 'auto'; t.style.height = Math.min(t.scrollHeight, 9 * 16) + 'px'; }
-$('prompt').addEventListener('input', e => { autosize(e.target); histIdx = -1; }); // editing leaves recall mode
+$('prompt').addEventListener('input', e => { autosize(e.target); histIdx = -1; syncCompletion(); }); // editing leaves recall mode
+
+// ---- "/" command + "@" file completion ----
+// Lists come from /complete once per session and are filtered locally,
+// so typing never hits the network. "/" matches the repo's
+// .claude/commands; "@" fuzzy-finds a working-dir file to mention.
+function ensureCompData() {
+  if (compDataFor === current && compData) return;
+  if (compFetching) return;
+  compFetching = true;
+  api('/api/sessions/' + encodeURIComponent(current) + '/complete')
+    .then(d => { compData = d; compDataFor = current; })
+    .catch(() => {})
+    .finally(() => { compFetching = false; if (current) syncCompletion(); });
+}
+function syncCompletion() {
+  comp = null;
+  const val = $('prompt').value;
+  if (!val) { renderComp(); return; }
+  if (val[0] === '/' && !/\s/.test(val)) {
+    ensureCompData();
+    const items = (compData && compData.commands || [])
+      .filter(c => c.name.startsWith(val))
+      .map(c => ({ insert: c.name, label: c.name, desc: c.desc }));
+    // hide once the only match is exactly what's typed
+    if (items.length && !(items.length === 1 && items[0].insert === val)) {
+      comp = { kind: '/', token: val, items, sel: 0 };
+    }
+  } else {
+    const m = val.match(/(?:^|\s)(@\S*)$/);
+    if (m) {
+      ensureCompData();
+      const token = m[1];
+      const files = fuzzyFilter((compData && compData.files) || [], token.slice(1), 6);
+      if (files.length) comp = { kind: '@', token, items: files.map(f => ({ insert: f, label: f })), sel: 0 };
+    }
+  }
+  renderComp();
+}
+function renderComp() {
+  const el = $('completion');
+  if (!comp || !comp.items.length) { el.classList.add('hidden'); el.innerHTML = ''; return; }
+  el.innerHTML = comp.items.map((it, i) => {
+    const body = comp.kind === '/' && it.desc
+      ? esc(it.label) + ' <span class="cdesc">— ' + esc(it.desc) + '</span>'
+      : esc(it.label);
+    return `<div class="crow${i === comp.sel ? ' sel' : ''}" onmousedown="event.preventDefault();comp.sel=${i};acceptCompletion()">${body}</div>`;
+  }).join('');
+  el.classList.remove('hidden');
+}
+function acceptCompletion() {
+  if (!comp || !comp.items.length) return;
+  const it = comp.items[comp.sel];
+  const t = $('prompt');
+  const val = t.value.slice(0, t.value.length - comp.token.length);
+  t.value = (comp.kind === '@' ? val + it.insert : it.insert) + ' ';
+  comp = null; renderComp(); autosize(t);
+  t.focus(); t.setSelectionRange(t.value.length, t.value.length);
+}
+// Subsequence fuzzy match, ranked like the TUI: basename hits first,
+// then earlier/shorter matches.
+function fuzzyFilter(items, query, max) {
+  const q = query.toLowerCase();
+  const out = [];
+  for (const it of items) {
+    const pos = subseqAt(it.toLowerCase(), q);
+    if (pos < 0) continue;
+    let score = -pos - it.length;
+    const base = it.split('/').pop().toLowerCase();
+    if (q === '' || base.includes(q)) score += 10000;
+    out.push({ it, score });
+  }
+  out.sort((a, b) => b.score - a.score);
+  return out.slice(0, max).map(o => o.it);
+}
+function subseqAt(s, q) {
+  if (!q) return 0;
+  let first = -1, i = 0;
+  for (let p = 0; p < s.length && i < q.length; p++) {
+    if (s[p] === q[i]) { if (first === -1) first = p; i++; }
+  }
+  return i === q.length ? first : -1;
+}
+// Capture phase on document so this runs before the prompt's history-nav
+// and Enter-to-send handlers and can swallow the key while completing.
+document.addEventListener('keydown', e => {
+  if (!comp || document.activeElement !== $('prompt')) return;
+  const n = comp.items.length;
+  if (e.key === 'ArrowDown') { comp.sel = (comp.sel + 1) % n; renderComp(); }
+  else if (e.key === 'ArrowUp') { comp.sel = (comp.sel - 1 + n) % n; renderComp(); }
+  else if (e.key === 'Enter' || e.key === 'Tab') { acceptCompletion(); }
+  else if (e.key === 'Escape') { comp = null; renderComp(); }
+  else return;
+  e.preventDefault(); e.stopPropagation();
+}, true);
 
 // ↑ recalls your previous prompts into the composer (newest first), ↓
 // walks back toward what you were typing — so after aborting you can ↑,
