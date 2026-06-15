@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rodolfojsv/atc/internal/agent"
@@ -49,6 +50,9 @@ type Server struct {
 	token    string
 	mux      *http.ServeMux
 	apkCache apkHashCache
+
+	fileCacheMu sync.Mutex
+	fileCache   map[string]fileCacheEntry // working dir -> cached file walk
 }
 
 // New builds the server. An empty token gets a random per-run one;
@@ -116,6 +120,7 @@ func (s *Server) routes() {
 	api("POST /api/sessions/{name}/merge", s.handleMerge)
 	api("POST /api/sessions/{name}/model", s.handleModel)
 	api("GET /api/sessions/{name}/file", s.handleFile)
+	api("GET /api/sessions/{name}/complete", s.handleComplete)
 	api("GET /api/sessions/{name}/attachment", s.handleAttachment)
 	api("GET /api/app/latest", s.handleAppLatest)
 	api("GET /api/app/download", s.handleAppDownload)
