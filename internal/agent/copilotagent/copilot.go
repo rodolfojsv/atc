@@ -6,7 +6,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
+	"sync"
 	"time"
 
 	copilot "github.com/github/copilot-sdk/go"
@@ -48,7 +50,7 @@ func (b *Backend) NewSession(ctx context.Context, spec agent.SessionSpec) (agent
 	if err != nil {
 		return nil, err
 	}
-	sdk.On(eventTranslator(spec.OnEvent))
+	sdk.On(eventTranslator(sdk.SessionID, spec.OnEvent))
 	return &session{sdk: sdk, readOnly: spec.ReadOnly}, nil
 }
 
@@ -81,7 +83,7 @@ func (s *session) ID() string { return s.sdk.SessionID }
 
 func (s *session) attachLive() {
 	if s.onEvent != nil {
-		s.sdk.On(eventTranslator(s.onEvent))
+		s.sdk.On(eventTranslator(s.sdk.SessionID, s.onEvent))
 		s.onEvent = nil
 	}
 }
@@ -152,11 +154,78 @@ func (s *session) History(ctx context.Context) []agent.Event {
 	return out
 }
 
-func eventTranslator(onEvent func(agent.Event)) copilot.SessionEventHandler {
+func eventTranslator(sessionID string, onEvent func(agent.Event)) copilot.SessionEventHandler {
 	return func(ev copilot.SessionEvent) {
-		if e, ok := translateData(ev.Data); ok {
+		e, ok := translateData(ev.Data)
+		traceEvent(sessionID, ev, e, ok)
+		if ok {
 			onEvent(e)
 		}
+	}
+}
+
+// Copilot event tracing: when ATC_COPILOT_TRACE names a writable file,
+// every raw SDK event is appended there with its exact content (whitespace
+// quoted) and the agent.Event it translated into — the ground truth for
+// diagnosing transcript duplication, where the dedup in the supervisor
+// assumes the final authoritative message is a verbatim concatenation of
+// the streamed deltas. Disabled (zero overhead past one env lookup) when
+// the var is unset.
+var (
+	traceOnce sync.Once
+	traceFile *os.File
+	traceMu   sync.Mutex
+)
+
+func copilotTracer() *os.File {
+	traceOnce.Do(func() {
+		if path := strings.TrimSpace(os.Getenv("ATC_COPILOT_TRACE")); path != "" {
+			f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+			if err == nil {
+				traceFile = f
+			}
+		}
+	})
+	return traceFile
+}
+
+func traceEvent(sessionID string, ev copilot.SessionEvent, e agent.Event, ok bool) {
+	w := copilotTracer()
+	if w == nil {
+		return
+	}
+	id := sessionID
+	if len(id) > 8 {
+		id = id[:8]
+	}
+	action := "drop"
+	if ok {
+		action = "→ " + e.Type.String()
+	}
+	line := fmt.Sprintf("%s  %-8s  %-26s  %-14s  %s\n",
+		time.Now().Format("15:04:05.000"), id, ev.Type(), action, traceContent(ev.Data))
+	traceMu.Lock()
+	_, _ = w.WriteString(line)
+	traceMu.Unlock()
+}
+
+// traceContent renders an event's payload for the trace: lengths and
+// quoted text so leading/whitespace differences between deltas and the
+// final message (the suspected duplication trigger) are visible.
+func traceContent(data rpc.SessionEventData) string {
+	switch d := data.(type) {
+	case *rpc.AssistantMessageDeltaData:
+		return fmt.Sprintf("len=%d %q", len(d.DeltaContent), agent.Truncate(d.DeltaContent, 200))
+	case *rpc.AssistantMessageData:
+		return fmt.Sprintf("len=%d %q", len(d.Content), agent.Truncate(d.Content, 200))
+	case *rpc.UserMessageData:
+		return fmt.Sprintf("%q", agent.Truncate(d.Content, 120))
+	case *rpc.ToolExecutionStartData:
+		return d.ToolName
+	case *rpc.ToolExecutionCompleteData:
+		return fmt.Sprintf("success=%v", d.Success)
+	default:
+		return fmt.Sprintf("%T", data)
 	}
 }
 
