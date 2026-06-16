@@ -571,7 +571,12 @@ function openLink(url) {
 // linkifyFiles turns bare ".md" path mentions in a rendered message into
 // clickable links. It walks text nodes only (never inside an existing
 // <a>/<code>/<pre>), so it can't double-link or corrupt markup.
-const FILE_RE = /(^|[\s(])(\/?(?:[\w.@~+-]+\/)*[\w.@~+-]+\.md)\b/g;
+//
+// A path may use "/" or "\" separators and carry an optional drive ("C:\")
+// or root, and inner segments may contain spaces (e.g. "AI-Dev Tools/x.md").
+// The first segment can't contain spaces, so a path mid-sentence starts at a
+// real path token rather than swallowing the preceding prose words.
+const FILE_RE = /(^|[\s(])((?:[A-Za-z]:[\\/]|\/)?[\w.@~+-]+(?:[\\/][\w.@~+-]+(?: +[\w.@~+-]+)*)*\.md)\b/g;
 function linkifyFiles(root) {
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
     acceptNode(n) {
