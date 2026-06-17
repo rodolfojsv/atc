@@ -179,6 +179,15 @@ func (c *Client) SetOption(ctx context.Context, name, option, value string) erro
 	return err
 }
 
+// PaneCommand returns the name of the foreground process running in the
+// session's active pane (tmux's #{pane_current_command}). It lets a caller
+// tell whether the program it launched is still running — e.g. distinguishing
+// a live `claude`/`node` from a bare shell left behind when the program died.
+func (c *Client) PaneCommand(ctx context.Context, name string) (string, error) {
+	out, err := c.run(ctx, "display-message", "-p", "-t", name, "#{pane_current_command}")
+	return strings.TrimSpace(out), err
+}
+
 // run executes a tmux subcommand and returns its stdout, wrapping failures
 // with the stderr text tmux prints on error.
 func (c *Client) run(ctx context.Context, args ...string) (string, error) {

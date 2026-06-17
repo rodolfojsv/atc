@@ -1,37 +1,72 @@
-// Package claudeagent adapts the Claude Code CLI to atc's
-// backend-neutral agent interface by driving `claude` as a subprocess
-// in headless stream-JSON mode (NDJSON user messages on stdin,
-// structured events on stdout).
+// Package claudeagent adapts the Claude Code CLI to atc's backend-neutral
+// agent interface by driving the *interactive* `claude` TUI inside a detached
+// tmux session.
 //
-// Permission model: the CLI's stream-JSON mode has no runtime
-// permission callback (that exists only in the TS/Python Agent SDKs),
-// so atc's approval presets map onto Claude Code's own permission
-// modes: "prompt" → acceptEdits (file edits auto-approved, anything
-// else is denied headlessly and reported by the agent), "allow-all" →
-// bypassPermissions. Claude Code's settings.json permission rules
-// still apply.
+// Why tmux instead of `claude -p`: as of the June 2026 billing change, the
+// headless `-p`/stream-JSON path (and the Agent SDK and ACP) draw from a
+// separate, capped "agent credit" pool billed at API rates, while Claude Code
+// run interactively in a real terminal still draws from the user's
+// subscription. tmux gives claude a genuine PTY (so it bills as interactive)
+// and, being a daemon, keeps the session alive across atc restarts.
+//
+// Transport split:
+//   - Input (prompts, model switch, interrupt) goes in via `tmux send-keys`.
+//   - Output (assistant text, tool calls, usage/cost) is read from Claude's
+//     own JSONL transcript (~/.claude/projects/<dir>/<id>.jsonl) — the same
+//     file History() replays — so we reuse the proven parser instead of
+//     scraping the TUI for content.
+//   - `tmux capture-pane` is used only to detect turn-end (when claude stops
+//     "working" and is idle), and `pane_current_command` to detect a claude
+//     that died inside a still-living tmux session (layer-2 recovery).
+//
+// Permission model: presets map onto Claude Code's --permission-mode at launch
+// ("read-only" → plan, "allow-all" → bypassPermissions, otherwise acceptEdits),
+// as before. Runtime per-tool prompts in the TUI are not yet answered
+// programmatically; that is a follow-up.
 package claudeagent
 
 import (
 	"bufio"
-	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/rodolfojsv/atc/internal/agent"
 	"github.com/rodolfojsv/atc/internal/config"
+	"github.com/rodolfojsv/atc/internal/tmux"
 )
+
+// Tunables for driving and observing the TUI. These are the knobs most likely
+// to need adjustment against a specific Claude Code version.
+const (
+	paneWidth    = 200
+	paneHeight   = 50
+	historyLimit = "50000" // tmux scrollback lines
+
+	pollInterval = 300 * time.Millisecond // how often we tail jsonl + capture pane
+	quiescence   = 800 * time.Millisecond // idle = no new transcript for this long while not "working"
+	idDiscovery  = 8 * time.Second        // how long to wait for the session jsonl to appear
+)
+
+// workingMarkers are substrings the claude TUI shows while a turn is in
+// progress. If none are present (and the transcript has gone quiet) the turn is
+// considered finished. Claude Code's exact status text changes between
+// versions — if turn-end is mis-detected, adjust these first.
+var workingMarkers = []string{
+	"esc to interrupt",
+	"Esc to interrupt",
+	"interrupt)",
+}
 
 type Backend struct{}
 
@@ -39,83 +74,133 @@ func New() *Backend { return &Backend{} }
 
 func (b *Backend) Name() string { return "claude" }
 
-func (b *Backend) Stop() error { return nil } // each session owns its process
+func (b *Backend) Stop() error { return nil } // each session owns its tmux session
 
 func (b *Backend) NewSession(_ context.Context, spec agent.SessionSpec) (agent.Session, error) {
-	if _, err := exec.LookPath("claude"); err != nil {
-		return nil, errors.New("the `claude` CLI was not found on PATH")
+	tm, err := requirements()
+	if err != nil {
+		return nil, err
 	}
-	return &session{id: uuid.NewString(), spec: spec}, nil
+	id := uuid.NewString()
+	return &session{id: id, claudeID: id, spec: spec, tm: tm}, nil
 }
 
 func (b *Backend) ResumeSession(_ context.Context, spec agent.SessionSpec) (agent.Session, error) {
+	tm, err := requirements()
+	if err != nil {
+		return nil, err
+	}
+	return &session{id: spec.SessionID, claudeID: spec.SessionID, spec: spec, tm: tm, started: true}, nil
+}
+
+// requirements verifies both CLIs are present and returns a tmux client.
+func requirements() (*tmux.Client, error) {
 	if _, err := exec.LookPath("claude"); err != nil {
 		return nil, errors.New("the `claude` CLI was not found on PATH")
 	}
-	return &session{id: spec.SessionID, spec: spec, started: true}, nil
+	return tmux.New() // errors if tmux is missing
 }
 
 type session struct {
-	mu      sync.Mutex
-	id      string
-	spec    agent.SessionSpec
-	started bool // a previous process used this ID: respawn with --resume
-	aborted bool
+	mu sync.Mutex
 
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	stderr *bytes.Buffer
+	id       string // atc session id (uuid); also seeds claude --session-id and the tmux name
+	claudeID string // id of the on-disk jsonl transcript; usually == id, re-discovered if needed
+	spec     agent.SessionSpec
+	tm       *tmux.Client
 
-	// cmds is the session's invocable slash commands and skills, learned
-	// from the init event each time the process spawns (guarded by mu).
-	cmds []agent.SlashCommand
+	started bool  // claude has been launched at least once for this id (resume vs new)
+	closed  bool  // Close was called; watchers should stop
+	offset  int64 // byte offset into the transcript already emitted this run
 }
 
 func (s *session) ID() string { return s.id }
 
-// ListCommands returns the slash commands and skills the running process
-// reported in its init event, or nil if it hasn't started yet. Names
-// carry no leading slash; the init event reports no descriptions.
-func (s *session) ListCommands(_ context.Context) []agent.SlashCommand {
+// tmuxName is the tmux session that hosts this conversation's claude process.
+func (s *session) tmuxName() string { return "atc-" + s.id }
+
+func (s *session) emit(e agent.Event) {
+	if s.spec.OnEvent != nil {
+		s.spec.OnEvent(e)
+	}
+}
+
+func (s *session) isClosed() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return append([]agent.SlashCommand(nil), s.cmds...)
+	return s.closed
 }
 
-// setCommands records the union of the init event's slash-command and
-// skill names as the session's invocable commands.
-func (s *session) setCommands(names ...[]string) {
-	seen := map[string]bool{}
-	var cmds []agent.SlashCommand
-	for _, group := range names {
-		for _, n := range group {
-			if n == "" || seen[n] {
-				continue
-			}
-			seen[n] = true
-			cmds = append(cmds, agent.SlashCommand{Name: n})
-		}
-	}
+// Send submits a prompt and starts watching the transcript for the response.
+func (s *session) Send(ctx context.Context, prompt string) error {
 	s.mu.Lock()
-	s.cmds = cmds
-	s.mu.Unlock()
+	defer s.mu.Unlock()
+	if err := s.ensureLaunched(ctx); err != nil {
+		return err
+	}
+	// Mark where this turn begins so the watcher only emits new transcript
+	// lines, then type the prompt and submit it.
+	s.offset = transcriptSize(s.transcriptPath())
+	if err := s.tm.SendText(ctx, s.tmuxName(), prompt); err != nil {
+		return err
+	}
+	if err := s.tm.SendEnter(ctx, s.tmuxName()); err != nil {
+		return err
+	}
+	go s.watchTurn()
+	return nil
 }
 
-// ensureProc spawns the claude subprocess lazily — on the first Send,
-// or again after an abort/crash (resuming the same conversation).
-func (s *session) ensureProc() error {
-	if s.cmd != nil && s.cmd.ProcessState == nil {
-		return nil
+// ensureLaunched makes sure claude is running in the tmux session, creating the
+// session (or recovering a dead claude) as needed. Caller holds mu.
+func (s *session) ensureLaunched(ctx context.Context) error {
+	name := s.tmuxName()
+	has, err := s.tm.HasSession(ctx, name)
+	if err != nil {
+		return err
 	}
-	args := []string{
-		"--print",
-		"--verbose", // required by --print with --output-format=stream-json
-		"--input-format", "stream-json",
-		"--output-format", "stream-json",
-		"--include-partial-messages",
+	if has {
+		// Layer-2: tmux is alive but claude may have exited, leaving a shell.
+		if cmd, err := s.tm.PaneCommand(ctx, name); err == nil && isShell(cmd) {
+			// Relaunch claude --resume into the same pane.
+			line := shellJoin(append([]string{"claude"}, s.claudeArgs(true)...))
+			if err := s.tm.SendText(ctx, name, "unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN; exec "+line); err != nil {
+				return err
+			}
+			return s.tm.SendEnter(ctx, name)
+		}
+		return nil // claude assumed alive
 	}
-	if s.started {
-		args = append(args, "--resume", s.id)
+
+	// Fresh tmux session. Launch via a shell that strips API-key env vars, so
+	// claude authenticates with the subscription OAuth token (subscription
+	// billing) rather than pay-as-you-go API credits.
+	resume := s.started
+	launch := "unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN; exec " +
+		shellJoin(append([]string{"claude"}, s.claudeArgs(resume)...))
+	if err := s.tm.NewSession(ctx, tmux.NewSessionOpts{
+		Name:       name,
+		Command:    []string{"sh", "-c", launch},
+		WorkingDir: s.spec.WorkingDir,
+		Width:      paneWidth,
+		Height:     paneHeight,
+	}); err != nil {
+		return err
+	}
+	_ = s.tm.SetOption(ctx, name, "history-limit", historyLimit)
+	s.started = true
+	if !resume {
+		s.discoverClaudeID()
+	}
+	return nil
+}
+
+// claudeArgs builds the interactive launch flags. With resume it continues the
+// known conversation; otherwise it pins a fresh session id we control.
+func (s *session) claudeArgs(resume bool) []string {
+	var args []string
+	if resume {
+		args = append(args, "--resume", s.claudeID)
 	} else {
 		args = append(args, "--session-id", s.id)
 	}
@@ -130,152 +215,296 @@ func (s *session) ensureProc() error {
 	default:
 		args = append(args, "--permission-mode", "acceptEdits")
 	}
-
-	cmd := exec.Command("claude", args...)
-	cmd.Dir = s.spec.WorkingDir
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return err
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return err
-	}
-	stderr := &bytes.Buffer{}
-	cmd.Stderr = stderr
-	if err := cmd.Start(); err != nil {
-		return err
-	}
-	s.cmd, s.stdin, s.stderr = cmd, stdin, stderr
-	s.started = true
-	s.aborted = false
-	go s.readLoop(cmd, stdout, stderr)
-	return nil
+	return args
 }
 
-func (s *session) Send(_ context.Context, prompt string) error {
+// discoverClaudeID waits for the session's jsonl to appear. If the file we
+// expect (named by --session-id) shows up, claudeID is already correct;
+// otherwise we adopt the newest transcript created since launch. Caller holds mu.
+func (s *session) discoverClaudeID() {
+	dir := s.transcriptDir()
+	expected := filepath.Join(dir, s.id+".jsonl")
+	deadline := time.Now().Add(idDiscovery)
+	start := time.Now().Add(-2 * time.Second) // small skew allowance
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(expected); err == nil {
+			return // --session-id honored; claudeID already == id
+		}
+		if newest := newestTranscript(dir, start); newest != "" {
+			s.claudeID = strings.TrimSuffix(filepath.Base(newest), ".jsonl")
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// watchTurn tails the transcript and the pane until the turn completes,
+// emitting transcript events and a final EventIdle.
+func (s *session) watchTurn() {
+	name := s.tmuxName()
+	lastChange := time.Now()
+	sawOutput := false
+	for {
+		if s.isClosed() {
+			return
+		}
+		time.Sleep(pollInterval)
+		ctx := context.Background()
+
+		// Emit any new transcript lines (assistant text, tool calls, usage).
+		if evs := s.drainTranscript(); len(evs) > 0 {
+			for _, e := range evs {
+				s.emit(e)
+			}
+			sawOutput = true
+			lastChange = time.Now()
+		}
+
+		// If claude died inside the session, surface it and stop.
+		if cmd, err := s.tm.PaneCommand(ctx, name); err == nil && isShell(cmd) {
+			s.emit(agent.Event{Type: agent.EventError, ErrType: "process", Text: "claude exited inside tmux (will --resume on next prompt)"})
+			return
+		}
+
+		// Turn is done when claude is no longer "working" and the transcript
+		// has been quiet for a moment after producing something.
+		pane, err := s.tm.Capture(ctx, name, tmux.CaptureOpts{})
+		working := err == nil && containsAny(pane, workingMarkers)
+		if sawOutput && !working && time.Since(lastChange) > quiescence {
+			s.emit(agent.Event{Type: agent.EventIdle})
+			return
+		}
+	}
+}
+
+// drainTranscript reads transcript bytes written since the last read and
+// converts them to events (assistant/tool/usage only — not the user's own
+// prompt). It advances the offset past whole lines only.
+func (s *session) drainTranscript() []agent.Event {
+	path := s.transcriptPath()
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.writeUser(prompt)
+	off := s.offset
+	s.mu.Unlock()
+
+	if _, err := f.Seek(off, 0); err != nil {
+		return nil
+	}
+	r := bufio.NewReader(f)
+	var out []agent.Event
+	var consumed int64
+	for {
+		line, err := r.ReadBytes('\n')
+		if len(line) > 0 && line[len(line)-1] == '\n' {
+			consumed += int64(len(line))
+			out = append(out, eventsFromLine(line, false)...)
+		}
+		if err != nil { // EOF or partial trailing line: stop, keep offset at line start
+			break
+		}
+	}
+	if consumed > 0 {
+		s.mu.Lock()
+		s.offset += consumed
+		s.mu.Unlock()
+	}
+	return out
 }
 
-// SendWithAttachments inlines images as base64 content blocks in the
-// stream-JSON user message, putting them directly in the model's
-// context — no temp files. Non-image attachments are the supervisor's
-// problem (it saves them to disk and references them in the prompt).
-func (s *session) SendWithAttachments(_ context.Context, prompt string, atts []agent.Attachment) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.writeUser(userContent(prompt, atts))
-}
-
-// userContent builds the API-shaped content for a user message: image
-// blocks first, then the text block.
-func userContent(prompt string, atts []agent.Attachment) any {
-	if len(atts) == 0 {
-		return prompt
-	}
-	var content []map[string]any
-	for _, a := range atts {
-		content = append(content, map[string]any{
-			"type": "image",
-			"source": map[string]any{
-				"type":       "base64",
-				"media_type": a.MediaType,
-				"data":       base64.StdEncoding.EncodeToString(a.Data),
-			},
-		})
-	}
-	return append(content, map[string]any{"type": "text", "text": prompt})
-}
-
-// writeUser sends one user message over stdin; the caller holds mu.
-func (s *session) writeUser(content any) error {
-	if err := s.ensureProc(); err != nil {
-		return err
-	}
-	msg := map[string]any{
-		"type":    "user",
-		"message": map[string]any{"role": "user", "content": content},
-	}
-	line, err := json.Marshal(msg)
-	if err != nil {
-		return err
-	}
-	_, err = s.stdin.Write(append(line, '\n'))
-	return err
-}
-
-// SetModel records the new model and retires the current subprocess;
-// the next Send respawns with --resume and the new --model, so the
-// conversation continues uninterrupted.
-func (s *session) SetModel(_ context.Context, model string) error {
+// SetModel switches the model for subsequent turns via the TUI's /model
+// command (no relaunch). If claude isn't running yet, the new model is applied
+// at launch.
+func (s *session) SetModel(ctx context.Context, model string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.spec.Model = model
-	if s.cmd != nil && s.cmd.ProcessState == nil {
-		s.aborted = true // suppress the exit-error event from readLoop
-		_ = s.cmd.Process.Kill()
+	has, err := s.tm.HasSession(ctx, s.tmuxName())
+	if err != nil || !has {
+		return nil // applied via claudeArgs on next launch
 	}
-	return nil
+	if err := s.tm.SendText(ctx, s.tmuxName(), "/model "+model); err != nil {
+		return err
+	}
+	return s.tm.SendEnter(ctx, s.tmuxName())
 }
 
-// Abort kills the subprocess; the CLI has no in-stream interrupt. The
-// conversation continues on the next Send via --resume.
-func (s *session) Abort(_ context.Context) error {
+// Abort interrupts the current turn by sending Escape — the interactive TUI's
+// stop key — leaving the conversation intact for the next prompt.
+func (s *session) Abort(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.aborted = true
-	if s.cmd != nil && s.cmd.ProcessState == nil {
-		return s.cmd.Process.Kill()
+	has, err := s.tm.HasSession(ctx, s.tmuxName())
+	if err != nil || !has {
+		return nil
 	}
-	return nil
+	return s.tm.SendKeys(ctx, s.tmuxName(), "Escape")
 }
 
+// Close stops watchers and tears down the tmux session. The on-disk transcript
+// persists, so the conversation can still be resumed later via --resume.
 func (s *session) Close() error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.aborted = true
-	if s.stdin != nil {
-		_ = s.stdin.Close()
+	s.closed = true
+	s.mu.Unlock()
+	return s.tm.KillSession(context.Background(), s.tmuxName())
+}
+
+// --- on-disk transcript: path resolution, parsing, and replay -------------
+
+var nonAlnum = regexp.MustCompile(`[^A-Za-z0-9]`)
+
+// transcriptDir is the per-project directory Claude Code stores sessions in:
+// ~/.claude/projects/<cwd with non-alphanumerics dashed>/
+func (s *session) transcriptDir() string {
+	base := os.Getenv("CLAUDE_CONFIG_DIR")
+	if base == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		base = filepath.Join(home, ".claude")
 	}
-	if s.cmd != nil && s.cmd.ProcessState == nil {
-		_ = s.cmd.Process.Kill()
+	dir, err := filepath.Abs(s.spec.WorkingDir)
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(base, "projects", nonAlnum.ReplaceAllString(dir, "-"))
+}
+
+// transcriptPath is this session's jsonl file.
+func (s *session) transcriptPath() string {
+	dir := s.transcriptDir()
+	if dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, s.claudeID+".jsonl")
+}
+
+// transcriptSize returns the current size of a transcript file (0 if missing).
+func transcriptSize(path string) int64 {
+	if path == "" {
+		return 0
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	return fi.Size()
+}
+
+// newestTranscript returns the most recently modified *.jsonl in dir whose
+// modtime is at/after `after`, or "" if none.
+func newestTranscript(dir string, after time.Time) string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	type cand struct {
+		path string
+		mod  time.Time
+	}
+	var cands []cand
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil || info.ModTime().Before(after) {
+			continue
+		}
+		cands = append(cands, cand{filepath.Join(dir, e.Name()), info.ModTime()})
+	}
+	if len(cands) == 0 {
+		return ""
+	}
+	sort.Slice(cands, func(i, j int) bool { return cands[i].mod.After(cands[j].mod) })
+	return cands[0].path
+}
+
+// History replays the persisted transcript as events, oldest first.
+func (s *session) History(_ context.Context) []agent.Event {
+	path := s.transcriptPath()
+	if path == "" {
+		return nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+
+	var out []agent.Event
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+	for sc.Scan() {
+		out = append(out, eventsFromLine(sc.Bytes(), true)...)
+	}
+	return out
+}
+
+// transcriptLine is one entry in Claude Code's session jsonl.
+type transcriptLine struct {
+	Type    string  `json:"type"`
+	IsMeta  bool    `json:"isMeta"`
+	CostUSD float64 `json:"costUSD"` // present in some Claude Code versions
+	Message *struct {
+		Role    string          `json:"role"`
+		Model   string          `json:"model"`
+		Content json.RawMessage `json:"content"`
+		Usage   *usageBlock     `json:"usage"`
+	} `json:"message"`
+}
+
+// eventsFromLine converts one transcript line to events. includeUser controls
+// whether the user's own prompts are emitted (true for History replay, false
+// for live tailing where the prompt was just typed by the user).
+func eventsFromLine(raw []byte, includeUser bool) []agent.Event {
+	var line transcriptLine
+	if json.Unmarshal(raw, &line) != nil || line.IsMeta || line.Message == nil {
+		return nil
+	}
+	switch line.Type {
+	case "user":
+		if !includeUser {
+			return nil
+		}
+		var out []agent.Event
+		var text string
+		if json.Unmarshal(line.Message.Content, &text) == nil {
+			if text != "" {
+				out = append(out, agent.Event{Type: agent.EventUserMessage, Text: text})
+			}
+			return out
+		}
+		var blocks []contentBlock
+		if json.Unmarshal(line.Message.Content, &blocks) != nil {
+			return nil
+		}
+		for _, b := range blocks {
+			if b.Type == "text" && b.Text != "" {
+				out = append(out, agent.Event{Type: agent.EventUserMessage, Text: b.Text})
+			}
+		}
+		return out
+	case "assistant":
+		out := messageEvents(line.Message.Content)
+		if u := line.Message.Usage; u != nil && (u.InputTokens > 0 || u.OutputTokens > 0) {
+			out = append(out, agent.Event{
+				Type:         agent.EventUsage,
+				InputTokens:  u.InputTokens,
+				OutputTokens: u.OutputTokens,
+				CostUSD:      line.CostUSD,
+				Model:        line.Message.Model,
+			})
+		}
+		return out
 	}
 	return nil
-}
-
-// streamLine is the top-level NDJSON envelope on stdout.
-type streamLine struct {
-	Type         string          `json:"type"`
-	Subtype      string          `json:"subtype"`
-	SessionID    string          `json:"session_id"`
-	Event        *apiEvent       `json:"event"`   // type == "stream_event"
-	Message      *anthropicMsg   `json:"message"` // type == "assistant"
-	Result       string          `json:"result"`
-	IsError      bool            `json:"is_error"`
-	TotalCostUSD float64         `json:"total_cost_usd"`
-	Usage        *usageBlock     `json:"usage"`
-	ModelUsage   json.RawMessage `json:"model_usage"`
-
-	// init (type == "system", subtype == "init") reports the session's
-	// loaded slash commands and skills. slash_commands is the superset
-	// (it already includes skills); skills is kept as a defensive union.
-	SlashCommands []string `json:"slash_commands"`
-	Skills        []string `json:"skills"`
-}
-
-type apiEvent struct {
-	Type  string `json:"type"`
-	Delta *struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	} `json:"delta"`
-}
-
-type anthropicMsg struct {
-	Model   string          `json:"model"`
-	Content json.RawMessage `json:"content"`
 }
 
 type contentBlock struct {
@@ -290,69 +519,8 @@ type usageBlock struct {
 	OutputTokens int64 `json:"output_tokens"`
 }
 
-func (s *session) readLoop(cmd *exec.Cmd, stdout io.Reader, stderr *bytes.Buffer) {
-	emit := s.spec.OnEvent
-	sawResult := false
-
-	sc := bufio.NewScanner(stdout)
-	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
-	for sc.Scan() {
-		var line streamLine
-		if json.Unmarshal(sc.Bytes(), &line) != nil {
-			continue
-		}
-		switch line.Type {
-		case "system":
-			if line.Subtype == "init" {
-				s.setCommands(line.SlashCommands, line.Skills)
-			}
-		case "stream_event":
-			if line.Event != nil && line.Event.Type == "content_block_delta" &&
-				line.Event.Delta != nil && line.Event.Delta.Type == "text_delta" {
-				emit(agent.Event{Type: agent.EventTextDelta, Text: line.Event.Delta.Text})
-			}
-		case "assistant":
-			if line.Message == nil {
-				continue
-			}
-			for _, e := range messageEvents(line.Message.Content) {
-				emit(e)
-			}
-		case "result":
-			sawResult = true
-			e := agent.Event{Type: agent.EventUsage, CostUSD: line.TotalCostUSD, Model: firstModel(line.ModelUsage)}
-			if line.Usage != nil {
-				e.InputTokens = line.Usage.InputTokens
-				e.OutputTokens = line.Usage.OutputTokens
-			}
-			emit(e)
-			if line.IsError || (line.Subtype != "" && line.Subtype != "success") {
-				emit(agent.Event{Type: agent.EventError, ErrType: line.Subtype, Text: agent.Truncate(line.Result, 400)})
-			} else {
-				emit(agent.Event{Type: agent.EventIdle})
-			}
-		}
-	}
-	_ = cmd.Wait()
-
-	s.mu.Lock()
-	aborted := s.aborted
-	s.mu.Unlock()
-	if aborted {
-		emit(agent.Event{Type: agent.EventIdle})
-		return
-	}
-	if !sawResult {
-		msg := "claude process exited unexpectedly"
-		if errOut := bytes.TrimSpace(stderr.Bytes()); len(errOut) > 0 {
-			msg += ": " + agent.Truncate(string(errOut), 400)
-		}
-		emit(agent.Event{Type: agent.EventError, ErrType: "process", Text: msg})
-	}
-}
-
-// messageEvents converts an assistant message's content blocks into
-// transcript events. Content is either a plain string or a block array.
+// messageEvents converts an assistant message's content blocks into transcript
+// events. Content is either a plain string or a block array.
 func messageEvents(content json.RawMessage) []agent.Event {
 	var out []agent.Event
 	var text string
@@ -373,10 +541,8 @@ func messageEvents(content json.RawMessage) []agent.Event {
 				out = append(out, agent.Event{Type: agent.EventMessage, Text: b.Text})
 			}
 		case "tool_use":
-			// Claude Code's headless CLI auto-dismisses AskUserQuestion
-			// (no interactive UI to answer it), so atc can't feed an
-			// answer back. Render the question instead, so the user sees
-			// it and replies in their next message.
+			// AskUserQuestion has no answer channel here; render it so the user
+			// can reply in their next prompt.
 			if b.Name == "AskUserQuestion" {
 				if q := formatAskUserQuestion(b.Input); q != "" {
 					out = append(out, agent.Event{Type: agent.EventMessage, Text: q})
@@ -396,9 +562,8 @@ func anyMap(m map[string]any) any {
 	return m
 }
 
-// formatAskUserQuestion turns AskUserQuestion's input
-// ({questions:[{header,question,options:[{label,description}]}]}) into a
-// readable markdown prompt for the transcript.
+// formatAskUserQuestion turns AskUserQuestion's input into a readable markdown
+// prompt for the transcript.
 func formatAskUserQuestion(input map[string]any) string {
 	qs, _ := input["questions"].([]any)
 	var b strings.Builder
@@ -434,108 +599,36 @@ func formatAskUserQuestion(input map[string]any) string {
 	if b.Len() == 0 {
 		return ""
 	}
-	b.WriteString("\n\n_Reply with your choice (headless Claude can't show the picker, so just type it)._")
+	b.WriteString("\n\n_Reply with your choice._")
 	return b.String()
 }
 
-func firstModel(raw json.RawMessage) string {
-	var m map[string]json.RawMessage
-	if json.Unmarshal(raw, &m) != nil {
-		return ""
+// --- small helpers --------------------------------------------------------
+
+// isShell reports whether a pane's foreground command is a shell — i.e. claude
+// is no longer running in it.
+func isShell(cmd string) bool {
+	switch cmd {
+	case "sh", "bash", "zsh", "fish", "dash":
+		return true
 	}
-	for name := range m {
-		return name
-	}
-	return ""
+	return false
 }
 
-var nonAlnum = regexp.MustCompile(`[^A-Za-z0-9]`)
-
-// transcriptPath is where Claude Code persists this session's history:
-// ~/.claude/projects/<cwd with non-alphanumerics dashed>/<id>.jsonl
-func (s *session) transcriptPath() (string, error) {
-	base := os.Getenv("CLAUDE_CONFIG_DIR")
-	if base == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", err
+func containsAny(s string, subs []string) bool {
+	for _, sub := range subs {
+		if strings.Contains(s, sub) {
+			return true
 		}
-		base = filepath.Join(home, ".claude")
 	}
-	dir, err := filepath.Abs(s.spec.WorkingDir)
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(base, "projects", nonAlnum.ReplaceAllString(dir, "-"), s.id+".jsonl"), nil
+	return false
 }
 
-// History replays the on-disk session transcript. Lines that don't
-// match known shapes are skipped — the format is Claude Code internal.
-func (s *session) History(_ context.Context) []agent.Event {
-	path, err := s.transcriptPath()
-	if err != nil {
-		return nil
+// shellJoin quotes args for safe inclusion in an `sh -c` command line.
+func shellJoin(args []string) string {
+	q := make([]string, len(args))
+	for i, a := range args {
+		q[i] = "'" + strings.ReplaceAll(a, "'", `'\''`) + "'"
 	}
-	f, err := os.Open(path)
-	if err != nil {
-		return nil
-	}
-	defer f.Close()
-
-	type historyLine struct {
-		Type    string  `json:"type"`
-		IsMeta  bool    `json:"isMeta"`
-		CostUSD float64 `json:"costUSD"` // present in some Claude Code versions
-		Message *struct {
-			Role    string          `json:"role"`
-			Model   string          `json:"model"`
-			Content json.RawMessage `json:"content"`
-			Usage   *usageBlock     `json:"usage"`
-		} `json:"message"`
-	}
-
-	var out []agent.Event
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
-	for sc.Scan() {
-		var line historyLine
-		if json.Unmarshal(sc.Bytes(), &line) != nil || line.IsMeta || line.Message == nil {
-			continue
-		}
-		switch line.Type {
-		case "user":
-			// User entries carry either real prompts or tool results;
-			// only plain text blocks are prompts.
-			var text string
-			if json.Unmarshal(line.Message.Content, &text) == nil {
-				if text != "" {
-					out = append(out, agent.Event{Type: agent.EventUserMessage, Text: text})
-				}
-				continue
-			}
-			var blocks []contentBlock
-			if json.Unmarshal(line.Message.Content, &blocks) != nil {
-				continue
-			}
-			for _, b := range blocks {
-				if b.Type == "text" && b.Text != "" {
-					out = append(out, agent.Event{Type: agent.EventUserMessage, Text: b.Text})
-				}
-			}
-		case "assistant":
-			out = append(out, messageEvents(line.Message.Content)...)
-			// Each assistant entry is one API call; replaying its usage
-			// restores the session's token/cost totals after a resume.
-			if u := line.Message.Usage; u != nil && (u.InputTokens > 0 || u.OutputTokens > 0) {
-				out = append(out, agent.Event{
-					Type:         agent.EventUsage,
-					InputTokens:  u.InputTokens,
-					OutputTokens: u.OutputTokens,
-					CostUSD:      line.CostUSD,
-					Model:        line.Message.Model,
-				})
-			}
-		}
-	}
-	return out
+	return strings.Join(q, " ")
 }
