@@ -86,6 +86,22 @@
   .section:first-child { margin-top: .2em; }
   .section .caret { color: var(--faint); width: .8em; display: inline-block; }
   .section .cnt { color: var(--faint); font-weight: 400; }
+  /* Scheduled tasks: a card per schedule, expandable to its run timeline. */
+  .sched { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r);
+    padding: .55em .7em; margin-bottom: .5em; }
+  .sched .head { display: flex; align-items: center; gap: .5em; cursor: pointer; user-select: none; -webkit-user-select: none; }
+  .sched .caret { color: var(--faint); width: .8em; display: inline-block; }
+  .sched .name { font-weight: 600; }
+  .sched .cron { color: var(--dim); font-size: .8em; }
+  .sched .next { color: var(--faint); font-size: .78em; margin-left: auto; white-space: nowrap; }
+  .sched .runs { margin: .5em 0 .1em; border-left: 2px solid var(--line); padding-left: .7em; }
+  .sched .run { display: flex; align-items: baseline; gap: .5em; font-size: .82em; padding: .12em 0; }
+  .sched .run .when { color: var(--faint); white-space: nowrap; }
+  .sched .run.updated .what { color: var(--ok); cursor: pointer; text-decoration: underline dotted; }
+  .sched .run.error .what { color: var(--err); }
+  .sched .run.no-update .what { color: var(--dim); }
+  .sched .runs .none { color: var(--faint); font-size: .82em; font-style: italic; }
+  .badge { font-size: .68em; padding: .05em .45em; border-radius: 20px; border: 1px solid var(--line); color: var(--faint); }
   .chip { font: inherit; font-size: .72em; padding: .12em .6em; border-radius: 20px; line-height: 1.5;
     border: 1px solid var(--line); background: transparent; color: var(--dim); cursor: pointer; }
   .chip:hover { border-color: var(--accent-dim); }
@@ -148,6 +164,12 @@
   /* composer (focus + new) */
   .composer { position: sticky; bottom: 0; background: linear-gradient(180deg, transparent, var(--bg) 22%);
     padding-top: .5em; padding-bottom: max(.6em, env(safe-area-inset-bottom)); }
+  /* floats just above the composer when new content arrives while scrolled up */
+  .newpill { position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%); margin-bottom: .5em;
+    background: var(--accent-dim); color: #cdddff; border: 1px solid var(--accent); border-radius: 20px;
+    padding: .35em .9em; font-size: .82em; font-weight: 600; cursor: pointer; white-space: nowrap;
+    box-shadow: 0 3px 12px rgba(0,0,0,.45); z-index: 5; }
+  .newpill:hover { background: var(--accent); color: #0f1115; }
   .thumbs { display: flex; gap: .5em; flex-wrap: wrap; margin-bottom: .5em; }
   .thumb { position: relative; border: 1px solid var(--line); border-radius: 9px; overflow: hidden;
     background: var(--bg2); display: flex; align-items: center; }
@@ -306,6 +328,7 @@
         <input id="formFile" type="file" multiple accept="image/*" class="hidden">
       </div>
 
+      <div id="schedules"></div>
       <div id="filterBar" class="filterbar"></div>
       <div id="rows"></div>
       <div id="spend"></div>
@@ -317,6 +340,7 @@
       <div id="ask" class="hidden"></div>
       <div id="transcript"></div>
       <div class="composer">
+        <button id="newpill" class="newpill hidden" onclick="jumpToLatest()">↓ new messages</button>
         <div class="thumbs" id="thumbs"></div>
         <div id="completion" class="completion hidden"></div>
         <div class="inputbar" id="focusBar">
@@ -900,11 +924,74 @@ async function setCategory(name) {
     pollBoard();
   } catch (e) { alert(e.message); }
 }
+// --- Scheduled tasks ------------------------------------------------
+// A schedule is a task, not a live session: each fire either spawns a
+// fresh agent (precheck saw a change) or records a free "no updates" run.
+// The card shows the task; expanding it shows the week's run timeline,
+// with updated runs linking to their session.
+let schedList = [];
+let collapsedScheds = new Set(JSON.parse(localStorage.getItem('atc-sched-collapsed') || '[]'));
+function toggleSched(name) {
+  if (collapsedScheds.has(name)) collapsedScheds.delete(name); else collapsedScheds.add(name);
+  localStorage.setItem('atc-sched-collapsed', JSON.stringify([...collapsedScheds]));
+  renderSchedules(schedList);
+}
+function relTime(iso) {
+  if (!iso) return '';
+  const d = (Date.now() - new Date(iso).getTime()) / 1000, future = d < 0, s = Math.abs(d);
+  const [n, unit] = s < 60 ? [s, 's'] : s < 3600 ? [s / 60, 'm'] : s < 86400 ? [s / 3600, 'h'] : [s / 86400, 'd'];
+  const v = Math.max(1, Math.round(n));
+  return future ? `in ${v}${unit}` : `${v}${unit} ago`;
+}
+function absTime(iso) { return iso ? new Date(iso).toLocaleString() : ''; }
+function runRow(r) {
+  let what;
+  if (r.result === 'updated') {
+    what = r.session
+      ? `<span class="what" onclick="openSession('${jsArg(r.session)}')">↗ ${esc(r.session)}</span>`
+      : `<span class="what">updated</span>`;
+  } else if (r.result === 'error') {
+    what = `<span class="what" title="${escAttr(r.detail || '')}">✗ ${esc(r.detail || 'error')}</span>`;
+  } else {
+    what = `<span class="what">no updates</span>`;
+  }
+  return `<div class="run ${esc(r.result)}"><span class="when" title="${escAttr(absTime(r.time))}">${esc(relTime(r.time))}</span>${what}</div>`;
+}
+function schedHTML(s) {
+  const collapsed = collapsedScheds.has(s.name);
+  const since = s.lastUpdate ? `updated ${relTime(s.lastUpdate)}` : 'no updates yet';
+  const next = s.nextFire ? `next ${relTime(s.nextFire)}` : 'never';
+  const head = `<div class="head" onclick="toggleSched('${jsArg(s.name)}')">`
+    + `<span class="caret">${collapsed ? '▸' : '▾'}</span>`
+    + `<span class="name">${esc(s.name)}</span>`
+    + `<span class="cron">${esc(s.cron)}</span>`
+    + (s.hasPrecheck ? `<span class="badge" title="Only runs when its precheck reports a change">precheck</span>` : '')
+    + `<span class="next" title="${escAttr(absTime(s.nextFire))}">${esc(since)} · ${esc(next)}</span>`
+    + `</div>`;
+  let body = '';
+  if (!collapsed) {
+    const runs = s.runs || [];
+    body = `<div class="runs">` +
+      (runs.length ? runs.map(runRow).join('') : `<div class="none">no runs recorded yet</div>`) +
+      `</div>`;
+  }
+  return `<div class="sched">${head}${body}</div>`;
+}
+function renderSchedules(list) {
+  schedList = list || [];
+  const el = $('schedules');
+  if (!schedList.length) { el.innerHTML = ''; return; }
+  el.innerHTML = `<div class="section" style="cursor:default"><span>Scheduled</span>` +
+    `<span class="cnt">${schedList.length}</span></div>` +
+    schedList.map(schedHTML).join('');
+}
+
 let boardList = [];
 async function pollBoard() {
   try {
     boardList = await api('/api/sessions');
     renderBoard(boardList);
+    try { renderSchedules(await api('/api/schedules')); } catch (e) { /* board still fine */ }
     const m = await api('/api/meta'); const sp = m.spend; const f = [];
     if (sp.todayUsd > 0 || sp.monthUsd > 0) f.push(`$${sp.todayUsd.toFixed(2)} today · $${sp.monthUsd.toFixed(2)} month`);
     if (sp.todayAiu > 0 || sp.monthAiu > 0) f.push(`${sp.todayAiu.toFixed(1)} AIC today · ${sp.monthAiu.toFixed(1)} month`);
@@ -970,7 +1057,8 @@ function isReady(st) { return st !== 'starting'; }
 function openSession(name) {
   saveDraft();               // preserve whatever we were composing elsewhere
   if (!$('board').classList.contains('hidden')) boardScroll = window.scrollY;
-  current = name; clearInterval(timer); lastRender = '';
+  current = name; clearInterval(timer); lastRender = ''; freshOpen = true;
+  $('newpill').classList.add('hidden');
   histList = []; histIdx = -1; histDraft = ''; // fresh prompt-recall state per session
   $('board').classList.add('hidden'); $('focus').classList.remove('hidden');
   $('newBtn').classList.add('hidden'); $('transcript').innerHTML = '';
@@ -986,6 +1074,12 @@ function openSession(name) {
 }
 
 let lastRender = '';
+let freshOpen = false; // first render after opening a session jumps to the latest message
+// Tapping the pill (or scrolling to the bottom yourself) dismisses it and follows again.
+function jumpToLatest() { window.scrollTo(0, document.body.scrollHeight); $('newpill').classList.add('hidden'); }
+window.addEventListener('scroll', () => {
+  if (window.innerHeight + window.scrollY >= document.body.offsetHeight - 120) $('newpill').classList.add('hidden');
+}, { passive: true });
 async function pollFocus() {
   if (!current) return;
   let data;
@@ -1009,10 +1103,17 @@ async function pollFocus() {
   const html = data.transcript.map(renderEntry).join('');
   if (html !== lastRender) {
     const el = $('transcript');
-    const stick = window.innerHeight + window.scrollY >= document.body.offsetHeight - 120;
-    el.innerHTML = html; lastRender = html;
+    const prevY = window.scrollY;
+    const stick = freshOpen || window.innerHeight + window.scrollY >= document.body.offsetHeight - 120;
+    el.innerHTML = html; lastRender = html; freshOpen = false;
     linkifyFiles(el); // make .md path mentions clickable (DOM only changes, lastRender stays the string)
-    if (stick) window.scrollTo(0, document.body.scrollHeight);
+    // Replacing innerHTML wholesale collapses the document height for an instant,
+    // which makes the browser clamp scrollY and lose the reading position. Only
+    // follow new content when already at the bottom; otherwise pin the user to
+    // exactly where they were so a streaming/new message can't yank them away,
+    // and surface a "↓ new messages" pill they can tap to catch up on demand.
+    if (stick) { window.scrollTo(0, document.body.scrollHeight); $('newpill').classList.add('hidden'); }
+    else { window.scrollTo(0, prevY); $('newpill').classList.remove('hidden'); }
   }
 
   // agent question (Copilot ask_user): quick-reply buttons + freeform box

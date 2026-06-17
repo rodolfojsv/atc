@@ -27,6 +27,7 @@ import (
 	"github.com/rodolfojsv/atc/internal/hooks"
 	"github.com/rodolfojsv/atc/internal/ntfy"
 	"github.com/rodolfojsv/atc/internal/sched"
+	"github.com/rodolfojsv/atc/internal/schedrun"
 	"github.com/rodolfojsv/atc/internal/supervisor"
 	"github.com/rodolfojsv/atc/internal/tui"
 	"github.com/rodolfojsv/atc/internal/web"
@@ -239,6 +240,7 @@ func portOf(url string) string {
 }
 
 func startSchedules(ctx context.Context, cfg *config.Config, sup *supervisor.Supervisor) error {
+	runLog := schedrun.Default()
 	var jobs []sched.Job
 	for _, s := range cfg.Schedules {
 		entry, err := sched.Parse(s.Cron)
@@ -247,19 +249,49 @@ func startSchedules(ctx context.Context, cfg *config.Config, sup *supervisor.Sup
 		}
 		s := s
 		jobs = append(jobs, sched.Job{Entry: entry, Fire: func() {
-			name := s.Name
-			if name == "" {
-				name = "sched"
-			}
-			_, _ = sup.NewSession(supervisor.NewSessionOptions{
-				Name:        name,
-				Repo:        s.Repo,
-				Preset:      s.Preset,
-				UseWorktree: s.Worktree,
-				Prompt:      s.Prompt,
-			})
+			fireSchedule(s, sup, runLog)
 		}})
 	}
 	go sched.Run(ctx, jobs)
 	return nil
+}
+
+// fireSchedule runs one scheduled task: it consults the precheck (if any),
+// launches a session only when something changed, and records the outcome
+// in the run log so the UI can show "no updates since X" without spending
+// tokens on a quiet fire.
+func fireSchedule(s config.Schedule, sup *supervisor.Supervisor, runLog schedrun.Log) {
+	name := s.Name
+	if name == "" {
+		name = "sched"
+	}
+	rec := func(r schedrun.Run) {
+		r.Schedule, r.Time = name, time.Now()
+		_ = runLog.Append(r)
+	}
+
+	if s.Precheck != "" {
+		run, err := runPrecheck(s.Precheck, s.Repo)
+		if err != nil {
+			rec(schedrun.Run{Result: schedrun.Errored, Detail: "precheck: " + err.Error()})
+			return
+		}
+		if !run {
+			rec(schedrun.Run{Result: schedrun.NoUpdate})
+			return
+		}
+	}
+
+	sess, err := sup.NewSession(supervisor.NewSessionOptions{
+		Name:        name,
+		Repo:        s.Repo,
+		Preset:      s.Preset,
+		UseWorktree: s.Worktree,
+		Prompt:      s.Prompt,
+	})
+	if err != nil {
+		rec(schedrun.Run{Result: schedrun.Errored, Detail: err.Error()})
+		return
+	}
+	rec(schedrun.Run{Result: schedrun.Updated, Session: sess.Name})
 }

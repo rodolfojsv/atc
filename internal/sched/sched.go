@@ -107,6 +107,21 @@ func (e *Entry) Matches(t time.Time) bool {
 	return domOK && dowOK
 }
 
+// Next returns the first firing strictly after t (minute resolution), or
+// the zero time when nothing matches within a year — which only happens
+// for a schedule that can never fire (e.g. Feb 30). Used to show a
+// schedule's upcoming run in the UI.
+func (e *Entry) Next(after time.Time) time.Time {
+	t := after.Truncate(time.Minute).Add(time.Minute)
+	limit := t.AddDate(1, 0, 0)
+	for ; t.Before(limit); t = t.Add(time.Minute) {
+		if e.Matches(t) {
+			return t
+		}
+	}
+	return time.Time{}
+}
+
 // Job pairs a parsed schedule with what to run.
 type Job struct {
 	Entry *Entry

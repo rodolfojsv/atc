@@ -105,6 +105,7 @@ func (s *Server) routes() {
 		s.mux.Handle(pattern, s.auth(h))
 	}
 	api("GET /api/meta", s.handleMeta)
+	api("GET /api/schedules", s.handleSchedules)
 	api("GET /api/sessions", s.handleList)
 	api("POST /api/sessions", s.handleCreate)
 	api("GET /api/sessions/{name}", s.handleGet)
@@ -286,6 +287,50 @@ func (s *Server) handleList(w http.ResponseWriter, _ *http.Request) {
 	out := make([]sessionJSON, 0, len(sessions))
 	for _, sess := range sessions {
 		out = append(out, toSessionJSON(sess.View()))
+	}
+	writeJSON(w, out)
+}
+
+type scheduleJSON struct {
+	Name        string            `json:"name"`
+	Cron        string            `json:"cron"`
+	Repo        string            `json:"repo"`
+	Preset      string            `json:"preset,omitempty"`
+	Worktree    bool              `json:"worktree,omitempty"`
+	HasPrecheck bool              `json:"hasPrecheck"`
+	NextFire    *time.Time        `json:"nextFire,omitempty"`
+	LastUpdate  *time.Time        `json:"lastUpdate,omitempty"`
+	Runs        []scheduleRunJSON `json:"runs"`
+}
+
+type scheduleRunJSON struct {
+	Time    time.Time `json:"time"`
+	Result  string    `json:"result"` // "updated" | "no-update" | "error"
+	Session string    `json:"session,omitempty"`
+	Detail  string    `json:"detail,omitempty"`
+}
+
+func (s *Server) handleSchedules(w http.ResponseWriter, _ *http.Request) {
+	views := s.sup.Schedules()
+	out := make([]scheduleJSON, 0, len(views))
+	for _, v := range views {
+		j := scheduleJSON{
+			Name: v.Name, Cron: v.Cron, Repo: v.Repo, Preset: v.Preset,
+			Worktree: v.Worktree, HasPrecheck: v.HasPrecheck,
+			Runs: make([]scheduleRunJSON, 0, len(v.Runs)),
+		}
+		if !v.NextFire.IsZero() {
+			t := v.NextFire
+			j.NextFire = &t
+		}
+		if !v.LastUpdate.IsZero() {
+			t := v.LastUpdate
+			j.LastUpdate = &t
+		}
+		for _, r := range v.Runs {
+			j.Runs = append(j.Runs, scheduleRunJSON{Time: r.Time, Result: r.Result, Session: r.Session, Detail: r.Detail})
+		}
+		out = append(out, j)
 	}
 	writeJSON(w, out)
 }

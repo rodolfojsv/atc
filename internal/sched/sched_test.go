@@ -55,6 +55,44 @@ func TestListsAndSundaySeven(t *testing.T) {
 	}
 }
 
+func TestNext(t *testing.T) {
+	// Weekdays at 09:00. From Mon 08:00 the next fire is the same day 09:00.
+	e, err := Parse("0 9 * * 1-5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mon := time.Date(2026, 6, 15, 8, 0, 0, 0, time.UTC) // a Monday
+	got := e.Next(mon)
+	want := time.Date(2026, 6, 15, 9, 0, 0, 0, time.UTC)
+	if !got.Equal(want) {
+		t.Errorf("next from Mon 08:00 = %v, want %v", got, want)
+	}
+
+	// Strictly after: from exactly 09:00 the next fire is the following day.
+	got = e.Next(want)
+	wantTue := time.Date(2026, 6, 16, 9, 0, 0, 0, time.UTC)
+	if !got.Equal(wantTue) {
+		t.Errorf("next from Mon 09:00 = %v, want %v", got, wantTue)
+	}
+
+	// From Friday 09:00 it skips the weekend to Monday.
+	fri := time.Date(2026, 6, 19, 9, 0, 0, 0, time.UTC)
+	got = e.Next(fri)
+	wantMon := time.Date(2026, 6, 22, 9, 0, 0, 0, time.UTC)
+	if !got.Equal(wantMon) {
+		t.Errorf("next from Fri 09:00 = %v, want %v (skip weekend)", got, wantMon)
+	}
+
+	// A schedule that can never fire returns the zero time.
+	impossible, err := Parse("0 0 30 2 *") // Feb 30
+	if err != nil {
+		t.Fatal(err)
+	}
+	if z := impossible.Next(mon); !z.IsZero() {
+		t.Errorf("impossible schedule should yield zero time, got %v", z)
+	}
+}
+
 func TestParseErrors(t *testing.T) {
 	for _, expr := range []string{"", "* * * *", "61 * * * *", "* 25 * * *", "x * * * *", "*/0 * * * *"} {
 		if _, err := Parse(expr); err == nil {

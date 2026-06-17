@@ -31,6 +31,14 @@ type Schedule struct {
 	Repo     string `json:"repo"`
 	Worktree bool   `json:"worktree,omitempty"`
 	Prompt   string `json:"prompt"`
+	// Precheck is an optional shell command run in Repo before each fire.
+	// Exit 0 means "something changed, run the prompt"; a non-zero exit
+	// means "nothing new, skip" — no session is created and no tokens are
+	// spent. A command that fails to start (missing script, bad dir) is
+	// recorded as an error rather than a silent skip. The skip/run/error
+	// outcome of every fire is appended to the schedule run log so the UI
+	// can show "no updates since X". Empty disables gating (always run).
+	Precheck string `json:"precheck,omitempty"`
 }
 
 // Web configures the optional local web UI (atc serve / atc --serve).
