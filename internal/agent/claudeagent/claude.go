@@ -56,7 +56,15 @@ const (
 	pollInterval = 300 * time.Millisecond // how often we tail jsonl + capture pane
 	quiescence   = 800 * time.Millisecond // idle = no new transcript for this long while not "working"
 	idDiscovery  = 8 * time.Second        // how long to wait for the session jsonl to appear
+	readyTimeout = 30 * time.Second       // how long to wait for the TUI to accept input after launch
+	sendKeyDelay = 150 * time.Millisecond // pause between typing a prompt and pressing Enter
 )
+
+// readyMarkers are chrome the claude TUI shows once it is up and accepting
+// input. We wait for one of these after launching before sending the first
+// prompt — otherwise keystrokes typed during startup (config + MCP load) are
+// dropped. Tunable against a live capture-pane.
+var readyMarkers = []string{"shift+tab", "for shortcuts", "bypass permissions"}
 
 // workingMarkers are substrings the claude TUI shows while a turn is in
 // progress. If none are present (and the transcript has gone quiet) the turn is
@@ -66,6 +74,17 @@ var workingMarkers = []string{
 	"esc to interrupt",
 	"Esc to interrupt",
 	"interrupt)",
+}
+
+// workingRe matches the busy spinner's elapsed-time counter, observed live as
+// e.g. "✢ Noodling… (49s · ↓ 2.7k tokens)". The spinner word rotates
+// (Noodling/Working/Forging/…), so we match the stable "(<n>s" counter rather
+// than any one word.
+var workingRe = regexp.MustCompile(`\(\d+s\b`)
+
+// isWorking reports whether the pane shows a turn in progress.
+func isWorking(pane string) bool {
+	return workingRe.MatchString(pane) || containsAny(pane, workingMarkers)
 }
 
 type Backend struct{}
@@ -144,6 +163,9 @@ func (s *session) Send(ctx context.Context, prompt string) error {
 	if err := s.tm.SendText(ctx, s.tmuxName(), prompt); err != nil {
 		return err
 	}
+	// Some TUIs drop an Enter that arrives in the same instant as the pasted
+	// text; a short pause makes submission reliable.
+	time.Sleep(sendKeyDelay)
 	if err := s.tm.SendEnter(ctx, s.tmuxName()); err != nil {
 		return err
 	}
@@ -167,7 +189,11 @@ func (s *session) ensureLaunched(ctx context.Context) error {
 			if err := s.tm.SendText(ctx, name, "unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN; exec "+line); err != nil {
 				return err
 			}
-			return s.tm.SendEnter(ctx, name)
+			if err := s.tm.SendEnter(ctx, name); err != nil {
+				return err
+			}
+			s.waitReady(ctx)
+			return nil
 		}
 		return nil // claude assumed alive
 	}
@@ -189,10 +215,27 @@ func (s *session) ensureLaunched(ctx context.Context) error {
 	}
 	_ = s.tm.SetOption(ctx, name, "history-limit", historyLimit)
 	s.started = true
+	s.waitReady(ctx) // let the TUI finish booting before the first prompt
 	if !resume {
 		s.discoverClaudeID()
 	}
 	return nil
+}
+
+// waitReady blocks until the TUI shows it is up and accepting input, or a
+// deadline elapses. Without this, the first prompt can be typed into a
+// still-booting claude (config + MCP load) and silently dropped.
+func (s *session) waitReady(ctx context.Context) {
+	deadline := time.Now().Add(readyTimeout)
+	for time.Now().Before(deadline) {
+		if s.isClosed() {
+			return
+		}
+		if pane, err := s.tm.Capture(ctx, s.tmuxName(), tmux.CaptureOpts{}); err == nil && containsAny(pane, readyMarkers) {
+			return
+		}
+		time.Sleep(pollInterval)
+	}
 }
 
 // claudeArgs builds the interactive launch flags. With resume it continues the
@@ -282,7 +325,7 @@ func (s *session) watchTurn() {
 
 		// Turn is done when claude is no longer "working" and the transcript
 		// has been quiet for a moment after producing something.
-		working := err == nil && containsAny(pane, workingMarkers)
+		working := err == nil && isWorking(pane)
 		if sawOutput && !working && time.Since(lastChange) > quiescence {
 			s.emit(agent.Event{Type: agent.EventIdle})
 			return

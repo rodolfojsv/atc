@@ -22,14 +22,13 @@ import (
 
 // --- Tunables -------------------------------------------------------------
 
-// promptOptionRe matches one selectable option line, e.g. "❯ 1. Yes" or
+// promptOptionRe matches one selectable option line, capturing an optional
+// leading selection cursor, the number, and the label — e.g. "❯ 1. Yes" or
 // "  2. No, and tell Claude what to do differently".
-var promptOptionRe = regexp.MustCompile(`^\s*[❯>►]?\s*([0-9]+)[.)]\s+(.*\S)\s*$`)
-
-// cursorGlyphs mark the currently-highlighted option in a select box. Their
-// presence is the strongest signal that the pane shows an interactive prompt
-// rather than a numbered list in ordinary assistant prose.
-const cursorGlyphs = "❯►"
+//
+// The cursor must be on the option line itself: `❯` is also the input-prompt
+// cursor (always on screen), so its mere presence anywhere is not a signal.
+var promptOptionRe = regexp.MustCompile(`^\s*([❯►])?\s*([0-9]+)[.)]\s+(.*\S)\s*$`)
 
 // permissionTitleMarkers / permissionOptionMarkers classify a box as a
 // permission/approval prompt (→ OnPermission) rather than a question
@@ -69,12 +68,16 @@ func detectPrompt(pane string) (promptInfo, bool) {
 	lines := strings.Split(pane, "\n")
 	var options []promptOption
 	firstOpt := -1
+	cursorOnOption := false
 	for i, ln := range lines {
 		if m := promptOptionRe.FindStringSubmatch(ln); m != nil {
 			if firstOpt < 0 {
 				firstOpt = i
 			}
-			options = append(options, promptOption{label: strings.TrimSpace(m[2])})
+			if m[1] != "" {
+				cursorOnOption = true
+			}
+			options = append(options, promptOption{label: strings.TrimSpace(m[3])})
 		}
 	}
 	if len(options) < 2 || firstOpt < 0 {
@@ -96,9 +99,9 @@ func detectPrompt(pane string) (promptInfo, bool) {
 		}
 	}
 
-	// Gate against false positives from numbered prose.
-	hasCursor := strings.ContainsAny(pane, cursorGlyphs)
-	if !hasCursor && !isPermission {
+	// Gate against false positives from numbered prose: a real select box has
+	// the cursor on an option line, or uses permission wording.
+	if !cursorOnOption && !isPermission {
 		return promptInfo{}, false
 	}
 

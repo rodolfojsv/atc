@@ -193,6 +193,14 @@ func TestIsShellAndWorkingMarkers(t *testing.T) {
 	if containsAny("> ", workingMarkers) {
 		t.Error("idle prompt should not match a working marker")
 	}
+	// Live-observed busy line (the spinner word rotates; the "(<n>s" counter
+	// is the stable signal).
+	if !isWorking("✢ Noodling… (49s · ↓ 2.7k tokens)") {
+		t.Error("isWorking should match the live busy spinner line")
+	}
+	if isWorking("❯ type a message\n  ? for shortcuts") {
+		t.Error("isWorking should be false on an idle input box")
+	}
 }
 
 // TestLiveSmoke drives a real `claude` through tmux end to end. Opt-in (needs
