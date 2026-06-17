@@ -266,9 +266,22 @@ func (s *session) watchTurn() {
 			return
 		}
 
+		pane, err := s.tm.Capture(ctx, name, tmux.CaptureOpts{})
+		if err == nil {
+			// A permission box or AskUserQuestion picker means claude is
+			// blocked on us — answer it (this routes through OnPermission/
+			// OnQuestion and blocks until the user decides), and don't treat
+			// the wait as either "working" or "idle".
+			if p, ok := detectPrompt(pane); ok {
+				s.handlePrompt(ctx, p)
+				lastChange = time.Now()
+				sawOutput = true
+				continue
+			}
+		}
+
 		// Turn is done when claude is no longer "working" and the transcript
 		// has been quiet for a moment after producing something.
-		pane, err := s.tm.Capture(ctx, name, tmux.CaptureOpts{})
 		working := err == nil && containsAny(pane, workingMarkers)
 		if sawOutput && !working && time.Since(lastChange) > quiescence {
 			s.emit(agent.Event{Type: agent.EventIdle})
