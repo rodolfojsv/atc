@@ -30,6 +30,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -45,6 +46,32 @@ import (
 	"github.com/rodolfojsv/atc/internal/config"
 	"github.com/rodolfojsv/atc/internal/tmux"
 )
+
+// Optional diagnostics: when ATC_CLAUDE_TRACE names a writable file, the
+// session's drive/observe loop appends a timestamped line for each key step
+// (send, watch start, transcript drain, emit, idle, prompt, errors). Disabled
+// (one env lookup) when unset. Mirrors copilotagent's ATC_COPILOT_TRACE.
+var (
+	traceOnce sync.Once
+	traceFile *os.File
+	traceMu   sync.Mutex
+)
+
+func tracef(format string, args ...any) {
+	traceOnce.Do(func() {
+		if p := strings.TrimSpace(os.Getenv("ATC_CLAUDE_TRACE")); p != "" {
+			if f, err := os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); err == nil {
+				traceFile = f
+			}
+		}
+	})
+	if traceFile == nil {
+		return
+	}
+	traceMu.Lock()
+	defer traceMu.Unlock()
+	fmt.Fprintf(traceFile, time.Now().Format("15:04:05.000")+" "+format+"\n", args...)
+}
 
 // Tunables for driving and observing the TUI. These are the knobs most likely
 // to need adjustment against a specific Claude Code version.
@@ -149,8 +176,11 @@ func (s *session) tmuxName() string { return "atc-" + s.id }
 
 func (s *session) emit(e agent.Event) {
 	if s.spec.OnEvent != nil {
+		tracef("emit id=%s type=%s textlen=%d", s.id, e.Type, len(e.Text))
 		s.spec.OnEvent(e)
+		return
 	}
+	tracef("emit DROPPED id=%s type=%s onEvent=nil", s.id, e.Type)
 }
 
 func (s *session) isClosed() bool {
@@ -169,6 +199,8 @@ func (s *session) Send(ctx context.Context, prompt string) error {
 	// Mark where this turn begins so the watcher only emits new transcript
 	// lines, then type the prompt and submit it.
 	s.offset = transcriptSize(s.transcriptPath())
+	tracef("Send id=%s claudeID=%s off=%d dir=%q path=%q promptLen=%d onEvent=%t",
+		s.id, s.claudeID, s.offset, s.spec.WorkingDir, s.transcriptPath(), len(prompt), s.spec.OnEvent != nil)
 	if err := s.tm.SendText(ctx, s.tmuxName(), prompt); err != nil {
 		return err
 	}
@@ -306,6 +338,7 @@ func (s *session) discoverClaudeID() {
 // emitting transcript events and a final EventIdle.
 func (s *session) watchTurn() {
 	name := s.tmuxName()
+	tracef("watch start id=%s path=%q", s.id, s.transcriptPath())
 	lastChange := time.Now()
 	sawOutput := false
 	for {
@@ -326,6 +359,7 @@ func (s *session) watchTurn() {
 
 		// If claude died inside the session, surface it and stop.
 		if cmd, err := s.tm.PaneCommand(ctx, name); err == nil && isShell(cmd) {
+			tracef("watch claude-died id=%s", s.id)
 			s.emit(agent.Event{Type: agent.EventError, ErrType: "process", Text: "claude exited inside tmux (will --resume on next prompt)"})
 			return
 		}
@@ -337,6 +371,7 @@ func (s *session) watchTurn() {
 			// OnQuestion and blocks until the user decides), and don't treat
 			// the wait as either "working" or "idle".
 			if p, ok := detectPrompt(pane); ok {
+				tracef("watch prompt id=%s kind=%s title=%q", s.id, p.kind, p.title)
 				s.handlePrompt(ctx, p)
 				lastChange = time.Now()
 				sawOutput = true
@@ -348,6 +383,7 @@ func (s *session) watchTurn() {
 		// has been quiet for a moment after producing something.
 		working := err == nil && isWorking(pane)
 		if sawOutput && !working && time.Since(lastChange) > quiescence {
+			tracef("watch idle id=%s sawOutput=%t", s.id, sawOutput)
 			s.emit(agent.Event{Type: agent.EventIdle})
 			return
 		}
@@ -361,6 +397,7 @@ func (s *session) drainTranscript() []agent.Event {
 	path := s.transcriptPath()
 	f, err := os.Open(path)
 	if err != nil {
+		tracef("drain openfail id=%s path=%q err=%v", s.id, path, err)
 		return nil
 	}
 	defer f.Close()
@@ -389,6 +426,7 @@ func (s *session) drainTranscript() []agent.Event {
 		s.mu.Lock()
 		s.offset += consumed
 		s.mu.Unlock()
+		tracef("drain id=%s consumed=%d events=%d", s.id, consumed, len(out))
 	}
 	return out
 }
