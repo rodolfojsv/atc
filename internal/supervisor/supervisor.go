@@ -981,11 +981,14 @@ func (s *Supervisor) Kill(sess *Session, removeWorktree bool) {
 func (s *Supervisor) Stop() {
 	s.persist()
 	for _, sess := range s.Sessions() {
+		// Unblock anything waiting on a permission/question so goroutines
+		// can exit, but do NOT Close() the agent session: a durable backend
+		// (Claude over tmux) keeps its tmux session — and the live `claude`
+		// process — alive across an atc restart, so the next run reattaches
+		// instead of re-resuming from scratch. Per-backend shutdown cleanup
+		// happens in backend.Stop() below; explicit teardown is Kill().
 		sess.RespondAll(agent.Cancel, "")
 		sess.cancelQuestion()
-		if ag := sess.agentSession(); ag != nil {
-			_ = ag.Close()
-		}
 	}
 	for _, b := range s.backends {
 		_ = b.Stop()
