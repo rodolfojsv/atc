@@ -237,9 +237,11 @@ func (s *session) ensureLaunched(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	tracef("ensureLaunched id=%s started=%t hasSession=%t", s.id, s.started, has)
 	if has {
 		// Layer-2: tmux is alive but claude may have exited, leaving a shell.
 		if cmd, err := s.tm.PaneCommand(ctx, name); err == nil && isShell(cmd) {
+			tracef("ensureLaunched id=%s relaunch-claude (pane was shell)", s.id)
 			// Relaunch claude --resume into the same pane.
 			line := shellJoin(append([]string{"claude"}, s.claudeArgs(true)...))
 			if err := s.tm.SendText(ctx, name, "unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN; exec "+line); err != nil {
@@ -249,10 +251,13 @@ func (s *session) ensureLaunched(ctx context.Context) error {
 				return err
 			}
 			s.waitReady(ctx)
+			tracef("ensureLaunched id=%s relaunch ready", s.id)
 			return nil
 		}
+		tracef("ensureLaunched id=%s claude-alive", s.id)
 		return nil // claude assumed alive
 	}
+	tracef("ensureLaunched id=%s fresh-launch", s.id)
 
 	// Fresh tmux session. Launch via a shell that strips API-key env vars, so
 	// claude authenticates with the subscription OAuth token (subscription
@@ -275,6 +280,7 @@ func (s *session) ensureLaunched(ctx context.Context) error {
 	if !resume {
 		s.discoverClaudeID()
 	}
+	tracef("ensureLaunched id=%s fresh-launch ready", s.id)
 	return nil
 }
 

@@ -660,7 +660,10 @@ func (s *Supervisor) WatchStore(ctx context.Context, interval time.Duration) {
 // on a question (Copilot's ask_user), the message answers that question
 // instead of starting a new turn.
 func (s *Supervisor) Prompt(sess *Session, text string) error {
+	strace("Prompt sess=%q backend=%s status=%s hasQuestion=%t textlen=%d",
+		sess.Name, sess.Backend, sess.Status(), sess.HasQuestion(), len(text))
 	if sess.HasQuestion() {
+		strace("Prompt->answerQuestion sess=%q (consumed as question answer, not sent)", sess.Name)
 		sess.appendEntry(EntryUser, text)
 		sess.addHistory(text)
 		sess.answerQuestion(text)
@@ -670,14 +673,17 @@ func (s *Supervisor) Prompt(sess *Session, text string) error {
 	}
 	ag := sess.agentSession()
 	if ag == nil {
+		strace("Prompt->ag-nil sess=%q (session is still starting)", sess.Name)
 		return errors.New("session is still starting")
 	}
 	sess.appendEntry(EntryUser, text)
 	sess.addHistory(text)
 	sess.setStatus(StatusWorking)
 	s.poke()
+	strace("Prompt->ag.Send sess=%q", sess.Name)
 	err := ag.Send(context.Background(), text)
 	if err != nil {
+		strace("Prompt->ag.Send err sess=%q err=%v", sess.Name, err)
 		sess.setError(fmt.Sprintf("send failed: %v", err))
 		s.poke()
 	}
