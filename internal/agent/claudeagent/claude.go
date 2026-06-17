@@ -80,12 +80,12 @@ const (
 	paneHeight   = 50
 	historyLimit = "50000" // tmux scrollback lines
 
-	pollInterval = 300 * time.Millisecond // how often we tail jsonl + capture pane
-	quiescence   = 800 * time.Millisecond // idle = no new transcript for this long while not "working"
-	idDiscovery  = 8 * time.Second        // how long to wait for the session jsonl to appear
-	readyTimeout = 30 * time.Second       // how long to wait for the TUI to accept input after launch
-	sendKeyDelay = 150 * time.Millisecond // pause between typing a prompt and pressing Enter
-	readySettle  = 600 * time.Millisecond // extra wait after ready chrome appears, so input is truly live
+	pollInterval = 300 * time.Millisecond  // how often we tail jsonl + capture pane
+	quiescence   = 1500 * time.Millisecond // idle = no new transcript for this long while not "working"
+	idDiscovery  = 8 * time.Second         // how long to wait for the session jsonl to appear
+	readyTimeout = 30 * time.Second        // how long to wait for the TUI to accept input after launch
+	sendKeyDelay = 150 * time.Millisecond  // pause between typing a prompt and pressing Enter
+	readySettle  = 600 * time.Millisecond  // extra wait after ready chrome appears, so input is truly live
 )
 
 // readyMarkers are chrome the claude TUI shows once it is up and accepting
@@ -164,9 +164,10 @@ type session struct {
 	spec     agent.SessionSpec
 	tm       *tmux.Client
 
-	started bool  // claude has been launched at least once for this id (resume vs new)
-	closed  bool  // Close was called; watchers should stop
-	offset  int64 // byte offset into the transcript already emitted this run
+	started  bool  // claude has been launched at least once for this id (resume vs new)
+	closed   bool  // Close was called; the watcher should stop
+	watching bool  // the session-long watcher goroutine is running
+	offset   int64 // byte offset into the transcript already emitted (monotonic)
 }
 
 func (s *session) ID() string { return s.id }
@@ -189,29 +190,43 @@ func (s *session) isClosed() bool {
 	return s.closed
 }
 
-// Send submits a prompt and starts watching the transcript for the response.
+// Send submits a prompt. The session-long watcher (started here on first use)
+// streams the response from the transcript.
 func (s *session) Send(ctx context.Context, prompt string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.ensureLaunched(ctx); err != nil {
 		return err
 	}
-	// Mark where this turn begins so the watcher only emits new transcript
-	// lines, then type the prompt and submit it.
-	s.offset = transcriptSize(s.transcriptPath())
-	tracef("Send id=%s claudeID=%s off=%d dir=%q path=%q promptLen=%d onEvent=%t",
-		s.id, s.claudeID, s.offset, s.spec.WorkingDir, s.transcriptPath(), len(prompt), s.spec.OnEvent != nil)
+	s.startWatch()
+	tracef("Send id=%s claudeID=%s promptLen=%d onEvent=%t path=%q",
+		s.id, s.claudeID, len(prompt), s.spec.OnEvent != nil, s.transcriptPath())
 	if err := s.tm.SendText(ctx, s.tmuxName(), prompt); err != nil {
 		return err
 	}
 	// Some TUIs drop an Enter that arrives in the same instant as the pasted
 	// text; a short pause makes submission reliable.
 	time.Sleep(sendKeyDelay)
-	if err := s.tm.SendEnter(ctx, s.tmuxName()); err != nil {
-		return err
+	return s.tm.SendEnter(ctx, s.tmuxName())
+}
+
+// startWatch launches the single, session-long transcript watcher the first
+// time it is called (caller holds mu). Keeping one watcher for the whole
+// session — rather than one per turn — means the read offset only ever moves
+// forward as content is emitted. A turn whose tail is written shortly after we
+// detect idle is therefore still picked up on a later poll, never skipped (the
+// per-turn design reset the offset on every Send and lost any late-written
+// tail).
+func (s *session) startWatch() {
+	if s.watching {
+		return
 	}
-	go s.watchTurn()
-	return nil
+	s.watching = true
+	// Start at the current end of file so we don't re-emit history the
+	// supervisor already replayed via History().
+	s.offset = transcriptSize(s.transcriptPath())
+	tracef("watch start id=%s off=%d path=%q", s.id, s.offset, s.transcriptPath())
+	go s.watch()
 }
 
 // ensureLaunched makes sure claude is running in the tmux session, creating the
@@ -334,13 +349,16 @@ func (s *session) discoverClaudeID() {
 	}
 }
 
-// watchTurn tails the transcript and the pane until the turn completes,
-// emitting transcript events and a final EventIdle.
-func (s *session) watchTurn() {
+// watch is the session-long loop: it tails the transcript (emitting assistant
+// text, tool calls, and usage as they are written), answers permission /
+// question prompts, and emits EventIdle once each time a turn goes quiet. It
+// runs until Close or until claude dies inside the tmux session. Because it
+// never resets the offset, a turn's tail written shortly after a (possibly
+// early) idle is still emitted on a later poll rather than skipped.
+func (s *session) watch() {
 	name := s.tmuxName()
-	tracef("watch start id=%s path=%q", s.id, s.transcriptPath())
-	lastChange := time.Now()
-	sawOutput := false
+	lastActivity := time.Now()
+	idleEmitted := true // armed only after the first activity, so no idle before turn 1
 	for {
 		if s.isClosed() {
 			return
@@ -353,13 +371,17 @@ func (s *session) watchTurn() {
 			for _, e := range evs {
 				s.emit(e)
 			}
-			sawOutput = true
-			lastChange = time.Now()
+			lastActivity = time.Now()
+			idleEmitted = false
 		}
 
-		// If claude died inside the session, surface it and stop.
+		// If claude died inside the session, surface it and stop; the next
+		// Send will --resume it and restart the watcher.
 		if cmd, err := s.tm.PaneCommand(ctx, name); err == nil && isShell(cmd) {
 			tracef("watch claude-died id=%s", s.id)
+			s.mu.Lock()
+			s.watching = false
+			s.mu.Unlock()
 			s.emit(agent.Event{Type: agent.EventError, ErrType: "process", Text: "claude exited inside tmux (will --resume on next prompt)"})
 			return
 		}
@@ -368,24 +390,29 @@ func (s *session) watchTurn() {
 		if err == nil {
 			// A permission box or AskUserQuestion picker means claude is
 			// blocked on us — answer it (this routes through OnPermission/
-			// OnQuestion and blocks until the user decides), and don't treat
-			// the wait as either "working" or "idle".
+			// OnQuestion and blocks until the user decides).
 			if p, ok := detectPrompt(pane); ok {
 				tracef("watch prompt id=%s kind=%s title=%q", s.id, p.kind, p.title)
 				s.handlePrompt(ctx, p)
-				lastChange = time.Now()
-				sawOutput = true
+				lastActivity = time.Now()
+				idleEmitted = false
 				continue
 			}
 		}
 
-		// Turn is done when claude is no longer "working" and the transcript
-		// has been quiet for a moment after producing something.
-		working := err == nil && isWorking(pane)
-		if sawOutput && !working && time.Since(lastChange) > quiescence {
-			tracef("watch idle id=%s sawOutput=%t", s.id, sawOutput)
+		// Still working: keep the idle timer pushed forward.
+		if err == nil && isWorking(pane) {
+			lastActivity = time.Now()
+			idleEmitted = false
+			continue
+		}
+
+		// Quiet and not working: emit one EventIdle per quiet period. The
+		// watcher keeps running, so any late tail re-arms and is still emitted.
+		if !idleEmitted && time.Since(lastActivity) > quiescence {
+			tracef("watch idle id=%s", s.id)
 			s.emit(agent.Event{Type: agent.EventIdle})
-			return
+			idleEmitted = true
 		}
 	}
 }
@@ -465,6 +492,7 @@ func (s *session) Abort(ctx context.Context) error {
 func (s *session) Close() error {
 	s.mu.Lock()
 	s.closed = true
+	s.watching = false
 	s.mu.Unlock()
 	return s.tm.KillSession(context.Background(), s.tmuxName())
 }
