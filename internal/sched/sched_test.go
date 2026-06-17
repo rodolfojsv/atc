@@ -1,6 +1,8 @@
 package sched
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -90,6 +92,45 @@ func TestNext(t *testing.T) {
 	}
 	if z := impossible.Next(mon); !z.IsZero() {
 		t.Errorf("impossible schedule should yield zero time, got %v", z)
+	}
+}
+
+func TestRunReloadableInitialBuildAndCancel(t *testing.T) {
+	// With an already-cancelled context, RunReloadable should build the
+	// job set once (so startup wiring runs) and then return promptly at the
+	// select rather than blocking until the next wall-clock minute.
+	calls := 0
+	build := func() ([]Job, error) {
+		calls++
+		return nil, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	done := make(chan struct{})
+	go func() {
+		RunReloadable(ctx, build, nil)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("RunReloadable did not return after context cancel")
+	}
+	if calls != 1 {
+		t.Fatalf("build called %d times, want 1 (initial build only)", calls)
+	}
+}
+
+func TestRunReloadableReportsInitialError(t *testing.T) {
+	want := errors.New("bad config")
+	var got error
+	build := func() ([]Job, error) { return nil, want }
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	RunReloadable(ctx, build, func(err error) { got = err })
+	if !errors.Is(got, want) {
+		t.Fatalf("onErr got %v, want %v", got, want)
 	}
 }
 
