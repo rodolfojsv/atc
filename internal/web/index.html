@@ -1408,25 +1408,26 @@ function resetCompletion() { comp = null; hidePopup($('completion')); hidePopup(
 function syncCompletion(ctx) {
   comp = null;
   const val = ctx.inputEl.value;
-  if (val) {
-    if (val[0] === '/' && !/\s/.test(val)) {
-      const data = ctx.getData();
-      const items = (data && data.commands || [])
-        .filter(c => c.name.startsWith(val))
-        .map(c => ({ insert: c.name, label: c.name, desc: c.desc }));
-      // hide once the only match is exactly what's typed
-      if (items.length && !(items.length === 1 && items[0].insert === val)) {
-        comp = { kind: '/', token: val, items, sel: 0, ctx };
-      }
-    } else {
-      const m = val.match(/(?:^|\s)(@\S*)$/);
-      if (m) {
-        const data = ctx.getData();
-        const token = m[1];
-        const files = fuzzyFilter((data && data.files) || [], token.slice(1), 6);
-        if (files.length) comp = { kind: '@', token, items: files.map(f => ({ insert: f, label: f })), sel: 0, ctx };
-      }
+  // Complete the token at the cursor (end of input): a "/command" or
+  // "@file" preceded by start-of-line or whitespace — so a slash works
+  // mid-prompt or on a later line, not only as the very first character.
+  const slash = val && val.match(/(?:^|\s)(\/\S*)$/);
+  const at = val && val.match(/(?:^|\s)(@\S*)$/);
+  if (slash) {
+    const token = slash[1];
+    const data = ctx.getData();
+    const items = (data && data.commands || [])
+      .filter(c => c.name.startsWith(token))
+      .map(c => ({ insert: c.name, label: c.name, desc: c.desc }));
+    // hide once the only match is exactly what's typed
+    if (items.length && !(items.length === 1 && items[0].insert === token)) {
+      comp = { kind: '/', token, items, sel: 0, ctx };
     }
+  } else if (at) {
+    const token = at[1];
+    const data = ctx.getData();
+    const files = fuzzyFilter((data && data.files) || [], token.slice(1), 6);
+    if (files.length) comp = { kind: '@', token, items: files.map(f => ({ insert: f, label: f })), sel: 0, ctx };
   }
   if (!comp) { hidePopup(ctx.popupEl); return; }
   renderComp();
@@ -1447,8 +1448,8 @@ function acceptCompletion() {
   if (!comp || !comp.items.length) return;
   const it = comp.items[comp.sel];
   const t = comp.ctx.inputEl, popup = comp.ctx.popupEl;
-  const val = t.value.slice(0, t.value.length - comp.token.length);
-  t.value = (comp.kind === '@' ? val + it.insert : it.insert) + ' ';
+  const before = t.value.slice(0, t.value.length - comp.token.length);
+  t.value = before + it.insert + ' ';
   comp = null; hidePopup(popup);
   if (t.id === 'prompt') autosize(t);
   t.focus(); t.setSelectionRange(t.value.length, t.value.length);

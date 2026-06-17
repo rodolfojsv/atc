@@ -47,18 +47,28 @@ func (m *Model) syncCompletion() {
 	if val == "" {
 		return
 	}
-	// Slash commands: only as the very first token. atc's own commands
-	// first, then the session's loaded commands and skills (Claude and
-	// Copilot both invoke these; verified working in headless mode).
-	if strings.HasPrefix(val, "/") && !strings.ContainsAny(val, " \n") {
+	// Completion targets the token at the cursor (end of the input): a
+	// "/command" or "@file", each preceded by start or whitespace — so a
+	// slash works mid-prompt or on a later line, not just as the first
+	// character. atc's own commands come first, then the session's loaded
+	// commands and skills (Claude and Copilot both invoke these).
+	fields := strings.FieldsFunc(val, func(r rune) bool { return r == ' ' || r == '\n' || r == '\t' })
+	if len(fields) == 0 {
+		return
+	}
+	last := fields[len(fields)-1]
+	if !strings.HasSuffix(val, last) { // cursor sits past the token (trailing space)
+		return
+	}
+	if strings.HasPrefix(last, "/") {
 		var items []string
 		for _, c := range slashCommands {
-			if strings.HasPrefix(c.name, val) {
+			if strings.HasPrefix(c.name, last) {
 				items = append(items, c.name+"  —  "+c.desc)
 			}
 		}
 		for _, c := range m.backendCommands() {
-			if strings.HasPrefix(c.name, val) {
+			if strings.HasPrefix(c.name, last) {
 				desc := c.desc
 				if desc == "" {
 					desc = "repo command"
@@ -66,24 +76,17 @@ func (m *Model) syncCompletion() {
 				items = append(items, c.name+"  —  "+desc)
 			}
 		}
-		if len(items) > 0 && !(len(items) == 1 && strings.HasPrefix(items[0], val+" ")) {
-			m.comp = completion{active: true, kind: '/', token: val, items: items}
+		if len(items) > 0 && !(len(items) == 1 && strings.HasPrefix(items[0], last+" ")) {
+			m.comp = completion{active: true, kind: '/', token: last, items: items}
 		}
 		return
 	}
-	// File mention: last whitespace-separated token starting with @.
-	fields := strings.FieldsFunc(val, func(r rune) bool { return r == ' ' || r == '\n' || r == '\t' })
-	if len(fields) == 0 {
-		return
-	}
-	last := fields[len(fields)-1]
-	if !strings.HasPrefix(last, "@") || !strings.HasSuffix(val, last) {
-		return
-	}
-	query := strings.TrimPrefix(last, "@")
-	items := fuzzyFilter(m.sessionFiles(), query, maxCompletionItems)
-	if len(items) > 0 {
-		m.comp = completion{active: true, kind: '@', token: last, items: items}
+	if strings.HasPrefix(last, "@") {
+		query := strings.TrimPrefix(last, "@")
+		items := fuzzyFilter(m.sessionFiles(), query, maxCompletionItems)
+		if len(items) > 0 {
+			m.comp = completion{active: true, kind: '@', token: last, items: items}
+		}
 	}
 }
 
@@ -373,13 +376,10 @@ func (m *Model) acceptCompletion() {
 	if m.comp.kind == '/' {
 		choice = strings.SplitN(choice, "  —  ", 2)[0]
 	}
-	val := m.input.Value()
-	val = strings.TrimSuffix(val, m.comp.token)
-	if m.comp.kind == '@' {
-		m.input.SetValue(val + choice + " ")
-	} else {
-		m.input.SetValue(choice + " ")
-	}
+	// Replace just the completed token (it may sit after other text), so
+	// "/" works mid-prompt the same way "@" does.
+	val := strings.TrimSuffix(m.input.Value(), m.comp.token)
+	m.input.SetValue(val + choice + " ")
 	m.comp = completion{}
 	m.syncFocusLayout()
 }
