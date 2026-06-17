@@ -30,6 +30,7 @@ type ScheduleView struct {
 	Repo        string
 	Preset      string
 	Worktree    bool
+	Write       bool // false = read-only (plan mode), the default for schedules
 	HasPrecheck bool
 	NextFire    time.Time // zero when the cron is unparseable or can never fire
 	LastUpdate  time.Time // time of the most recent "updated" fire; zero if never
@@ -60,6 +61,7 @@ func (s *Supervisor) Schedules() []ScheduleView {
 			Repo:        sc.Repo,
 			Preset:      sc.Preset,
 			Worktree:    sc.Worktree,
+			Write:       sc.Write,
 			HasPrecheck: sc.Precheck != "",
 		}
 		if entry, err := sched.Parse(sc.Cron); err == nil {

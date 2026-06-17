@@ -50,6 +50,10 @@ func (m *Model) schedulesContent() string {
 	}
 	var b strings.Builder
 	for _, s := range scheds {
+		mode := styleDim.Render("  [read-only]")
+		if s.Write {
+			mode = styleErrSt.Render("  [writes]")
+		}
 		precheck := ""
 		if s.HasPrecheck {
 			precheck = styleDim.Render("  [precheck]")
@@ -62,7 +66,7 @@ func (m *Model) schedulesContent() string {
 		if !s.LastUpdate.IsZero() {
 			since = "updated " + relTime(s.LastUpdate)
 		}
-		b.WriteString(styleSection.Render("  "+s.Name) + styleDim.Render("  "+s.Cron) + precheck + "\n")
+		b.WriteString(styleSection.Render("  "+s.Name) + styleDim.Render("  "+s.Cron) + mode + precheck + "\n")
 		b.WriteString(styleDim.Render(fmt.Sprintf("    %s · %s", since, next)) + "\n")
 		if len(s.Runs) == 0 {
 			b.WriteString(styleDim.Render("    no runs recorded yet") + "\n")

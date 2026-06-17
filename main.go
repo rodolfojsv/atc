@@ -288,6 +288,7 @@ func fireSchedule(s config.Schedule, sup *supervisor.Supervisor, runLog schedrun
 		Preset:      s.Preset,
 		UseWorktree: s.Worktree,
 		Prompt:      s.Prompt,
+		ReadOnly:    !s.Write, // scheduled tasks are read-only unless write:true
 	})
 	if err != nil {
 		rec(schedrun.Run{Result: schedrun.Errored, Detail: err.Error()})

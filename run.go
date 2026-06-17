@@ -69,6 +69,9 @@ func cmdRun(argv []string) int {
 				if !opts.UseWorktree {
 					opts.UseWorktree = s.Worktree
 				}
+				// Scheduled tasks run read-only (plan mode) unless the
+				// schedule opts in with write:true.
+				opts.ReadOnly = !s.Write
 				precheck = s.Precheck
 				found = true
 				break

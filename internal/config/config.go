@@ -31,6 +31,13 @@ type Schedule struct {
 	Repo     string `json:"repo"`
 	Worktree bool   `json:"worktree,omitempty"`
 	Prompt   string `json:"prompt"`
+	// Write opts a scheduled task out of read-only mode. Scheduled tasks
+	// run in the backend's plan/read-only mode by default — they inspect,
+	// summarize, and advise but never modify files or run mutating tools —
+	// so an unattended prompt can't change anything on its own. Set
+	// write:true only for tasks you intend to make changes (and pair it
+	// with an allow-all preset for unattended approval).
+	Write bool `json:"write,omitempty"`
 	// Precheck is an optional shell command run in Repo before each fire.
 	// Exit 0 means "something changed, run the prompt"; a non-zero exit
 	// means "nothing new, skip" — no session is created and no tokens are

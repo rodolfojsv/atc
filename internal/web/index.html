@@ -102,6 +102,7 @@
   .sched .run.no-update .what { color: var(--dim); }
   .sched .runs .none { color: var(--faint); font-size: .82em; font-style: italic; }
   .badge { font-size: .68em; padding: .05em .45em; border-radius: 20px; border: 1px solid var(--line); color: var(--faint); }
+  .badge.warn { color: var(--warn); border-color: var(--warn); }
   .chip { font: inherit; font-size: .72em; padding: .12em .6em; border-radius: 20px; line-height: 1.5;
     border: 1px solid var(--line); background: transparent; color: var(--dim); cursor: pointer; }
   .chip:hover { border-color: var(--accent-dim); }
@@ -965,6 +966,9 @@ function schedHTML(s) {
     + `<span class="caret">${collapsed ? '▸' : '▾'}</span>`
     + `<span class="name">${esc(s.name)}</span>`
     + `<span class="cron">${esc(s.cron)}</span>`
+    + (s.write
+        ? `<span class="badge warn" title="This task can modify files (write:true)">writes</span>`
+        : `<span class="badge" title="Read-only: inspects and advises, never modifies">read-only</span>`)
     + (s.hasPrecheck ? `<span class="badge" title="Only runs when its precheck reports a change">precheck</span>` : '')
     + `<span class="next" title="${escAttr(absTime(s.nextFire))}">${esc(since)} · ${esc(next)}</span>`
     + `</div>`;
