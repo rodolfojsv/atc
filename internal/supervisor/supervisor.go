@@ -803,8 +803,13 @@ func (s *Supervisor) PromptWith(sess *Session, text string, atts []agent.Attachm
 func (s *Supervisor) saveAttachments(sess *Session, atts []agent.Attachment) ([]EntryAttachment, error) {
 	sess.mu.Lock()
 	base := sess.Dir
+	id := sess.id
 	sess.mu.Unlock()
-	dir := filepath.Join(base, ".atc-attachments")
+	// Namespace by session id so sessions that share a working dir — notably
+	// scratch sessions, which all run in ~/.atc/scratch — don't pile into, or
+	// clobber on Kill, one another's attachments.
+	rel := filepath.Join(".atc-attachments", id)
+	dir := filepath.Join(base, rel)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
@@ -823,7 +828,7 @@ func (s *Supervisor) saveAttachments(sess *Session, atts []agent.Attachment) ([]
 		saved[i] = EntryAttachment{
 			Name:      a.Name,
 			MediaType: a.MediaType,
-			Path:      filepath.Join(".atc-attachments", name),
+			Path:      filepath.Join(rel, name),
 		}
 	}
 	return saved, nil
@@ -952,11 +957,19 @@ func (s *Supervisor) Kill(sess *Session, removeWorktree bool) {
 		s.killed[id] = true
 		s.mu.Unlock()
 	}
-	// Drop saved attachments. For a worktree session this lives inside the
-	// worktree removed below, but direct/scratch sessions keep their dir,
-	// so clean it up explicitly either way.
+	// Drop this session's saved attachments. For a worktree session this lives
+	// inside the worktree removed below, but direct/scratch sessions keep their
+	// dir, so clean it up explicitly either way. Remove only this session's
+	// subfolder — scratch sessions share the dir, so a blanket wipe would take
+	// every scratch session's attachments with it — then drop the parent only
+	// if it's now empty.
 	if dir != "" {
-		_ = os.RemoveAll(filepath.Join(dir, ".atc-attachments"))
+		if id != "" {
+			_ = os.RemoveAll(filepath.Join(dir, ".atc-attachments", id))
+			_ = os.Remove(filepath.Join(dir, ".atc-attachments")) // succeeds only if empty
+		} else {
+			_ = os.RemoveAll(filepath.Join(dir, ".atc-attachments"))
+		}
 	}
 	if removeWorktree && worktree != "" {
 		if err := s.trees.Remove(repo, worktree, branch); err != nil {
