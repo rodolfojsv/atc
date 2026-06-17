@@ -512,6 +512,26 @@ func (m *Model) viewBoard() string {
 	title := styleTitle.Render("atc — agent traffic control")
 	b.WriteString(title + "\n\n")
 
+	// Build the fixed footer block up front so its real height (the keybar
+	// wraps on narrow terminals) can be subtracted from the space left for
+	// the session list.
+	var footerBuf strings.Builder
+	footerBuf.WriteString("\n")
+	if m.flash != "" {
+		footerBuf.WriteString(styleFlash.Render("  "+m.flash) + "\n")
+	}
+	today, month := m.sup.Spend()
+	footer := styleDim.Render("  spend today " + spendLabel(today) + " · month " + spendLabel(month))
+	if sess := m.selected(); sess != nil {
+		if model := sess.View().Model; model != "" {
+			footer = rightAlign(m.width, footer, styleDim.Render("model: "+model))
+		}
+	}
+	footerBuf.WriteString(footer + "\n")
+	footerBuf.WriteString("\n" + keybar(
+		"enter", "attach", "n", "new", "a", "approve", "p", "pin", "c", "category", "r", "rename", "d", "diff", "e", "export", "s", "schedules", "A", "auto⚡", "x", "abort", "K", "kill", "q", "quit"))
+	footerStr := footerBuf.String()
+
 	groups := groupBoard(m.sup.Sessions())
 	if len(groups) == 0 {
 		b.WriteString(styleDim.Render("  no sessions — press ") + styleKey.Render("[n]") + styleDim.Render(" to launch an agent") + "\n")
@@ -523,33 +543,66 @@ func (m *Model) viewBoard() string {
 		// Section headers appear only once the user has organized things:
 		// a single Uncategorized group renders flat, exactly as before.
 		showHeaders := len(groups) > 1 || groups[0].title != "Uncategorized"
+
+		// Collect every body line, noting which one the cursor sits on, so
+		// the list can be windowed to the terminal height. Without this the
+		// rows simply overflow and the top sessions scroll off-screen with
+		// no way to reach them.
+		var lines []string
+		cursorLine := 0
 		idx := 0
 		for _, g := range groups {
 			if showHeaders {
-				b.WriteString(styleSection.Render("  "+g.title) + styleDim.Render(fmt.Sprintf("  (%d)", len(g.sessions))) + "\n")
+				lines = append(lines, styleSection.Render("  "+g.title)+styleDim.Render(fmt.Sprintf("  (%d)", len(g.sessions))))
 			}
 			for _, sess := range g.sessions {
-				b.WriteString(m.sessionRow(sess.View(), idx == m.cursor, nameW, dirW, tokW, costW, ctxW) + "\n")
+				if idx == m.cursor {
+					cursorLine = len(lines)
+				}
+				lines = append(lines, m.sessionRow(sess.View(), idx == m.cursor, nameW, dirW, tokW, costW, ctxW))
 				idx++
 			}
 		}
-	}
 
-	b.WriteString("\n")
-	if m.flash != "" {
-		b.WriteString(styleFlash.Render("  "+m.flash) + "\n")
-	}
-	today, month := m.sup.Spend()
-	footer := styleDim.Render("  spend today " + spendLabel(today) + " · month " + spendLabel(month))
-	if sess := m.selected(); sess != nil {
-		if model := sess.View().Model; model != "" {
-			footer = rightAlign(m.width, footer, styleDim.Render("model: "+model))
+		// Chrome above the list (title + blank + header) plus the measured
+		// footer block; whatever remains is the visible window.
+		avail := m.height - 3 - lipgloss.Height(footerStr)
+		for _, ln := range windowLines(lines, cursorLine, avail) {
+			b.WriteString(ln + "\n")
 		}
 	}
-	b.WriteString(footer + "\n")
-	b.WriteString("\n" + keybar(
-		"enter", "attach", "n", "new", "a", "approve", "p", "pin", "c", "category", "r", "rename", "d", "diff", "e", "export", "s", "schedules", "A", "auto⚡", "x", "abort", "K", "kill", "q", "quit"))
+
+	b.WriteString(footerStr)
 	return b.String()
+}
+
+// windowLines clips body lines to avail rows, keeping the cursorLine row
+// visible by scrolling around it. When content is hidden it replaces the
+// edge rows with "N more" markers so the user knows to scroll.
+func windowLines(lines []string, cursorLine, avail int) []string {
+	if avail < 3 {
+		avail = 3
+	}
+	if len(lines) <= avail {
+		return lines
+	}
+	start := cursorLine - avail/2
+	if start < 0 {
+		start = 0
+	}
+	if maxStart := len(lines) - avail; start > maxStart {
+		start = maxStart
+	}
+	end := start + avail
+	out := make([]string, avail)
+	copy(out, lines[start:end])
+	if start > 0 {
+		out[0] = styleDim.Render(fmt.Sprintf("  ↑ %d more", start+1))
+	}
+	if end < len(lines) {
+		out[len(out)-1] = styleDim.Render(fmt.Sprintf("  ↓ %d more", len(lines)-end+1))
+	}
+	return out
 }
 
 // sessionRow renders one board row for a session view.
