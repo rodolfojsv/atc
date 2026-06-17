@@ -84,8 +84,7 @@ const (
 	quiescence   = 1500 * time.Millisecond // idle = no new transcript for this long while not "working"
 	idDiscovery  = 8 * time.Second         // how long to wait for the session jsonl to appear
 	readyTimeout = 30 * time.Second        // how long to wait for the TUI to accept input after launch
-	sendKeyDelay = 150 * time.Millisecond  // pause between typing a prompt and pressing Enter
-	readySettle  = 600 * time.Millisecond  // extra wait after ready chrome appears, so input is truly live
+	readySettle  = 1500 * time.Millisecond // extra wait after ready chrome appears, so input is truly live
 )
 
 // readyMarkers are chrome the claude TUI shows once it is up and accepting
@@ -209,10 +208,43 @@ func (s *session) Send(ctx context.Context, prompt string) error {
 	if err := s.tm.SendText(ctx, name, prompt); err != nil {
 		return err
 	}
-	// Some TUIs drop an Enter that arrives in the same instant as the pasted
-	// text; a short pause makes submission reliable.
-	time.Sleep(sendKeyDelay)
+	// Wait until the input actually reflects what we typed before submitting.
+	// A still-settling TUI (e.g. a fresh session right after a slow MCP-laden
+	// boot) can lag behind a multi-line paste; pressing Enter on a fixed timer
+	// then submits only the fragment it had rendered — which is how an
+	// attachment prompt lost its text and kept just the image path.
+	if !s.confirmInput(ctx, name, prompt) {
+		tracef("Send id=%s WARNING: input did not reflect prompt before submit", s.id)
+	}
 	return s.tm.SendEnter(ctx, name)
+}
+
+// confirmInput polls until the pane shows the start of the prompt we just
+// typed (or a short deadline elapses), so Enter isn't pressed before a
+// slow/booting TUI has finished accepting a multi-line prompt.
+func (s *session) confirmInput(ctx context.Context, name, prompt string) bool {
+	probe := prompt
+	if i := strings.IndexByte(probe, '\n'); i >= 0 {
+		probe = probe[:i]
+	}
+	probe = strings.TrimSpace(probe)
+	if len(probe) > 40 {
+		probe = probe[:40]
+	}
+	if probe == "" {
+		return true
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if s.isClosed() {
+			return false
+		}
+		if pane, err := s.tm.Capture(ctx, name, tmux.CaptureOpts{}); err == nil && strings.Contains(pane, probe) {
+			return true
+		}
+		time.Sleep(pollInterval)
+	}
+	return false
 }
 
 // isStarted / markStarted guard the started flag for callers that no longer
