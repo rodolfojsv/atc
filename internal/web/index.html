@@ -316,6 +316,7 @@
         <div>
           <label class="fld">First prompt <span style="text-transform:none">(optional — you can attach images)</span></label>
           <div class="thumbs" id="formThumbs"></div>
+          <div id="fcompletion" class="completion hidden"></div>
           <div class="inputbar" id="formBar">
             <textarea id="fPrompt" placeholder="Describe the task… paste or attach a screenshot" rows="2"></textarea>
             <button class="icon ghost" title="attach image" onclick="formFile.click()">📎</button>
@@ -1017,7 +1018,7 @@ function showBoard() {
   window.scrollTo(0, boardScroll); // land where you left, not at the bottom
   pollBoard(); timer = setInterval(pollBoard, 2000);
 }
-function toggleNew() { $('newSheet').classList.toggle('hidden'); }
+function toggleNew() { $('newSheet').classList.toggle('hidden'); resetCompletion(); }
 
 function baseName(p) { const s = String(p).replace(/[\\/]+$/, ''); const i = Math.max(s.lastIndexOf('/'), s.lastIndexOf('\\')); return i >= 0 ? s.slice(i + 1) : s; }
 function onRepoChange() {
@@ -1051,7 +1052,7 @@ async function createSession() {
     saveWatch(); saveMuted();
     if (text.trim() || atts.length) pendingFirst = { name: s.name, text, atts };
     $('newSheet').classList.add('hidden');
-    $('fName').value = ''; $('fPrompt').value = ''; formAttachments = []; renderThumbs();
+    $('fName').value = ''; $('fPrompt').value = ''; formAttachments = []; renderThumbs(); resetCompletion();
     openSession(s.name);
   } catch (e) { alert(e.message); }
 }
@@ -1072,17 +1073,24 @@ function openSession(name) {
   const d = drafts[name] || { text: '', atts: [] };
   $('prompt').value = d.text || '';
   attachments = (d.atts || []).slice();
-  comp = null; renderComp(); // drop any stale completion popup from the prior session
+  resetCompletion(); // drop any stale completion popup from the prior session
   autosize($('prompt')); renderThumbs();
   pollFocus(); timer = setInterval(pollFocus, 1000);
 }
 
 let lastRender = '';
 let freshOpen = false; // first render after opening a session jumps to the latest message
+// Scroll math goes through the real scrolling element: `html, body` are
+// pinned to viewport height here, so document.body.offsetHeight measures
+// the viewport, not the content — using it made "at bottom" almost
+// always true and let new content yank the page while you read.
+const FOLLOW_SLOP = 120; // px from the bottom still counts as "following"
+function scroller() { return document.scrollingElement || document.documentElement; }
+function distFromBottom() { const e = scroller(); return e.scrollHeight - e.scrollTop - e.clientHeight; }
 // Tapping the pill (or scrolling to the bottom yourself) dismisses it and follows again.
-function jumpToLatest() { window.scrollTo(0, document.body.scrollHeight); $('newpill').classList.add('hidden'); }
+function jumpToLatest() { const e = scroller(); e.scrollTop = e.scrollHeight; $('newpill').classList.add('hidden'); }
 window.addEventListener('scroll', () => {
-  if (window.innerHeight + window.scrollY >= document.body.offsetHeight - 120) $('newpill').classList.add('hidden');
+  if (distFromBottom() <= FOLLOW_SLOP) $('newpill').classList.add('hidden');
 }, { passive: true });
 async function pollFocus() {
   if (!current) return;
@@ -1107,17 +1115,17 @@ async function pollFocus() {
   const html = data.transcript.map(renderEntry).join('');
   if (html !== lastRender) {
     const el = $('transcript');
-    const prevY = window.scrollY;
-    const stick = freshOpen || window.innerHeight + window.scrollY >= document.body.offsetHeight - 120;
+    const sc = scroller();
+    const prevTop = sc.scrollTop;
+    const stick = freshOpen || distFromBottom() <= FOLLOW_SLOP;
     el.innerHTML = html; lastRender = html; freshOpen = false;
     linkifyFiles(el); // make .md path mentions clickable (DOM only changes, lastRender stays the string)
-    // Replacing innerHTML wholesale collapses the document height for an instant,
-    // which makes the browser clamp scrollY and lose the reading position. Only
-    // follow new content when already at the bottom; otherwise pin the user to
-    // exactly where they were so a streaming/new message can't yank them away,
-    // and surface a "↓ new messages" pill they can tap to catch up on demand.
-    if (stick) { window.scrollTo(0, document.body.scrollHeight); $('newpill').classList.add('hidden'); }
-    else { window.scrollTo(0, prevY); $('newpill').classList.remove('hidden'); }
+    // Only follow new content when already at the bottom. Otherwise leave the
+    // reading position untouched — restore it only if the innerHTML swap made the
+    // browser clamp scrollTop, so a 1s poll can't fight an active scroll — and
+    // surface a "↓ new messages" pill they can tap to catch up on demand.
+    if (stick) { sc.scrollTop = sc.scrollHeight; $('newpill').classList.add('hidden'); }
+    else { if (sc.scrollTop !== prevTop) sc.scrollTop = prevTop; $('newpill').classList.remove('hidden'); }
   }
 
   // agent question (Copilot ask_user): quick-reply buttons + freeform box
@@ -1360,12 +1368,13 @@ function sendPrompt() {
   if (!text.trim() && !attachments.length) return;
   const atts = attachments.slice(); attachments = [];
   $('prompt').value = ''; autosize($('prompt')); renderThumbs();
-  comp = null; renderComp();
+  resetCompletion();
   histIdx = -1; histDraft = '';
   sendMessage(text, atts);
 }
 function autosize(t) { t.style.height = 'auto'; t.style.height = Math.min(t.scrollHeight, 9 * 16) + 'px'; }
-$('prompt').addEventListener('input', e => { autosize(e.target); histIdx = -1; syncCompletion(); }); // editing leaves recall mode
+$('prompt').addEventListener('input', e => { autosize(e.target); histIdx = -1; syncCompletion(mainCtx); }); // editing leaves recall mode
+$('fPrompt').addEventListener('input', () => syncCompletion(formCtx));
 
 // ---- "/" command + "@" file completion ----
 // Lists come from /complete once per session and are filtered locally,
@@ -1378,35 +1387,54 @@ function ensureCompData() {
   api('/api/sessions/' + encodeURIComponent(current) + '/complete')
     .then(d => { compData = d; compDataFor = current; })
     .catch(() => {})
-    .finally(() => { compFetching = false; if (current) syncCompletion(); });
+    .finally(() => { compFetching = false; if (current) syncCompletion(mainCtx); });
 }
-function syncCompletion() {
+// Completion runs against a context: which textarea, which popup div,
+// and where its data comes from. The focus composer uses the running
+// session's lists; the new-session form uses the picked repo+backend's
+// filesystem lists (no session exists yet).
+const mainCtx = {
+  get inputEl() { return $('prompt'); },
+  get popupEl() { return $('completion'); },
+  getData() { ensureCompData(); return compData; },
+};
+const formCtx = {
+  get inputEl() { return $('fPrompt'); },
+  get popupEl() { return $('fcompletion'); },
+  getData() { ensureFormCompData(); return formCompData; },
+};
+function hidePopup(el) { el.classList.add('hidden'); el.innerHTML = ''; }
+function resetCompletion() { comp = null; hidePopup($('completion')); hidePopup($('fcompletion')); }
+function syncCompletion(ctx) {
   comp = null;
-  const val = $('prompt').value;
-  if (!val) { renderComp(); return; }
-  if (val[0] === '/' && !/\s/.test(val)) {
-    ensureCompData();
-    const items = (compData && compData.commands || [])
-      .filter(c => c.name.startsWith(val))
-      .map(c => ({ insert: c.name, label: c.name, desc: c.desc }));
-    // hide once the only match is exactly what's typed
-    if (items.length && !(items.length === 1 && items[0].insert === val)) {
-      comp = { kind: '/', token: val, items, sel: 0 };
-    }
-  } else {
-    const m = val.match(/(?:^|\s)(@\S*)$/);
-    if (m) {
-      ensureCompData();
-      const token = m[1];
-      const files = fuzzyFilter((compData && compData.files) || [], token.slice(1), 6);
-      if (files.length) comp = { kind: '@', token, items: files.map(f => ({ insert: f, label: f })), sel: 0 };
+  const val = ctx.inputEl.value;
+  if (val) {
+    if (val[0] === '/' && !/\s/.test(val)) {
+      const data = ctx.getData();
+      const items = (data && data.commands || [])
+        .filter(c => c.name.startsWith(val))
+        .map(c => ({ insert: c.name, label: c.name, desc: c.desc }));
+      // hide once the only match is exactly what's typed
+      if (items.length && !(items.length === 1 && items[0].insert === val)) {
+        comp = { kind: '/', token: val, items, sel: 0, ctx };
+      }
+    } else {
+      const m = val.match(/(?:^|\s)(@\S*)$/);
+      if (m) {
+        const data = ctx.getData();
+        const token = m[1];
+        const files = fuzzyFilter((data && data.files) || [], token.slice(1), 6);
+        if (files.length) comp = { kind: '@', token, items: files.map(f => ({ insert: f, label: f })), sel: 0, ctx };
+      }
     }
   }
+  if (!comp) { hidePopup(ctx.popupEl); return; }
   renderComp();
 }
 function renderComp() {
-  const el = $('completion');
-  if (!comp || !comp.items.length) { el.classList.add('hidden'); el.innerHTML = ''; return; }
+  if (!comp) return;
+  const el = comp.ctx.popupEl;
+  if (!comp.items.length) { hidePopup(el); return; }
   el.innerHTML = comp.items.map((it, i) => {
     const body = comp.kind === '/' && it.desc
       ? esc(it.label) + ' <span class="cdesc">— ' + esc(it.desc) + '</span>'
@@ -1418,11 +1446,27 @@ function renderComp() {
 function acceptCompletion() {
   if (!comp || !comp.items.length) return;
   const it = comp.items[comp.sel];
-  const t = $('prompt');
+  const t = comp.ctx.inputEl, popup = comp.ctx.popupEl;
   const val = t.value.slice(0, t.value.length - comp.token.length);
   t.value = (comp.kind === '@' ? val + it.insert : it.insert) + ' ';
-  comp = null; renderComp(); autosize(t);
+  comp = null; hidePopup(popup);
+  if (t.id === 'prompt') autosize(t);
   t.focus(); t.setSelectionRange(t.value.length, t.value.length);
+}
+// The new-session form has no session, so its "/" and "@" lists come
+// from a session-less endpoint keyed by the chosen repo + backend.
+let formCompData = null, formCompKey = null, formCompFetching = false;
+function formRepo() { let r = $('fRepo').value; if (r === '__custom__') r = ($('fRepoCustom').value || '').trim(); return r; }
+function ensureFormCompData() {
+  const repo = formRepo(); if (!repo) return;
+  const backend = $('fBackend').value, key = backend + '\n' + repo;
+  if (formCompKey === key && formCompData) return;
+  if (formCompFetching) return;
+  formCompFetching = true;
+  api('/api/complete?dir=' + encodeURIComponent(repo) + '&backend=' + encodeURIComponent(backend))
+    .then(d => { formCompData = d; formCompKey = key; })
+    .catch(() => {})
+    .finally(() => { formCompFetching = false; syncCompletion(formCtx); });
 }
 // Subsequence fuzzy match, ranked like the TUI: basename hits first,
 // then earlier/shorter matches.
@@ -1451,12 +1495,12 @@ function subseqAt(s, q) {
 // Capture phase on document so this runs before the prompt's history-nav
 // and Enter-to-send handlers and can swallow the key while completing.
 document.addEventListener('keydown', e => {
-  if (!comp || document.activeElement !== $('prompt')) return;
+  if (!comp || document.activeElement !== comp.ctx.inputEl) return;
   const n = comp.items.length;
   if (e.key === 'ArrowDown') { comp.sel = (comp.sel + 1) % n; renderComp(); }
   else if (e.key === 'ArrowUp') { comp.sel = (comp.sel - 1 + n) % n; renderComp(); }
   else if (e.key === 'Enter' || e.key === 'Tab') { acceptCompletion(); }
-  else if (e.key === 'Escape') { comp = null; renderComp(); }
+  else if (e.key === 'Escape') { const el = comp.ctx.popupEl; comp = null; hidePopup(el); }
   else return;
   e.preventDefault(); e.stopPropagation();
 }, true);

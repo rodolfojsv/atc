@@ -36,13 +36,13 @@ Design priorities, in order:
 - **Attach / detach** — focus any session to watch its stream and send prompts; detach back to the board without interrupting it. Assistant replies render as **markdown** (headings, bold, code blocks — like Copilot CLI); your prompts are highlighted; tool calls and atc notices are dimmed one-liners (`⚙ bash · go test ./...`) so the analysis stays readable.
 - **Worktree-per-session** — one keypress starts an agent in a fresh git worktree; cleanup on close. Parallel agents never collide in the same checkout.
 - **Diff review & merge** — `d` shows everything a session changed (vs the commit it branched from, untracked files included); `m` commits and merges it back into the branch it came from, aborting cleanly on conflicts. Agents propose, you dispose.
-- **Read-only sessions** — the Mode toggle on the form runs the agent in the backend's plan mode (Copilot `plan` agent-mode / Claude Code `--permission-mode plan`): it can inspect but structurally cannot modify. Shown as 🔒 on the board. Ideal for triage/review schedules.
+- **Read-only sessions** — the Mode toggle on the form runs the agent in the backend's plan mode (Copilot `plan` agent-mode / Claude Code `--permission-mode plan`): it can inspect but structurally cannot modify. Shown as 🔒 on the board. **Scheduled tasks default to this mode** (override per schedule with `"write": true`), so an unattended prompt can't change anything on its own.
 - **Obsidian/markdown export** — `e` exports a session transcript as a markdown note with YAML frontmatter (tokens, cost, repo, branch); `atc run --export` (or `"autoExport": true`) does it for scheduled runs. Point `exportDir` inside your Obsidian vault and notes land in the vault. To push them to other devices immediately, pair with `hooks/obsidian-sync.ps1`, which triggers LiveSync's replicate command via an `obsidian://` Advanced URI on every `finished` event.
 - **Spend tracking** — every usage event is appended to `~/.atc/spend.jsonl`; the board footer shows today's and this month's cumulative AIC/$ across all runs, including headless ones.
 - **Approval policy** — per-preset `prompt` (default) or `allow-all`, where allow-all is still gated by a deterministic deny-list (destructive commands, credential exfiltration, pipe-to-shell) checked *before* any auto-approval. The permission modal's `s` adds a session-scoped rule ("always allow `go` commands here") for anything between approve-once and full auto-approve.
 - **Hooks** — map events (`session-started`, `waiting-on-permission`, `finished`, `error`, `tool-call`) to commands in config. Built-in Windows toast notifications; sample hooks for Teams webhooks and tool-call audit logs.
 - **Usage panel** — per-session input/output token totals, **billed AI Credits** (AIC column — actual nano-AIU reported by the runtime per request; there is no fixed tokens→AIC rate, it varies by model multiplier and billing batches), and a context-fill gauge, powered by the SDK's `AssistantUsage` / `SessionUsageInfo` events.
-- **Scheduled prompts** — cron-style schedules that launch a session with a canned prompt and preset: nightly dependency audit, morning PR triage. Results flow through the same board, notifications, and hooks.
+- **Scheduled prompts** — cron-style schedules that launch a session with a canned prompt and preset: nightly dependency audit, morning PR triage. **Read-only by default** (plan mode — inspect, don't modify) unless a schedule sets `"write": true`. Each schedule can carry a **`precheck`**: a shell command run first, so a firing where *nothing changed* is skipped — **no session, no tokens spent**. Outcomes (updated / no-update / error) land in a per-task **run timeline** in the **Scheduled** band on the board. Results flow through the same board, notifications, and hooks. See [Scheduled prompts](#scheduled-prompts).
 - **Web UI (optional)** — `atc --serve` adds a browser frontend over the *same* live sessions the TUI drives; `atc serve` runs it headless (no terminal). Everything works from a phone: the live board, streaming transcripts, prompting, and the **approve / deny / always-allow** permission flow. Plus **image attachments** (pick or paste a screenshot — inlined for Claude, saved + path-referenced otherwise), **markdown rendering** with GFM tables, **diff + merge** of a worktree session, **mid-session model switch**, **clickable file mentions** (scoped to the session dir), and an in-app link-preview modal. Localhost-bound and bearer-token protected — reach it from elsewhere via `tailscale serve` (tailnet-only HTTPS), never a public listener. See [Web UI](#web-ui).
 - **Android app (optional)** — a thin [Capacitor](https://capacitorjs.com) shell that loads the web UI over your tailnet, installable from a QR in the web "App" tab. A **Servers** screen stores multiple atc instances and switches between them; hardware Back maps to in-app navigation. The app reuses the web UI verbatim, so every feature above is on your phone. Build it yourself with `scripts/build-apk.sh` (Dockerized, self-signed). See [Android app & push notifications](#android-app--push-notifications).
 - **Phone push (ntfy)** — background notifications via [ntfy](https://ntfy.sh) (self-hosted or ntfy.sh): when an agent **needs approval / finishes / errors**, atc makes an outbound POST and the ntfy app alerts your phone — even with atc and the browser closed. Scoped to the sessions you started (per-device topic) with a server-wide default topic as a catch-all, and **Approve/Deny buttons right on the notification**. Outbound-only — no inbound listener, no public tunnel.
@@ -106,9 +106,10 @@ Note: real `config.json` must be plain JSON — the `//` comments below are illu
     "finished": ["powershell", "-File", "hooks/teams-webhook.ps1"]
   },
   "schedules": [
-    { "name": "pr-triage", "cron": "0 9 * * 1-5", "preset": "default", "repo": "C:/dev/app",
-      "worktree": false,
-      "prompt": "Triage open PRs assigned to me and summarize what needs my attention." }
+    { "name": "pr-triage", "cron": "*/15 9-18 * * 1-5", "preset": "default", "repo": "C:/dev/app",
+      "precheck": "~/scripts/check-prs.sh",        // skip (no tokens) unless something changed
+      // read-only by default; add "write": true to let a task modify files
+      "prompt": "Summarize what's new/unresolved on my open PRs and what needs my attention." }
   ]
 }
 ```
@@ -132,8 +133,39 @@ Each task runs `atc run --schedule <name>` — a **one-shot headless session**: 
 **2. In-process scheduler (atc must be open at the firing minute):** the same `schedules` entries fire inside a running atc — useful when atc lives in a tmux session anyway (e.g. under WSL). Checked once per minute; missed minutes are skipped; config is read at startup.
 
 Notes for both:
-- **Headless/scheduled sessions can't answer permission prompts.** In `atc run`, anything the preset doesn't pre-approve is denied with an explanatory message; in-process scheduled sessions block at ⚠ WAITING instead. For unattended work use an `allow-all` preset (deny-list still applies), ideally with `"worktree": true` so it can't touch your main checkout. For look-don't-touch jobs (PR triage that only reports), say so in the prompt — and the run still lands as a session you can continue interactively to apply anything it suggested.
-- **Every firing spends credits** — sanity-check the cadence before leaving an aggressive schedule running.
+- **Scheduled tasks are read-only by default** (the backend's plan mode — inspect, summarize, advise, but structurally can't modify), so a look-don't-touch job like PR/Jira triage needs nothing extra. For a task that *should* change files, set `"write": true` on the schedule and pair it with an `allow-all` preset (deny-list still applies), ideally with `"worktree": true` so it can't touch your main checkout.
+- **Headless/scheduled sessions can't answer permission prompts.** In `atc run`, anything the preset doesn't pre-approve is denied with an explanatory message; in-process scheduled sessions block at ⚠ WAITING instead. Either way the run still lands as a session you can continue interactively to apply anything it suggested.
+- **Un-gated firings spend credits** — but a `precheck` makes the quiet ones free (see below). Still sanity-check the cadence before leaving an aggressive schedule running.
+
+### Precondition gates & token savings
+
+Scheduled prompts get expensive when every firing wakes the agent — yet most of the time *nothing has changed*. A **`precheck`** fixes that: a shell command run **before** the prompt, in the schedule's `repo` directory (`sh -c` on Linux/macOS, `cmd /c` on Windows).
+
+- **exit 0** → something changed → run the prompt as usual.
+- **non-zero exit** → nothing new → **skip**: no session is created and **no tokens are spent**.
+- **fails to start** (missing script, bad dir, >60s) → recorded as an `error` instead of a silent skip.
+
+Every firing's outcome — `updated` / `no-update` / `error` — is appended to `~/.atc/schedule-runs.jsonl` and shown as a per-task **run timeline** in the **Scheduled** band of the board (web, and the TUI overlay via `s`). So you can see "checked at 12:15, no changes" without it ever costing a token; `updated` rows deep-link to the session that ran.
+
+A minimal precheck is just *fetch a cheap signal → compare to stored state → exit 0/1*:
+
+```bash
+#!/usr/bin/env bash
+# exit 0 = changed (run the prompt), exit 1 = nothing new (skip)
+set -euo pipefail
+state="$HOME/.local/state/atc/pr-triage.hash"; mkdir -p "$(dirname "$state")"
+sig=$(gh pr list --author '@me' --state open --json number,reviewDecision,updatedAt | jq -S .)
+new=$(printf '%s' "$sig" | sha256sum | cut -d' ' -f1)
+[ "$new" = "$(cat "$state" 2>/dev/null || true)" ] && exit 1
+printf '%s' "$new" > "$state"; exit 0
+```
+
+The savings compound with **incremental context**: a good precheck doesn't just gate, it writes a *delta* (only what changed since last run) for the prompt to read — so even when the agent does run, it looks at the new comment, not the whole PR. Two patterns this is built for:
+
+- **PR review triage** — list *unresolved* review threads (via GitHub GraphQL, since REST can't see resolution) across your open PRs, flag ones you've likely already fixed, and skip entirely when nothing's new. Over a quiet day that's dozens of free no-op checks instead of dozens of full agent runs.
+- **Jira issue activity** — pull new comments / status changes on an issue (or JQL) and gate the same way.
+
+> Because the delta is text other people wrote, treat it as **untrusted** in the prompt (summarize it, never follow instructions inside it) — which is exactly why scheduled tasks are read-only by default.
 
 ### Setting up your first scheduled task (step by step)
 
@@ -152,9 +184,11 @@ Notes for both:
    "schedules": [
      { "name": "pr-triage", "cron": "0 9 * * 1-5", "preset": "unattended",
        "repo": "C:/dev/app", "worktree": false,
-       "prompt": "Review new comments on my open PRs. Summarize what was said and suggest how I should respond or what to change. Do NOT modify any files." }
+       "prompt": "Review new comments on my open PRs. Summarize what was said and suggest how I should respond or what to change." }
    ]
    ```
+
+   > Read-only is the default, so a pure triage like this needs no `allow-all` preset (use `default`); `unattended` only matters once you set `"write": true`. Add a `precheck` (see [Precondition gates & token savings](#precondition-gates--token-savings)) to make quiet runs free.
 
 3. **Preview the translation** — confirms the cron maps onto Task Scheduler terms:
 

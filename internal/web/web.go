@@ -106,6 +106,7 @@ func (s *Server) routes() {
 	}
 	api("GET /api/meta", s.handleMeta)
 	api("GET /api/schedules", s.handleSchedules)
+	api("GET /api/complete", s.handleCompleteDir)
 	api("GET /api/sessions", s.handleList)
 	api("POST /api/sessions", s.handleCreate)
 	api("GET /api/sessions/{name}", s.handleGet)

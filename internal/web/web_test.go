@@ -7,6 +7,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -57,6 +58,40 @@ func TestAuthRequired(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("query token: status %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestCompleteDirListsSkills(t *testing.T) {
+	_, ts := testServer(t)
+	repo := t.TempDir()
+	skill := filepath.Join(repo, ".claude", "skills", "deploy-app")
+	if err := os.MkdirAll(skill, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skill, "SKILL.md"),
+		[]byte("---\ndescription: ship it\n---\nbody\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	resp := get(t, ts.URL+"/api/complete?token=secret&backend=claude&dir="+url.QueryEscape(repo), "")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	var out completeJSON
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	var found *cmdInfo
+	for i := range out.Commands {
+		if out.Commands[i].Name == "/deploy-app" {
+			found = &out.Commands[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("/deploy-app not in %+v", out.Commands)
+	}
+	if found.Desc != "ship it" {
+		t.Errorf("desc = %q, want %q", found.Desc, "ship it")
 	}
 }
 

@@ -57,26 +57,59 @@ func (s *Server) handleComplete(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, out)
 }
 
-// slashCompletions builds the "/" completion list for a session: the
-// backend's authoritative loaded commands and skills (Claude reports
+// handleCompleteDir serves completion lists for a directory that has no
+// session yet — the new-session form, where the repo and backend are
+// chosen but nothing is running. Only the filesystem can be scanned
+// (built-ins/plugins need a live session), so it returns the repo's
+// commands/skills and file list for "/" and "@" completion.
+func (s *Server) handleCompleteDir(w http.ResponseWriter, r *http.Request) {
+	dir := r.URL.Query().Get("dir")
+	backend := r.URL.Query().Get("backend")
+	out := completeJSON{Commands: []cmdInfo{}, Files: []string{}}
+	if dir != "" {
+		out.Files = s.cachedFiles(dir)
+		out.Skills = skillsInventory(dir)
+		if c := fsCompletions(dir, backend); c != nil {
+			out.Commands = c
+		}
+	}
+	if out.Files == nil {
+		out.Files = []string{}
+	}
+	writeJSON(w, out)
+}
+
+// slashCompletions builds the "/" completion list for a running session:
+// the backend's authoritative loaded commands and skills (Claude reports
 // them in its init event, Copilot via RPC — both include built-in,
-// plugin, user, and repo entries) merged with a filesystem scan of the
-// Claude .claude layout (repo + user) so repo commands/skills appear
-// immediately, with descriptions, even before the agent process starts.
+// plugin, user, and repo entries) merged with the filesystem scan so
+// repo entries appear immediately, with descriptions, even before the
+// agent process starts.
 func slashCompletions(ctx context.Context, sess *supervisor.Session, v supervisor.SessionView) []cmdInfo {
 	m := newCmdMerge()
-	// Filesystem scan only describes the Claude layout; Copilot's
-	// .github assets are surfaced authoritatively by the RPC list below.
-	if v.Backend == "claude" {
-		m.add(repoCommands(v.Dir)...)
-		m.add(claudeSkills(v.Dir)...)
+	m.add(fsCompletions(v.Dir, v.Backend)...)
+	for _, c := range sess.SlashCommands(ctx) {
+		m.add(cmdInfo{Name: "/" + c.Name, Desc: c.Description})
+	}
+	return m.list()
+}
+
+// fsCompletions scans the filesystem for a backend's invocable commands
+// and skills: Claude's .claude layout (repo + ~/.claude) or Copilot's
+// .github/skills. Names carry a leading slash; descriptions come from
+// frontmatter where present.
+func fsCompletions(dir, backend string) []cmdInfo {
+	m := newCmdMerge()
+	switch backend {
+	case "copilot":
+		m.add(githubSkills(dir)...)
+	default: // claude (and an unset backend in the form)
+		m.add(repoCommands(dir)...)
+		m.add(claudeSkills(dir)...)
 		if home, err := os.UserHomeDir(); err == nil {
 			m.add(repoCommands(home)...)
 			m.add(claudeSkills(home)...)
 		}
-	}
-	for _, c := range sess.SlashCommands(ctx) {
-		m.add(cmdInfo{Name: "/" + c.Name, Desc: c.Description})
 	}
 	return m.list()
 }
@@ -115,6 +148,23 @@ func claudeSkills(dir string) []cmdInfo {
 	var out []cmdInfo
 	for _, p := range globAll(filepath.Join(dir, ".claude", "skills", "*", "SKILL.md")) {
 		out = append(out, cmdInfo{Name: "/" + filepath.Base(filepath.Dir(p)), Desc: frontmatterDesc(p)})
+	}
+	return out
+}
+
+// githubSkills lists Copilot's .github/skills (SKILL.md folders or flat
+// .md files) under dir as invocable "/skill" names.
+func githubSkills(dir string) []cmdInfo {
+	var out []cmdInfo
+	for _, p := range globAll(
+		filepath.Join(dir, ".github", "skills", "*", "SKILL.md"),
+		filepath.Join(dir, ".github", "skills", "*.md"),
+	) {
+		name := filepath.Base(filepath.Dir(p))
+		if filepath.Base(p) != "SKILL.md" {
+			name = strings.TrimSuffix(filepath.Base(p), ".md")
+		}
+		out = append(out, cmdInfo{Name: "/" + name, Desc: frontmatterDesc(p)})
 	}
 	return out
 }
