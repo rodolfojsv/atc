@@ -86,6 +86,23 @@
   .section:first-child { margin-top: .2em; }
   .section .caret { color: var(--faint); width: .8em; display: inline-block; }
   .section .cnt { color: var(--faint); font-weight: 400; }
+  /* Scheduled tasks: a card per schedule, expandable to its run timeline. */
+  .sched { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r);
+    padding: .55em .7em; margin-bottom: .5em; }
+  .sched .head { display: flex; align-items: center; gap: .5em; cursor: pointer; user-select: none; -webkit-user-select: none; }
+  .sched .caret { color: var(--faint); width: .8em; display: inline-block; }
+  .sched .name { font-weight: 600; }
+  .sched .cron { color: var(--dim); font-size: .8em; }
+  .sched .next { color: var(--faint); font-size: .78em; margin-left: auto; white-space: nowrap; }
+  .sched .runs { margin: .5em 0 .1em; border-left: 2px solid var(--line); padding-left: .7em; }
+  .sched .run { display: flex; align-items: baseline; gap: .5em; font-size: .82em; padding: .12em 0; }
+  .sched .run .when { color: var(--faint); white-space: nowrap; }
+  .sched .run.updated .what { color: var(--ok); cursor: pointer; text-decoration: underline dotted; }
+  .sched .run.error .what { color: var(--err); }
+  .sched .run.no-update .what { color: var(--dim); }
+  .sched .runs .none { color: var(--faint); font-size: .82em; font-style: italic; }
+  .badge { font-size: .68em; padding: .05em .45em; border-radius: 20px; border: 1px solid var(--line); color: var(--faint); }
+  .badge.warn { color: var(--warn); border-color: var(--warn); }
   .chip { font: inherit; font-size: .72em; padding: .12em .6em; border-radius: 20px; line-height: 1.5;
     border: 1px solid var(--line); background: transparent; color: var(--dim); cursor: pointer; }
   .chip:hover { border-color: var(--accent-dim); }
@@ -148,6 +165,12 @@
   /* composer (focus + new) */
   .composer { position: sticky; bottom: 0; background: linear-gradient(180deg, transparent, var(--bg) 22%);
     padding-top: .5em; padding-bottom: max(.6em, env(safe-area-inset-bottom)); }
+  /* floats just above the composer when new content arrives while scrolled up */
+  .newpill { position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%); margin-bottom: .5em;
+    background: var(--accent-dim); color: #cdddff; border: 1px solid var(--accent); border-radius: 20px;
+    padding: .35em .9em; font-size: .82em; font-weight: 600; cursor: pointer; white-space: nowrap;
+    box-shadow: 0 3px 12px rgba(0,0,0,.45); z-index: 5; }
+  .newpill:hover { background: var(--accent); color: #0f1115; }
   .thumbs { display: flex; gap: .5em; flex-wrap: wrap; margin-bottom: .5em; }
   .thumb { position: relative; border: 1px solid var(--line); border-radius: 9px; overflow: hidden;
     background: var(--bg2); display: flex; align-items: center; }
@@ -293,6 +316,7 @@
         <div>
           <label class="fld">First prompt <span style="text-transform:none">(optional — you can attach images)</span></label>
           <div class="thumbs" id="formThumbs"></div>
+          <div id="fcompletion" class="completion hidden"></div>
           <div class="inputbar" id="formBar">
             <textarea id="fPrompt" placeholder="Describe the task… paste or attach a screenshot" rows="2"></textarea>
             <button class="icon ghost" title="attach image" onclick="formFile.click()">📎</button>
@@ -306,6 +330,7 @@
         <input id="formFile" type="file" multiple accept="image/*" class="hidden">
       </div>
 
+      <div id="schedules"></div>
       <div id="filterBar" class="filterbar"></div>
       <div id="rows"></div>
       <div id="spend"></div>
@@ -317,6 +342,7 @@
       <div id="ask" class="hidden"></div>
       <div id="transcript"></div>
       <div class="composer">
+        <button id="newpill" class="newpill hidden" onclick="jumpToLatest()">↓ new messages</button>
         <div class="thumbs" id="thumbs"></div>
         <div id="completion" class="completion hidden"></div>
         <div class="inputbar" id="focusBar">
@@ -900,11 +926,77 @@ async function setCategory(name) {
     pollBoard();
   } catch (e) { alert(e.message); }
 }
+// --- Scheduled tasks ------------------------------------------------
+// A schedule is a task, not a live session: each fire either spawns a
+// fresh agent (precheck saw a change) or records a free "no updates" run.
+// The card shows the task; expanding it shows the week's run timeline,
+// with updated runs linking to their session.
+let schedList = [];
+let collapsedScheds = new Set(JSON.parse(localStorage.getItem('atc-sched-collapsed') || '[]'));
+function toggleSched(name) {
+  if (collapsedScheds.has(name)) collapsedScheds.delete(name); else collapsedScheds.add(name);
+  localStorage.setItem('atc-sched-collapsed', JSON.stringify([...collapsedScheds]));
+  renderSchedules(schedList);
+}
+function relTime(iso) {
+  if (!iso) return '';
+  const d = (Date.now() - new Date(iso).getTime()) / 1000, future = d < 0, s = Math.abs(d);
+  const [n, unit] = s < 60 ? [s, 's'] : s < 3600 ? [s / 60, 'm'] : s < 86400 ? [s / 3600, 'h'] : [s / 86400, 'd'];
+  const v = Math.max(1, Math.round(n));
+  return future ? `in ${v}${unit}` : `${v}${unit} ago`;
+}
+function absTime(iso) { return iso ? new Date(iso).toLocaleString() : ''; }
+function runRow(r) {
+  let what;
+  if (r.result === 'updated') {
+    what = r.session
+      ? `<span class="what" onclick="openSession('${jsArg(r.session)}')">↗ ${esc(r.session)}</span>`
+      : `<span class="what">updated</span>`;
+  } else if (r.result === 'error') {
+    what = `<span class="what" title="${escAttr(r.detail || '')}">✗ ${esc(r.detail || 'error')}</span>`;
+  } else {
+    what = `<span class="what">no updates</span>`;
+  }
+  return `<div class="run ${esc(r.result)}"><span class="when" title="${escAttr(absTime(r.time))}">${esc(relTime(r.time))}</span>${what}</div>`;
+}
+function schedHTML(s) {
+  const collapsed = collapsedScheds.has(s.name);
+  const since = s.lastUpdate ? `updated ${relTime(s.lastUpdate)}` : 'no updates yet';
+  const next = s.nextFire ? `next ${relTime(s.nextFire)}` : 'never';
+  const head = `<div class="head" onclick="toggleSched('${jsArg(s.name)}')">`
+    + `<span class="caret">${collapsed ? '▸' : '▾'}</span>`
+    + `<span class="name">${esc(s.name)}</span>`
+    + `<span class="cron">${esc(s.cron)}</span>`
+    + (s.write
+        ? `<span class="badge warn" title="This task can modify files (write:true)">writes</span>`
+        : `<span class="badge" title="Read-only: inspects and advises, never modifies">read-only</span>`)
+    + (s.hasPrecheck ? `<span class="badge" title="Only runs when its precheck reports a change">precheck</span>` : '')
+    + `<span class="next" title="${escAttr(absTime(s.nextFire))}">${esc(since)} · ${esc(next)}</span>`
+    + `</div>`;
+  let body = '';
+  if (!collapsed) {
+    const runs = s.runs || [];
+    body = `<div class="runs">` +
+      (runs.length ? runs.map(runRow).join('') : `<div class="none">no runs recorded yet</div>`) +
+      `</div>`;
+  }
+  return `<div class="sched">${head}${body}</div>`;
+}
+function renderSchedules(list) {
+  schedList = list || [];
+  const el = $('schedules');
+  if (!schedList.length) { el.innerHTML = ''; return; }
+  el.innerHTML = `<div class="section" style="cursor:default"><span>Scheduled</span>` +
+    `<span class="cnt">${schedList.length}</span></div>` +
+    schedList.map(schedHTML).join('');
+}
+
 let boardList = [];
 async function pollBoard() {
   try {
     boardList = await api('/api/sessions');
     renderBoard(boardList);
+    try { renderSchedules(await api('/api/schedules')); } catch (e) { /* board still fine */ }
     const m = await api('/api/meta'); const sp = m.spend; const f = [];
     if (sp.todayUsd > 0 || sp.monthUsd > 0) f.push(`$${sp.todayUsd.toFixed(2)} today · $${sp.monthUsd.toFixed(2)} month`);
     if (sp.todayAiu > 0 || sp.monthAiu > 0) f.push(`${sp.todayAiu.toFixed(1)} AIC today · ${sp.monthAiu.toFixed(1)} month`);
@@ -926,7 +1018,7 @@ function showBoard() {
   window.scrollTo(0, boardScroll); // land where you left, not at the bottom
   pollBoard(); timer = setInterval(pollBoard, 2000);
 }
-function toggleNew() { $('newSheet').classList.toggle('hidden'); }
+function toggleNew() { $('newSheet').classList.toggle('hidden'); resetCompletion(); }
 
 function baseName(p) { const s = String(p).replace(/[\\/]+$/, ''); const i = Math.max(s.lastIndexOf('/'), s.lastIndexOf('\\')); return i >= 0 ? s.slice(i + 1) : s; }
 function onRepoChange() {
@@ -960,7 +1052,7 @@ async function createSession() {
     saveWatch(); saveMuted();
     if (text.trim() || atts.length) pendingFirst = { name: s.name, text, atts };
     $('newSheet').classList.add('hidden');
-    $('fName').value = ''; $('fPrompt').value = ''; formAttachments = []; renderThumbs();
+    $('fName').value = ''; $('fPrompt').value = ''; formAttachments = []; renderThumbs(); resetCompletion();
     openSession(s.name);
   } catch (e) { alert(e.message); }
 }
@@ -970,7 +1062,8 @@ function isReady(st) { return st !== 'starting'; }
 function openSession(name) {
   saveDraft();               // preserve whatever we were composing elsewhere
   if (!$('board').classList.contains('hidden')) boardScroll = window.scrollY;
-  current = name; clearInterval(timer); lastRender = '';
+  current = name; clearInterval(timer); lastRender = ''; freshOpen = true;
+  $('newpill').classList.add('hidden');
   histList = []; histIdx = -1; histDraft = ''; // fresh prompt-recall state per session
   $('board').classList.add('hidden'); $('focus').classList.remove('hidden');
   $('newBtn').classList.add('hidden'); $('transcript').innerHTML = '';
@@ -980,12 +1073,25 @@ function openSession(name) {
   const d = drafts[name] || { text: '', atts: [] };
   $('prompt').value = d.text || '';
   attachments = (d.atts || []).slice();
-  comp = null; renderComp(); // drop any stale completion popup from the prior session
+  resetCompletion(); // drop any stale completion popup from the prior session
   autosize($('prompt')); renderThumbs();
   pollFocus(); timer = setInterval(pollFocus, 1000);
 }
 
 let lastRender = '';
+let freshOpen = false; // first render after opening a session jumps to the latest message
+// Scroll math goes through the real scrolling element: `html, body` are
+// pinned to viewport height here, so document.body.offsetHeight measures
+// the viewport, not the content — using it made "at bottom" almost
+// always true and let new content yank the page while you read.
+const FOLLOW_SLOP = 120; // px from the bottom still counts as "following"
+function scroller() { return document.scrollingElement || document.documentElement; }
+function distFromBottom() { const e = scroller(); return e.scrollHeight - e.scrollTop - e.clientHeight; }
+// Tapping the pill (or scrolling to the bottom yourself) dismisses it and follows again.
+function jumpToLatest() { const e = scroller(); e.scrollTop = e.scrollHeight; $('newpill').classList.add('hidden'); }
+window.addEventListener('scroll', () => {
+  if (distFromBottom() <= FOLLOW_SLOP) $('newpill').classList.add('hidden');
+}, { passive: true });
 async function pollFocus() {
   if (!current) return;
   let data;
@@ -1009,10 +1115,17 @@ async function pollFocus() {
   const html = data.transcript.map(renderEntry).join('');
   if (html !== lastRender) {
     const el = $('transcript');
-    const stick = window.innerHeight + window.scrollY >= document.body.offsetHeight - 120;
-    el.innerHTML = html; lastRender = html;
+    const sc = scroller();
+    const prevTop = sc.scrollTop;
+    const stick = freshOpen || distFromBottom() <= FOLLOW_SLOP;
+    el.innerHTML = html; lastRender = html; freshOpen = false;
     linkifyFiles(el); // make .md path mentions clickable (DOM only changes, lastRender stays the string)
-    if (stick) window.scrollTo(0, document.body.scrollHeight);
+    // Only follow new content when already at the bottom. Otherwise leave the
+    // reading position untouched — restore it only if the innerHTML swap made the
+    // browser clamp scrollTop, so a 1s poll can't fight an active scroll — and
+    // surface a "↓ new messages" pill they can tap to catch up on demand.
+    if (stick) { sc.scrollTop = sc.scrollHeight; $('newpill').classList.add('hidden'); }
+    else { if (sc.scrollTop !== prevTop) sc.scrollTop = prevTop; $('newpill').classList.remove('hidden'); }
   }
 
   // agent question (Copilot ask_user): quick-reply buttons + freeform box
@@ -1255,12 +1368,13 @@ function sendPrompt() {
   if (!text.trim() && !attachments.length) return;
   const atts = attachments.slice(); attachments = [];
   $('prompt').value = ''; autosize($('prompt')); renderThumbs();
-  comp = null; renderComp();
+  resetCompletion();
   histIdx = -1; histDraft = '';
   sendMessage(text, atts);
 }
 function autosize(t) { t.style.height = 'auto'; t.style.height = Math.min(t.scrollHeight, 9 * 16) + 'px'; }
-$('prompt').addEventListener('input', e => { autosize(e.target); histIdx = -1; syncCompletion(); }); // editing leaves recall mode
+$('prompt').addEventListener('input', e => { autosize(e.target); histIdx = -1; syncCompletion(mainCtx); }); // editing leaves recall mode
+$('fPrompt').addEventListener('input', () => syncCompletion(formCtx));
 
 // ---- "/" command + "@" file completion ----
 // Lists come from /complete once per session and are filtered locally,
@@ -1273,35 +1387,55 @@ function ensureCompData() {
   api('/api/sessions/' + encodeURIComponent(current) + '/complete')
     .then(d => { compData = d; compDataFor = current; })
     .catch(() => {})
-    .finally(() => { compFetching = false; if (current) syncCompletion(); });
+    .finally(() => { compFetching = false; if (current) syncCompletion(mainCtx); });
 }
-function syncCompletion() {
+// Completion runs against a context: which textarea, which popup div,
+// and where its data comes from. The focus composer uses the running
+// session's lists; the new-session form uses the picked repo+backend's
+// filesystem lists (no session exists yet).
+const mainCtx = {
+  get inputEl() { return $('prompt'); },
+  get popupEl() { return $('completion'); },
+  getData() { ensureCompData(); return compData; },
+};
+const formCtx = {
+  get inputEl() { return $('fPrompt'); },
+  get popupEl() { return $('fcompletion'); },
+  getData() { ensureFormCompData(); return formCompData; },
+};
+function hidePopup(el) { el.classList.add('hidden'); el.innerHTML = ''; }
+function resetCompletion() { comp = null; hidePopup($('completion')); hidePopup($('fcompletion')); }
+function syncCompletion(ctx) {
   comp = null;
-  const val = $('prompt').value;
-  if (!val) { renderComp(); return; }
-  if (val[0] === '/' && !/\s/.test(val)) {
-    ensureCompData();
-    const items = (compData && compData.commands || [])
-      .filter(c => c.name.startsWith(val))
+  const val = ctx.inputEl.value;
+  // Complete the token at the cursor (end of input): a "/command" or
+  // "@file" preceded by start-of-line or whitespace — so a slash works
+  // mid-prompt or on a later line, not only as the very first character.
+  const slash = val && val.match(/(?:^|\s)(\/\S*)$/);
+  const at = val && val.match(/(?:^|\s)(@\S*)$/);
+  if (slash) {
+    const token = slash[1];
+    const data = ctx.getData();
+    const items = (data && data.commands || [])
+      .filter(c => c.name.startsWith(token))
       .map(c => ({ insert: c.name, label: c.name, desc: c.desc }));
     // hide once the only match is exactly what's typed
-    if (items.length && !(items.length === 1 && items[0].insert === val)) {
-      comp = { kind: '/', token: val, items, sel: 0 };
+    if (items.length && !(items.length === 1 && items[0].insert === token)) {
+      comp = { kind: '/', token, items, sel: 0, ctx };
     }
-  } else {
-    const m = val.match(/(?:^|\s)(@\S*)$/);
-    if (m) {
-      ensureCompData();
-      const token = m[1];
-      const files = fuzzyFilter((compData && compData.files) || [], token.slice(1), 6);
-      if (files.length) comp = { kind: '@', token, items: files.map(f => ({ insert: f, label: f })), sel: 0 };
-    }
+  } else if (at) {
+    const token = at[1];
+    const data = ctx.getData();
+    const files = fuzzyFilter((data && data.files) || [], token.slice(1), 6);
+    if (files.length) comp = { kind: '@', token, items: files.map(f => ({ insert: f, label: f })), sel: 0, ctx };
   }
+  if (!comp) { hidePopup(ctx.popupEl); return; }
   renderComp();
 }
 function renderComp() {
-  const el = $('completion');
-  if (!comp || !comp.items.length) { el.classList.add('hidden'); el.innerHTML = ''; return; }
+  if (!comp) return;
+  const el = comp.ctx.popupEl;
+  if (!comp.items.length) { hidePopup(el); return; }
   el.innerHTML = comp.items.map((it, i) => {
     const body = comp.kind === '/' && it.desc
       ? esc(it.label) + ' <span class="cdesc">— ' + esc(it.desc) + '</span>'
@@ -1313,11 +1447,27 @@ function renderComp() {
 function acceptCompletion() {
   if (!comp || !comp.items.length) return;
   const it = comp.items[comp.sel];
-  const t = $('prompt');
-  const val = t.value.slice(0, t.value.length - comp.token.length);
-  t.value = (comp.kind === '@' ? val + it.insert : it.insert) + ' ';
-  comp = null; renderComp(); autosize(t);
+  const t = comp.ctx.inputEl, popup = comp.ctx.popupEl;
+  const before = t.value.slice(0, t.value.length - comp.token.length);
+  t.value = before + it.insert + ' ';
+  comp = null; hidePopup(popup);
+  if (t.id === 'prompt') autosize(t);
   t.focus(); t.setSelectionRange(t.value.length, t.value.length);
+}
+// The new-session form has no session, so its "/" and "@" lists come
+// from a session-less endpoint keyed by the chosen repo + backend.
+let formCompData = null, formCompKey = null, formCompFetching = false;
+function formRepo() { let r = $('fRepo').value; if (r === '__custom__') r = ($('fRepoCustom').value || '').trim(); return r; }
+function ensureFormCompData() {
+  const repo = formRepo(); if (!repo) return;
+  const backend = $('fBackend').value, key = backend + '\n' + repo;
+  if (formCompKey === key && formCompData) return;
+  if (formCompFetching) return;
+  formCompFetching = true;
+  api('/api/complete?dir=' + encodeURIComponent(repo) + '&backend=' + encodeURIComponent(backend))
+    .then(d => { formCompData = d; formCompKey = key; })
+    .catch(() => {})
+    .finally(() => { formCompFetching = false; syncCompletion(formCtx); });
 }
 // Subsequence fuzzy match, ranked like the TUI: basename hits first,
 // then earlier/shorter matches.
@@ -1346,12 +1496,12 @@ function subseqAt(s, q) {
 // Capture phase on document so this runs before the prompt's history-nav
 // and Enter-to-send handlers and can swallow the key while completing.
 document.addEventListener('keydown', e => {
-  if (!comp || document.activeElement !== $('prompt')) return;
+  if (!comp || document.activeElement !== comp.ctx.inputEl) return;
   const n = comp.items.length;
   if (e.key === 'ArrowDown') { comp.sel = (comp.sel + 1) % n; renderComp(); }
   else if (e.key === 'ArrowUp') { comp.sel = (comp.sel - 1 + n) % n; renderComp(); }
   else if (e.key === 'Enter' || e.key === 'Tab') { acceptCompletion(); }
-  else if (e.key === 'Escape') { comp = null; renderComp(); }
+  else if (e.key === 'Escape') { const el = comp.ctx.popupEl; comp = null; hidePopup(el); }
   else return;
   e.preventDefault(); e.stopPropagation();
 }, true);

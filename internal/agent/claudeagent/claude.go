@@ -65,9 +65,41 @@ type session struct {
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
 	stderr *bytes.Buffer
+
+	// cmds is the session's invocable slash commands and skills, learned
+	// from the init event each time the process spawns (guarded by mu).
+	cmds []agent.SlashCommand
 }
 
 func (s *session) ID() string { return s.id }
+
+// ListCommands returns the slash commands and skills the running process
+// reported in its init event, or nil if it hasn't started yet. Names
+// carry no leading slash; the init event reports no descriptions.
+func (s *session) ListCommands(_ context.Context) []agent.SlashCommand {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]agent.SlashCommand(nil), s.cmds...)
+}
+
+// setCommands records the union of the init event's slash-command and
+// skill names as the session's invocable commands.
+func (s *session) setCommands(names ...[]string) {
+	seen := map[string]bool{}
+	var cmds []agent.SlashCommand
+	for _, group := range names {
+		for _, n := range group {
+			if n == "" || seen[n] {
+				continue
+			}
+			seen[n] = true
+			cmds = append(cmds, agent.SlashCommand{Name: n})
+		}
+	}
+	s.mu.Lock()
+	s.cmds = cmds
+	s.mu.Unlock()
+}
 
 // ensureProc spawns the claude subprocess lazily — on the first Send,
 // or again after an abort/crash (resuming the same conversation).
@@ -225,6 +257,12 @@ type streamLine struct {
 	TotalCostUSD float64         `json:"total_cost_usd"`
 	Usage        *usageBlock     `json:"usage"`
 	ModelUsage   json.RawMessage `json:"model_usage"`
+
+	// init (type == "system", subtype == "init") reports the session's
+	// loaded slash commands and skills. slash_commands is the superset
+	// (it already includes skills); skills is kept as a defensive union.
+	SlashCommands []string `json:"slash_commands"`
+	Skills        []string `json:"skills"`
 }
 
 type apiEvent struct {
@@ -264,6 +302,10 @@ func (s *session) readLoop(cmd *exec.Cmd, stdout io.Reader, stderr *bytes.Buffer
 			continue
 		}
 		switch line.Type {
+		case "system":
+			if line.Subtype == "init" {
+				s.setCommands(line.SlashCommands, line.Skills)
+			}
 		case "stream_event":
 			if line.Event != nil && line.Event.Type == "content_block_delta" &&
 				line.Event.Delta != nil && line.Event.Delta.Type == "text_delta" {

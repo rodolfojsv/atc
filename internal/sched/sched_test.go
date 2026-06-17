@@ -1,6 +1,8 @@
 package sched
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -52,6 +54,83 @@ func TestListsAndSundaySeven(t *testing.T) {
 	}
 	if e.Matches(at(time.Monday, 8, 30)) {
 		t.Error("should not fire Monday")
+	}
+}
+
+func TestNext(t *testing.T) {
+	// Weekdays at 09:00. From Mon 08:00 the next fire is the same day 09:00.
+	e, err := Parse("0 9 * * 1-5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mon := time.Date(2026, 6, 15, 8, 0, 0, 0, time.UTC) // a Monday
+	got := e.Next(mon)
+	want := time.Date(2026, 6, 15, 9, 0, 0, 0, time.UTC)
+	if !got.Equal(want) {
+		t.Errorf("next from Mon 08:00 = %v, want %v", got, want)
+	}
+
+	// Strictly after: from exactly 09:00 the next fire is the following day.
+	got = e.Next(want)
+	wantTue := time.Date(2026, 6, 16, 9, 0, 0, 0, time.UTC)
+	if !got.Equal(wantTue) {
+		t.Errorf("next from Mon 09:00 = %v, want %v", got, wantTue)
+	}
+
+	// From Friday 09:00 it skips the weekend to Monday.
+	fri := time.Date(2026, 6, 19, 9, 0, 0, 0, time.UTC)
+	got = e.Next(fri)
+	wantMon := time.Date(2026, 6, 22, 9, 0, 0, 0, time.UTC)
+	if !got.Equal(wantMon) {
+		t.Errorf("next from Fri 09:00 = %v, want %v (skip weekend)", got, wantMon)
+	}
+
+	// A schedule that can never fire returns the zero time.
+	impossible, err := Parse("0 0 30 2 *") // Feb 30
+	if err != nil {
+		t.Fatal(err)
+	}
+	if z := impossible.Next(mon); !z.IsZero() {
+		t.Errorf("impossible schedule should yield zero time, got %v", z)
+	}
+}
+
+func TestRunReloadableInitialBuildAndCancel(t *testing.T) {
+	// With an already-cancelled context, RunReloadable should build the
+	// job set once (so startup wiring runs) and then return promptly at the
+	// select rather than blocking until the next wall-clock minute.
+	calls := 0
+	build := func() ([]Job, error) {
+		calls++
+		return nil, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	done := make(chan struct{})
+	go func() {
+		RunReloadable(ctx, build, nil)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("RunReloadable did not return after context cancel")
+	}
+	if calls != 1 {
+		t.Fatalf("build called %d times, want 1 (initial build only)", calls)
+	}
+}
+
+func TestRunReloadableReportsInitialError(t *testing.T) {
+	want := errors.New("bad config")
+	var got error
+	build := func() ([]Job, error) { return nil, want }
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	RunReloadable(ctx, build, func(err error) { got = err })
+	if !errors.Is(got, want) {
+		t.Fatalf("onErr got %v, want %v", got, want)
 	}
 }
 

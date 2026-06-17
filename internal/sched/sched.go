@@ -107,6 +107,21 @@ func (e *Entry) Matches(t time.Time) bool {
 	return domOK && dowOK
 }
 
+// Next returns the first firing strictly after t (minute resolution), or
+// the zero time when nothing matches within a year — which only happens
+// for a schedule that can never fire (e.g. Feb 30). Used to show a
+// schedule's upcoming run in the UI.
+func (e *Entry) Next(after time.Time) time.Time {
+	t := after.Truncate(time.Minute).Add(time.Minute)
+	limit := t.AddDate(1, 0, 0)
+	for ; t.Before(limit); t = t.Add(time.Minute) {
+		if e.Matches(t) {
+			return t
+		}
+	}
+	return time.Time{}
+}
+
 // Job pairs a parsed schedule with what to run.
 type Job struct {
 	Entry *Entry
@@ -126,6 +141,44 @@ func Run(ctx context.Context, jobs []Job) {
 		case <-ctx.Done():
 			return
 		case <-time.After(next.Sub(now)):
+		}
+		tick := time.Now()
+		for _, j := range jobs {
+			if j.Entry.Matches(tick) {
+				go j.Fire()
+			}
+		}
+	}
+}
+
+// RunReloadable behaves like Run but re-derives the job set from build()
+// once per minute, so schedules added, edited, or removed in config take
+// effect without restarting the process. build() is expected to be cheap
+// (e.g. gated on the config file's mtime) and to return the desired job
+// set, or a non-nil error when it cannot — in which case the previous
+// good set keeps firing and the error is reported via onErr (which may be
+// nil). Unlike Run, this never returns early on an empty set: a config
+// may legitimately have zero schedules now and gain one later.
+func RunReloadable(ctx context.Context, build func() ([]Job, error), onErr func(error)) {
+	report := func(err error) {
+		if err != nil && onErr != nil {
+			onErr(err)
+		}
+	}
+	jobs, err := build()
+	report(err)
+	for {
+		now := time.Now()
+		next := now.Truncate(time.Minute).Add(time.Minute)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(next.Sub(now)):
+		}
+		if fresh, err := build(); err != nil {
+			report(err) // keep the last good set
+		} else {
+			jobs = fresh
 		}
 		tick := time.Now()
 		for _, j := range jobs {

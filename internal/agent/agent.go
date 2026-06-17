@@ -142,6 +142,24 @@ type AttachmentSender interface {
 	SendWithAttachments(ctx context.Context, prompt string, atts []Attachment) error
 }
 
+// SlashCommand is one invocable "/" command or skill the backend has
+// loaded for a session — used to populate prompt-box completion. Name
+// carries no leading slash.
+type SlashCommand struct {
+	Name        string
+	Description string
+}
+
+// CommandLister is optionally implemented by sessions whose backend can
+// enumerate the slash commands and skills available in the running
+// session (Claude reports them in its init event; Copilot via an RPC).
+// The list is authoritative for "/" completion — repo + user + built-in
+// + plugin — beyond what a filesystem scan can see. Best-effort: nil
+// when the backend can't report yet (e.g. process not started).
+type CommandLister interface {
+	ListCommands(ctx context.Context) []SlashCommand
+}
+
 type Session interface {
 	ID() string
 	// Send submits a user prompt; the response streams via OnEvent.

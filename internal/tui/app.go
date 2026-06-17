@@ -45,6 +45,7 @@ const (
 	modeMerge
 	modeCategory
 	modeRename
+	modeSchedules
 )
 
 type Model struct {
@@ -155,6 +156,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateCategory(msg)
 		case modeRename:
 			return m.updateRename(msg)
+		case modeSchedules:
+			return m.updateSchedules(msg)
 		}
 	}
 	return m, nil
@@ -169,7 +172,7 @@ func (m *Model) updateMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	switch m.mode {
-	case modeFocus, modeDiff:
+	case modeFocus, modeDiff, modeSchedules:
 		var cmd tea.Cmd
 		m.vp, cmd = m.vp.Update(msg)
 		m.vpFollow = m.vp.AtBottom()
@@ -339,6 +342,8 @@ func (m *Model) updateBoard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.renameInput.CursorEnd()
 			return m, m.renameInput.Focus()
 		}
+	case "s":
+		return m.openSchedules()
 	case "q", "ctrl+c":
 		if m.sup.ActiveCount() > 0 {
 			m.mode = modeQuit
@@ -496,6 +501,8 @@ func (m *Model) View() string {
 		return m.viewCategory()
 	case modeRename:
 		return m.viewRename()
+	case modeSchedules:
+		return m.viewSchedules()
 	}
 	return m.viewBoard()
 }
@@ -541,7 +548,7 @@ func (m *Model) viewBoard() string {
 	}
 	b.WriteString(footer + "\n")
 	b.WriteString("\n" + keybar(
-		"enter", "attach", "n", "new", "a", "approve", "p", "pin", "c", "category", "r", "rename", "d", "diff", "e", "export", "A", "auto⚡", "x", "abort", "K", "kill", "q", "quit"))
+		"enter", "attach", "n", "new", "a", "approve", "p", "pin", "c", "category", "r", "rename", "d", "diff", "e", "export", "s", "schedules", "A", "auto⚡", "x", "abort", "K", "kill", "q", "quit"))
 	return b.String()
 }
 

@@ -49,6 +49,20 @@ func TestSlashCompletionAndDispatch(t *testing.T) {
 	}
 }
 
+func TestSlashCompletionMidPrompt(t *testing.T) {
+	m := testModel(t)
+	m.mode = modeFocus
+	m.input.SetValue("please run /mo")
+	m.syncCompletion()
+	if !m.comp.active || m.comp.kind != '/' || m.comp.token != "/mo" {
+		t.Fatalf("expected mid-prompt slash completion on /mo, got %+v", m.comp)
+	}
+	m.acceptCompletion()
+	if got := m.input.Value(); got != "please run /model " {
+		t.Errorf("accept inserted %q, want %q", got, "please run /model ")
+	}
+}
+
 func TestAtMentionCompletion(t *testing.T) {
 	m := testModel(t)
 	m.fileList = []string{"internal/policy/policy.go", "main.go"}

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -46,41 +47,46 @@ func (m *Model) syncCompletion() {
 	if val == "" {
 		return
 	}
-	// Slash commands: only as the very first token. atc's own commands
-	// first, then the repo's .claude/commands (Claude sessions expand
-	// those themselves; verified working in headless mode).
-	if strings.HasPrefix(val, "/") && !strings.ContainsAny(val, " \n") {
-		var items []string
-		for _, c := range slashCommands {
-			if strings.HasPrefix(c.name, val) {
-				items = append(items, c.name+"  —  "+c.desc)
-			}
-		}
-		if m.target != nil && m.target.View().Backend == "claude" {
-			for _, c := range m.repoCommands() {
-				if strings.HasPrefix(c, val) {
-					items = append(items, c+"  —  repo command")
-				}
-			}
-		}
-		if len(items) > 0 && !(len(items) == 1 && strings.HasPrefix(items[0], val+" ")) {
-			m.comp = completion{active: true, kind: '/', token: val, items: items}
-		}
-		return
-	}
-	// File mention: last whitespace-separated token starting with @.
+	// Completion targets the token at the cursor (end of the input): a
+	// "/command" or "@file", each preceded by start or whitespace — so a
+	// slash works mid-prompt or on a later line, not just as the first
+	// character. atc's own commands come first, then the session's loaded
+	// commands and skills (Claude and Copilot both invoke these).
 	fields := strings.FieldsFunc(val, func(r rune) bool { return r == ' ' || r == '\n' || r == '\t' })
 	if len(fields) == 0 {
 		return
 	}
 	last := fields[len(fields)-1]
-	if !strings.HasPrefix(last, "@") || !strings.HasSuffix(val, last) {
+	if !strings.HasSuffix(val, last) { // cursor sits past the token (trailing space)
 		return
 	}
-	query := strings.TrimPrefix(last, "@")
-	items := fuzzyFilter(m.sessionFiles(), query, maxCompletionItems)
-	if len(items) > 0 {
-		m.comp = completion{active: true, kind: '@', token: last, items: items}
+	if strings.HasPrefix(last, "/") {
+		var items []string
+		for _, c := range slashCommands {
+			if strings.HasPrefix(c.name, last) {
+				items = append(items, c.name+"  —  "+c.desc)
+			}
+		}
+		for _, c := range m.backendCommands() {
+			if strings.HasPrefix(c.name, last) {
+				desc := c.desc
+				if desc == "" {
+					desc = "repo command"
+				}
+				items = append(items, c.name+"  —  "+desc)
+			}
+		}
+		if len(items) > 0 && !(len(items) == 1 && strings.HasPrefix(items[0], last+" ")) {
+			m.comp = completion{active: true, kind: '/', token: last, items: items}
+		}
+		return
+	}
+	if strings.HasPrefix(last, "@") {
+		query := strings.TrimPrefix(last, "@")
+		items := fuzzyFilter(m.sessionFiles(), query, maxCompletionItems)
+		if len(items) > 0 {
+			m.comp = completion{active: true, kind: '@', token: last, items: items}
+		}
 	}
 }
 
@@ -178,6 +184,87 @@ func subsequenceAt(s, q string) int {
 		}
 	}
 	return -1
+}
+
+// slashItem is one completion entry: an invocable "/name" and an
+// optional description.
+type slashItem struct{ name, desc string }
+
+// backendCommands merges the focused session's invocable commands and
+// skills for "/" completion: the backend's authoritative loaded list
+// (Claude's init event / Copilot's RPC — built-in, plugin, user, repo)
+// plus a filesystem scan of the Claude .claude layout (repo + user) so
+// repo entries appear immediately, with descriptions.
+func (m *Model) backendCommands() []slashItem {
+	if m.target == nil {
+		return nil
+	}
+	dir := m.target.View().Dir
+	seen := map[string]bool{}
+	var out []slashItem
+	add := func(name, desc string) {
+		if name == "" || seen[name] {
+			return
+		}
+		seen[name] = true
+		out = append(out, slashItem{name, desc})
+	}
+	// The .claude filesystem scan describes the Claude layout only;
+	// Copilot's .github assets come from the authoritative RPC list.
+	if m.target.View().Backend == "claude" {
+		for _, c := range m.repoCommands() {
+			add(c, "")
+		}
+		for _, s := range claudeSkills(dir) {
+			add(s.name, s.desc)
+		}
+		if home, err := os.UserHomeDir(); err == nil {
+			for _, s := range claudeSkills(home) {
+				add(s.name, s.desc)
+			}
+		}
+	}
+	for _, c := range m.target.SlashCommands(context.Background()) {
+		add("/"+c.Name, c.Description)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
+	return out
+}
+
+// claudeSkills lists dir's .claude/skills/*/SKILL.md as invocable
+// "/skill" names with their frontmatter descriptions.
+func claudeSkills(dir string) []slashItem {
+	var out []slashItem
+	for _, p := range globAll(filepath.Join(dir, ".claude", "skills", "*", "SKILL.md")) {
+		out = append(out, slashItem{name: "/" + filepath.Base(filepath.Dir(p)), desc: frontmatterDesc(p)})
+	}
+	return out
+}
+
+// frontmatterDesc pulls the "description:" value from a markdown file's
+// YAML frontmatter, or "" if there's none.
+func frontmatterDesc(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	buf := make([]byte, 2048)
+	n, _ := f.Read(buf)
+	text := string(buf[:n])
+	if !strings.HasPrefix(text, "---") {
+		return ""
+	}
+	for _, ln := range strings.Split(text, "\n")[1:] {
+		t := strings.TrimSpace(ln)
+		if t == "---" {
+			break
+		}
+		if rest, ok := strings.CutPrefix(t, "description:"); ok {
+			return strings.Trim(strings.TrimSpace(rest), `"'`)
+		}
+	}
+	return ""
 }
 
 // repoCommands lists the session repo's .claude/commands/*.md as
@@ -289,13 +376,10 @@ func (m *Model) acceptCompletion() {
 	if m.comp.kind == '/' {
 		choice = strings.SplitN(choice, "  —  ", 2)[0]
 	}
-	val := m.input.Value()
-	val = strings.TrimSuffix(val, m.comp.token)
-	if m.comp.kind == '@' {
-		m.input.SetValue(val + choice + " ")
-	} else {
-		m.input.SetValue(choice + " ")
-	}
+	// Replace just the completed token (it may sit after other text), so
+	// "/" works mid-prompt the same way "@" does.
+	val := strings.TrimSuffix(m.input.Value(), m.comp.token)
+	m.input.SetValue(val + choice + " ")
 	m.comp = completion{}
 	m.syncFocusLayout()
 }

@@ -10,6 +10,7 @@ import (
 	"github.com/rodolfojsv/atc/internal/config"
 	"github.com/rodolfojsv/atc/internal/export"
 	"github.com/rodolfojsv/atc/internal/hooks"
+	"github.com/rodolfojsv/atc/internal/schedrun"
 	"github.com/rodolfojsv/atc/internal/supervisor"
 )
 
@@ -48,6 +49,7 @@ func cmdRun(argv []string) int {
 		Name: *name, Repo: *repo, Prompt: *prompt, Preset: *preset,
 		Backend: *backend, Model: *model, UseWorktree: *worktree,
 	}
+	var precheck string
 	if *scheduleName != "" {
 		found := false
 		for _, s := range cfg.Schedules {
@@ -67,6 +69,10 @@ func cmdRun(argv []string) int {
 				if !opts.UseWorktree {
 					opts.UseWorktree = s.Worktree
 				}
+				// Scheduled tasks run read-only (plan mode) unless the
+				// schedule opts in with write:true.
+				opts.ReadOnly = !s.Write
+				precheck = s.Precheck
 				found = true
 				break
 			}
@@ -81,6 +87,27 @@ func cmdRun(argv []string) int {
 		return 1
 	}
 
+	// Precondition gate: when a scheduled task carries a precheck, run it
+	// before spending anything. A non-zero exit means "nothing new" — we
+	// record the skip and exit cleanly without launching a session. A
+	// precheck that fails to start is an error, not a skip. When it passes
+	// we fall through and record the outcome of the launch below.
+	runLog := schedrun.Default()
+	gated := precheck != ""
+	if gated {
+		run, err := runPrecheck(precheck, opts.Repo)
+		switch {
+		case err != nil:
+			_ = runLog.Append(schedrun.Run{Schedule: opts.Name, Time: time.Now(), Result: schedrun.Errored, Detail: "precheck: " + err.Error()})
+			fmt.Fprintln(os.Stderr, "atc run: precheck:", err)
+			return 1
+		case !run:
+			_ = runLog.Append(schedrun.Run{Schedule: opts.Name, Time: time.Now(), Result: schedrun.NoUpdate})
+			fmt.Printf("atc run: precheck reported no changes for %q — skipped\n", opts.Name)
+			return 0
+		}
+	}
+
 	b := bus.New()
 	hooks.New(cfg.Hooks).Attach(b)
 	sup := supervisor.New(cfg, b)
@@ -89,8 +116,14 @@ func cmdRun(argv []string) int {
 
 	sess, err := sup.NewSession(opts)
 	if err != nil {
+		if gated {
+			_ = runLog.Append(schedrun.Run{Schedule: opts.Name, Time: time.Now(), Result: schedrun.Errored, Detail: err.Error()})
+		}
 		fmt.Fprintln(os.Stderr, "atc run:", err)
 		return 1
+	}
+	if gated {
+		_ = runLog.Append(schedrun.Run{Schedule: opts.Name, Time: time.Now(), Result: schedrun.Updated, Session: sess.Name})
 	}
 	fmt.Printf("atc run: session %q in %s\n", sess.Name, opts.Repo)
 

@@ -27,6 +27,7 @@ import (
 	"github.com/rodolfojsv/atc/internal/hooks"
 	"github.com/rodolfojsv/atc/internal/ntfy"
 	"github.com/rodolfojsv/atc/internal/sched"
+	"github.com/rodolfojsv/atc/internal/schedrun"
 	"github.com/rodolfojsv/atc/internal/supervisor"
 	"github.com/rodolfojsv/atc/internal/tui"
 	"github.com/rodolfojsv/atc/internal/web"
@@ -127,7 +128,7 @@ func cmdTUI(argv []string) int {
 	// Adopt sessions other atc processes finish while we're open —
 	// e.g. Task Scheduler `atc run` jobs land on the board live.
 	go sup.WatchStore(ctx, 3*time.Second)
-	if err := startSchedules(ctx, cfg, sup); err != nil {
+	if err := startSchedules(ctx, *configPath, sup); err != nil {
 		fmt.Fprintln(os.Stderr, "atc:", err)
 		return 1
 	}
@@ -198,7 +199,7 @@ func cmdServe(argv []string) int {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go sup.WatchStore(ctx, 3*time.Second)
-	if err := startSchedules(ctx, cfg, sup); err != nil {
+	if err := startSchedules(ctx, *configPath, sup); err != nil {
 		fmt.Fprintln(os.Stderr, "atc:", err)
 		return 1
 	}
@@ -238,28 +239,114 @@ func portOf(url string) string {
 	return "8787"
 }
 
-func startSchedules(ctx context.Context, cfg *config.Config, sup *supervisor.Supervisor) error {
+// startSchedules launches the in-process scheduler. It re-reads the config
+// file whenever its mtime changes, so schedules added, edited, or removed
+// take effect without restarting the process; a config that fails to parse
+// is ignored and the previous good schedule set keeps firing. Only the
+// schedule list is hot-reloaded — presets, defaultAutoApprove and other
+// config the supervisor captured at startup still require a restart.
+func startSchedules(ctx context.Context, configPath string, sup *supervisor.Supervisor) error {
+	runLog := schedrun.Default()
+
+	path := configPath
+	if path == "" {
+		p, err := config.Path()
+		if err != nil {
+			return err
+		}
+		path = p
+	}
+
+	var (
+		lastMod time.Time
+		cached  []sched.Job
+	)
+	// build returns the current job set, reparsing only when the config
+	// file's mtime moved. A missing file keeps the current set (treated as
+	// "no change"); a parse error is surfaced so the caller can keep the
+	// last good set rather than dropping every schedule.
+	build := func() ([]sched.Job, error) {
+		info, err := os.Stat(path)
+		if err != nil {
+			return cached, nil
+		}
+		if mod := info.ModTime(); !mod.Equal(lastMod) {
+			lastMod = mod
+			cfg, err := config.Load(path)
+			if err != nil {
+				return nil, err
+			}
+			jobs, err := buildScheduleJobs(cfg, sup, runLog)
+			if err != nil {
+				return nil, err
+			}
+			cached = jobs
+		}
+		return cached, nil
+	}
+
+	// Build once up front so a bad config still fails fast at startup.
+	if _, err := build(); err != nil {
+		return err
+	}
+	go sched.RunReloadable(ctx, build, func(err error) {
+		fmt.Fprintln(os.Stderr, "atc: schedule reload skipped, keeping previous schedules:", err)
+	})
+	return nil
+}
+
+func buildScheduleJobs(cfg *config.Config, sup *supervisor.Supervisor, runLog schedrun.Log) ([]sched.Job, error) {
 	var jobs []sched.Job
 	for _, s := range cfg.Schedules {
 		entry, err := sched.Parse(s.Cron)
 		if err != nil {
-			return fmt.Errorf("schedule %q: %w", s.Name, err)
+			return nil, fmt.Errorf("schedule %q: %w", s.Name, err)
 		}
 		s := s
 		jobs = append(jobs, sched.Job{Entry: entry, Fire: func() {
-			name := s.Name
-			if name == "" {
-				name = "sched"
-			}
-			_, _ = sup.NewSession(supervisor.NewSessionOptions{
-				Name:        name,
-				Repo:        s.Repo,
-				Preset:      s.Preset,
-				UseWorktree: s.Worktree,
-				Prompt:      s.Prompt,
-			})
+			fireSchedule(s, sup, runLog)
 		}})
 	}
-	go sched.Run(ctx, jobs)
-	return nil
+	return jobs, nil
+}
+
+// fireSchedule runs one scheduled task: it consults the precheck (if any),
+// launches a session only when something changed, and records the outcome
+// in the run log so the UI can show "no updates since X" without spending
+// tokens on a quiet fire.
+func fireSchedule(s config.Schedule, sup *supervisor.Supervisor, runLog schedrun.Log) {
+	name := s.Name
+	if name == "" {
+		name = "sched"
+	}
+	rec := func(r schedrun.Run) {
+		r.Schedule, r.Time = name, time.Now()
+		_ = runLog.Append(r)
+	}
+
+	if s.Precheck != "" {
+		run, err := runPrecheck(s.Precheck, s.Repo)
+		if err != nil {
+			rec(schedrun.Run{Result: schedrun.Errored, Detail: "precheck: " + err.Error()})
+			return
+		}
+		if !run {
+			rec(schedrun.Run{Result: schedrun.NoUpdate})
+			return
+		}
+	}
+
+	sess, err := sup.NewSession(supervisor.NewSessionOptions{
+		Name:        name,
+		Repo:        s.Repo,
+		Preset:      s.Preset,
+		UseWorktree: s.Worktree,
+		Prompt:      s.Prompt,
+		ReadOnly:    !s.Write, // scheduled tasks are read-only unless write:true
+	})
+	if err != nil {
+		rec(schedrun.Run{Result: schedrun.Errored, Detail: err.Error()})
+		return
+	}
+	rec(schedrun.Run{Result: schedrun.Updated, Session: sess.Name})
 }

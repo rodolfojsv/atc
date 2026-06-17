@@ -17,6 +17,10 @@ import (
 	"github.com/rodolfojsv/atc/internal/agent"
 )
 
+// cmdCacheTTL bounds how long a session's slash-command list is reused
+// before another Commands.List RPC; commands rarely change mid-session.
+const cmdCacheTTL = 30 * time.Second
+
 type Backend struct {
 	client *copilot.Client
 }
@@ -51,7 +55,7 @@ func (b *Backend) NewSession(ctx context.Context, spec agent.SessionSpec) (agent
 		return nil, err
 	}
 	sdk.On(eventTranslator(sdk.SessionID, spec.OnEvent))
-	return &session{sdk: sdk, readOnly: spec.ReadOnly}, nil
+	return &session{sdk: sdk, readOnly: spec.ReadOnly, emit: spec.OnEvent}, nil
 }
 
 func (b *Backend) ResumeSession(ctx context.Context, spec agent.SessionSpec) (agent.Session, error) {
@@ -68,7 +72,7 @@ func (b *Backend) ResumeSession(ctx context.Context, spec agent.SessionSpec) (ag
 	}
 	// History is read before the live subscription is attached; a
 	// freshly resumed session emits nothing until prompted.
-	return &session{sdk: sdk, onEvent: spec.OnEvent, readOnly: spec.ReadOnly}, nil
+	return &session{sdk: sdk, onEvent: spec.OnEvent, emit: spec.OnEvent, readOnly: spec.ReadOnly}, nil
 }
 
 type session struct {
@@ -77,6 +81,14 @@ type session struct {
 	// onEvent is held un-attached on resumed sessions until History()
 	// has been replayed; see attachLive.
 	onEvent func(agent.Event)
+	// emit always points at the session's event sink (unlike onEvent,
+	// which is cleared on attach); used to surface slash-command output
+	// that doesn't arrive as a normal agent turn.
+	emit func(agent.Event)
+
+	cmdMu  sync.Mutex
+	cmds   []agent.SlashCommand
+	cmdsAt time.Time
 }
 
 func (s *session) ID() string { return s.sdk.SessionID }
@@ -90,12 +102,111 @@ func (s *session) attachLive() {
 
 func (s *session) Send(ctx context.Context, prompt string) error {
 	s.attachLive()
+	// Copilot doesn't expand "/" commands inline in a prompt the way
+	// Claude does; they go through a dedicated RPC. So when the prompt is
+	// exactly a known slash command, route it through Commands.Invoke and
+	// act on the result. Anything else (including a "/path/..." that
+	// isn't a real command) is sent as an ordinary prompt.
+	if name, input, ok := s.matchSlashCommand(ctx, prompt); ok {
+		return s.invokeCommand(ctx, name, input)
+	}
+	return s.sendPrompt(ctx, prompt)
+}
+
+// sendPrompt submits an ordinary agent turn.
+func (s *session) sendPrompt(ctx context.Context, prompt string) error {
 	opts := copilot.MessageOptions{Prompt: prompt}
 	if s.readOnly {
 		opts.AgentMode = copilot.AgentModePlan
 	}
 	_, err := s.sdk.Send(ctx, opts)
 	return err
+}
+
+// matchSlashCommand reports whether prompt is a "/command [input]" whose
+// command name (or alias) is one the session actually has loaded. The
+// known-name check avoids hijacking a bare path like "/etc/hosts".
+func (s *session) matchSlashCommand(ctx context.Context, prompt string) (name, input string, ok bool) {
+	if !strings.HasPrefix(prompt, "/") || strings.HasPrefix(prompt, "//") {
+		return "", "", false
+	}
+	rest := strings.TrimPrefix(prompt, "/")
+	first, args, _ := strings.Cut(rest, " ")
+	if first == "" {
+		return "", "", false
+	}
+	want := strings.ToLower(first)
+	for _, c := range s.ListCommands(ctx) {
+		if strings.ToLower(c.Name) == want {
+			return c.Name, strings.TrimSpace(args), true
+		}
+	}
+	return "", "", false
+}
+
+// invokeCommand runs a slash command via the SDK and reacts to the
+// result union: an agent-prompt becomes a normal turn, text/completed
+// surface as a transcript message, and a subcommand prompt is reported
+// (headless atc can't present an interactive picker).
+func (s *session) invokeCommand(ctx context.Context, name, input string) error {
+	req := &rpc.CommandsInvokeRequest{Name: name}
+	if input != "" {
+		req.Input = &input
+	}
+	res, err := s.sdk.RPC.Commands.Invoke(ctx, req)
+	if err != nil {
+		return err
+	}
+	switch r := res.(type) {
+	case *rpc.SlashCommandAgentPromptResult:
+		return s.sendPrompt(ctx, r.Prompt)
+	case *rpc.SlashCommandTextResult:
+		s.emitMessage(r.Text)
+	case *rpc.SlashCommandCompletedResult:
+		if r.Message != nil {
+			s.emitMessage(*r.Message)
+		}
+	case *rpc.SlashCommandSelectSubcommandResult:
+		var names []string
+		for _, o := range r.Options {
+			names = append(names, "/"+r.Command+" "+o.Name)
+		}
+		s.emitMessage("/" + r.Command + " needs a subcommand: " + strings.Join(names, ", "))
+	}
+	return nil
+}
+
+func (s *session) emitMessage(text string) {
+	if text == "" || s.emit == nil {
+		return
+	}
+	s.emit(agent.Event{Type: agent.EventMessage, Text: text})
+}
+
+// ListCommands returns the session's invocable slash commands and skills
+// from the Copilot runtime (built-ins, skills, and client/extension
+// commands — the .github layout included), cached briefly.
+func (s *session) ListCommands(ctx context.Context) []agent.SlashCommand {
+	s.cmdMu.Lock()
+	defer s.cmdMu.Unlock()
+	if s.cmds != nil && time.Since(s.cmdsAt) < cmdCacheTTL {
+		return append([]agent.SlashCommand(nil), s.cmds...)
+	}
+	yes := true
+	list, err := s.sdk.RPC.Commands.List(ctx, &rpc.CommandsListRequest{
+		IncludeBuiltins:       &yes,
+		IncludeClientCommands: &yes,
+		IncludeSkills:         &yes,
+	})
+	if err != nil || list == nil {
+		return append([]agent.SlashCommand(nil), s.cmds...) // keep any prior list
+	}
+	cmds := make([]agent.SlashCommand, 0, len(list.Commands))
+	for _, c := range list.Commands {
+		cmds = append(cmds, agent.SlashCommand{Name: c.Name, Description: c.Description})
+	}
+	s.cmds, s.cmdsAt = cmds, time.Now()
+	return append([]agent.SlashCommand(nil), cmds...)
 }
 
 func (s *session) SetModel(ctx context.Context, model string) error {
