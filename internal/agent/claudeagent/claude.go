@@ -192,22 +192,41 @@ func (s *session) isClosed() bool {
 
 // Send submits a prompt. The session-long watcher (started here on first use)
 // streams the response from the transcript.
+//
+// It deliberately does NOT hold s.mu across ensureLaunched / waitReady /
+// send-keys: those block (waitReady up to readyTimeout) and call back into
+// helpers that take the lock (isClosed). Holding the mutex across them both
+// deadlocks the goroutine and freezes every other call on the session. The
+// helpers lock only the brief field accesses they need.
 func (s *session) Send(ctx context.Context, prompt string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if err := s.ensureLaunched(ctx); err != nil {
 		return err
 	}
 	s.startWatch()
 	tracef("Send id=%s claudeID=%s promptLen=%d onEvent=%t path=%q",
 		s.id, s.claudeID, len(prompt), s.spec.OnEvent != nil, s.transcriptPath())
-	if err := s.tm.SendText(ctx, s.tmuxName(), prompt); err != nil {
+	name := s.tmuxName()
+	if err := s.tm.SendText(ctx, name, prompt); err != nil {
 		return err
 	}
 	// Some TUIs drop an Enter that arrives in the same instant as the pasted
 	// text; a short pause makes submission reliable.
 	time.Sleep(sendKeyDelay)
-	return s.tm.SendEnter(ctx, s.tmuxName())
+	return s.tm.SendEnter(ctx, name)
+}
+
+// isStarted / markStarted guard the started flag for callers that no longer
+// hold s.mu themselves.
+func (s *session) isStarted() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.started
+}
+
+func (s *session) markStarted() {
+	s.mu.Lock()
+	s.started = true
+	s.mu.Unlock()
 }
 
 // startWatch launches the single, session-long transcript watcher the first
@@ -218,26 +237,32 @@ func (s *session) Send(ctx context.Context, prompt string) error {
 // per-turn design reset the offset on every Send and lost any late-written
 // tail).
 func (s *session) startWatch() {
+	s.mu.Lock()
 	if s.watching {
+		s.mu.Unlock()
 		return
 	}
 	s.watching = true
 	// Start at the current end of file so we don't re-emit history the
 	// supervisor already replayed via History().
 	s.offset = transcriptSize(s.transcriptPath())
-	tracef("watch start id=%s off=%d path=%q", s.id, s.offset, s.transcriptPath())
+	off := s.offset
+	s.mu.Unlock()
+	tracef("watch start id=%s off=%d path=%q", s.id, off, s.transcriptPath())
 	go s.watch()
 }
 
 // ensureLaunched makes sure claude is running in the tmux session, creating the
-// session (or recovering a dead claude) as needed. Caller holds mu.
+// session (or recovering a dead claude) as needed. It does its own brief
+// locking; the caller must NOT hold s.mu (it blocks in waitReady).
 func (s *session) ensureLaunched(ctx context.Context) error {
 	name := s.tmuxName()
 	has, err := s.tm.HasSession(ctx, name)
 	if err != nil {
 		return err
 	}
-	tracef("ensureLaunched id=%s started=%t hasSession=%t", s.id, s.started, has)
+	started := s.isStarted()
+	tracef("ensureLaunched id=%s started=%t hasSession=%t", s.id, started, has)
 	if has {
 		// Layer-2: tmux is alive but claude may have exited, leaving a shell.
 		if cmd, err := s.tm.PaneCommand(ctx, name); err == nil && isShell(cmd) {
@@ -262,7 +287,7 @@ func (s *session) ensureLaunched(ctx context.Context) error {
 	// Fresh tmux session. Launch via a shell that strips API-key env vars, so
 	// claude authenticates with the subscription OAuth token (subscription
 	// billing) rather than pay-as-you-go API credits.
-	resume := s.started
+	resume := started
 	launch := "unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN; exec " +
 		shellJoin(append([]string{"claude"}, s.claudeArgs(resume)...))
 	if err := s.tm.NewSession(ctx, tmux.NewSessionOpts{
@@ -275,7 +300,7 @@ func (s *session) ensureLaunched(ctx context.Context) error {
 		return err
 	}
 	_ = s.tm.SetOption(ctx, name, "history-limit", historyLimit)
-	s.started = true
+	s.markStarted()
 	s.waitReady(ctx) // let the TUI finish booting before the first prompt
 	if !resume {
 		s.discoverClaudeID()
@@ -348,7 +373,10 @@ func (s *session) discoverClaudeID() {
 			return // --session-id honored; claudeID already == id
 		}
 		if newest := newestTranscript(dir, start); newest != "" {
-			s.claudeID = strings.TrimSuffix(filepath.Base(newest), ".jsonl")
+			id := strings.TrimSuffix(filepath.Base(newest), ".jsonl")
+			s.mu.Lock()
+			s.claudeID = id
+			s.mu.Unlock()
 			return
 		}
 		time.Sleep(200 * time.Millisecond)
