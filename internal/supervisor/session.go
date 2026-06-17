@@ -1,6 +1,7 @@
 package supervisor
 
 import (
+	"context"
 	"strconv"
 	"strings"
 	"sync"
@@ -543,6 +544,18 @@ func (s *Session) agentSession() agent.Session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.ag
+}
+
+// SlashCommands returns the invocable "/" commands and skills the
+// backend has loaded for this session (for prompt-box completion), or
+// nil if the backend can't report them. Best-effort and may hit the
+// backend, so callers should treat it as advisory.
+func (s *Session) SlashCommands(ctx context.Context) []agent.SlashCommand {
+	ag := s.agentSession()
+	if cl, ok := ag.(agent.CommandLister); ok {
+		return cl.ListCommands(ctx)
+	}
+	return nil
 }
 
 func (s *Session) updateContext(current, limit int64) {

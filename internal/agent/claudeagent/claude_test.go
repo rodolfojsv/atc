@@ -48,6 +48,28 @@ func TestTranscriptPathEncoding(t *testing.T) {
 	}
 }
 
+func TestInitCommandsParsing(t *testing.T) {
+	const initLine = `{"type":"system","subtype":"init","slash_commands":["compact","init","deep-research"],"skills":["deep-research","code-review"]}`
+	var line streamLine
+	if err := json.Unmarshal([]byte(initLine), &line); err != nil {
+		t.Fatal(err)
+	}
+	s := &session{}
+	if line.Type == "system" && line.Subtype == "init" {
+		s.setCommands(line.SlashCommands, line.Skills)
+	}
+	got := s.ListCommands(context.Background())
+	var names []string
+	for _, c := range got {
+		names = append(names, c.Name)
+	}
+	// Union of both arrays, de-duplicated (deep-research appears in both).
+	want := []string{"compact", "init", "deep-research", "code-review"}
+	if strings.Join(names, ",") != strings.Join(want, ",") {
+		t.Errorf("commands = %v, want %v", names, want)
+	}
+}
+
 // TestLiveSmoke drives a real `claude` subprocess end to end. Opt-in
 // (spends a small amount of usage): ATC_CLAUDE_SMOKE=1 go test ./internal/agent/claudeagent/
 func TestLiveSmoke(t *testing.T) {

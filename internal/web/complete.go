@@ -8,6 +8,7 @@ package web
 // no per-keystroke round trips. Mirrors the TUI's internal/tui/complete.go.
 
 import (
+	"context"
 	"io/fs"
 	"net/http"
 	"os"
@@ -15,6 +16,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/rodolfojsv/atc/internal/supervisor"
 )
 
 const (
@@ -41,13 +44,9 @@ func (s *Server) handleComplete(w http.ResponseWriter, r *http.Request) {
 	}
 	v := sess.View()
 	out := completeJSON{
-		Files:  s.cachedFiles(v.Dir),
-		Skills: skillsInventory(v.Dir),
-	}
-	// Only Claude sessions expand .claude/commands as pass-through "/"
-	// commands; Copilot doesn't, so don't offer them there.
-	if v.Backend == "claude" {
-		out.Commands = repoCommands(v.Dir)
+		Files:    s.cachedFiles(v.Dir),
+		Skills:   skillsInventory(v.Dir),
+		Commands: slashCompletions(r.Context(), sess, v),
 	}
 	if out.Commands == nil {
 		out.Commands = []cmdInfo{}
@@ -56,6 +55,68 @@ func (s *Server) handleComplete(w http.ResponseWriter, r *http.Request) {
 		out.Files = []string{}
 	}
 	writeJSON(w, out)
+}
+
+// slashCompletions builds the "/" completion list for a session: the
+// backend's authoritative loaded commands and skills (Claude reports
+// them in its init event, Copilot via RPC — both include built-in,
+// plugin, user, and repo entries) merged with a filesystem scan of the
+// Claude .claude layout (repo + user) so repo commands/skills appear
+// immediately, with descriptions, even before the agent process starts.
+func slashCompletions(ctx context.Context, sess *supervisor.Session, v supervisor.SessionView) []cmdInfo {
+	m := newCmdMerge()
+	// Filesystem scan only describes the Claude layout; Copilot's
+	// .github assets are surfaced authoritatively by the RPC list below.
+	if v.Backend == "claude" {
+		m.add(repoCommands(v.Dir)...)
+		m.add(claudeSkills(v.Dir)...)
+		if home, err := os.UserHomeDir(); err == nil {
+			m.add(repoCommands(home)...)
+			m.add(claudeSkills(home)...)
+		}
+	}
+	for _, c := range sess.SlashCommands(ctx) {
+		m.add(cmdInfo{Name: "/" + c.Name, Desc: c.Description})
+	}
+	return m.list()
+}
+
+// cmdMerge dedupes completion entries by name, keeping the first
+// description seen (filesystem frontmatter wins over the backend's
+// often-empty one) but backfilling a description from a later duplicate.
+type cmdMerge struct {
+	seen  map[string]int
+	items []cmdInfo
+}
+
+func newCmdMerge() *cmdMerge { return &cmdMerge{seen: map[string]int{}} }
+
+func (c *cmdMerge) add(cmds ...cmdInfo) {
+	for _, ci := range cmds {
+		if i, ok := c.seen[ci.Name]; ok {
+			if c.items[i].Desc == "" {
+				c.items[i].Desc = ci.Desc
+			}
+			continue
+		}
+		c.seen[ci.Name] = len(c.items)
+		c.items = append(c.items, ci)
+	}
+}
+
+func (c *cmdMerge) list() []cmdInfo {
+	sort.Slice(c.items, func(i, j int) bool { return c.items[i].Name < c.items[j].Name })
+	return c.items
+}
+
+// claudeSkills lists a .claude/skills/*/SKILL.md tree under dir as
+// invocable "/skill" names, with each skill's frontmatter description.
+func claudeSkills(dir string) []cmdInfo {
+	var out []cmdInfo
+	for _, p := range globAll(filepath.Join(dir, ".claude", "skills", "*", "SKILL.md")) {
+		out = append(out, cmdInfo{Name: "/" + filepath.Base(filepath.Dir(p)), Desc: frontmatterDesc(p)})
+	}
+	return out
 }
 
 // cachedFiles returns the working dir's file list, walking at most once
