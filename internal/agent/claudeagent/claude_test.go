@@ -203,6 +203,29 @@ func TestIsShellAndWorkingMarkers(t *testing.T) {
 	}
 }
 
+// The first-run trust dialog must be recognized (so waitReady can auto-accept
+// it) and must not be confused with the ready splash screen.
+func TestIsTrustPrompt(t *testing.T) {
+	trust := strings.Join([]string{
+		" Accessing workspace:",
+		" /tmp/ccexp.t4Lp5i",
+		" Quick safety check: Is this a project you created or one you trust?",
+		" ❯ 1. Yes, I trust this folder",
+		"   2. No, exit",
+		" Enter to confirm · Esc to cancel",
+	}, "\n")
+	if !isTrustPrompt(trust) {
+		t.Error("expected the trust dialog to be recognized")
+	}
+	splash := "Welcome back Mauricio!\n  ⏵⏵ bypass permissions on (shift+tab to cycle)"
+	if isTrustPrompt(splash) {
+		t.Error("the ready splash should not be detected as a trust dialog")
+	}
+	if !containsAny(splash, readyMarkers) {
+		t.Error("the splash should match a ready marker")
+	}
+}
+
 // TestLiveSmoke drives a real `claude` through tmux end to end. Opt-in (needs
 // tmux + a logged-in claude, and spends a little subscription usage):
 // ATC_CLAUDE_SMOKE=1 go test ./internal/agent/claudeagent/

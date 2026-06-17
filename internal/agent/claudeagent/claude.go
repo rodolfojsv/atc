@@ -58,6 +58,7 @@ const (
 	idDiscovery  = 8 * time.Second        // how long to wait for the session jsonl to appear
 	readyTimeout = 30 * time.Second       // how long to wait for the TUI to accept input after launch
 	sendKeyDelay = 150 * time.Millisecond // pause between typing a prompt and pressing Enter
+	readySettle  = 600 * time.Millisecond // extra wait after ready chrome appears, so input is truly live
 )
 
 // readyMarkers are chrome the claude TUI shows once it is up and accepting
@@ -65,6 +66,14 @@ const (
 // prompt — otherwise keystrokes typed during startup (config + MCP load) are
 // dropped. Tunable against a live capture-pane.
 var readyMarkers = []string{"shift+tab", "for shortcuts", "bypass permissions"}
+
+// trustMarkers identify Claude Code's first-run "trust this folder?" dialog,
+// which blocks all input until answered. atc launches claude in a working dir
+// the user configured for the session, so we auto-accept it (the "Yes, I trust
+// this folder" option is preselected; Enter confirms).
+var trustMarkers = []string{"trust this folder", "Is this a project you created"}
+
+func isTrustPrompt(pane string) bool { return containsAny(pane, trustMarkers) }
 
 // workingMarkers are substrings the claude TUI shows while a turn is in
 // progress. If none are present (and the transcript has gone quiet) the turn is
@@ -226,13 +235,25 @@ func (s *session) ensureLaunched(ctx context.Context) error {
 // deadline elapses. Without this, the first prompt can be typed into a
 // still-booting claude (config + MCP load) and silently dropped.
 func (s *session) waitReady(ctx context.Context) {
+	name := s.tmuxName()
 	deadline := time.Now().Add(readyTimeout)
 	for time.Now().Before(deadline) {
 		if s.isClosed() {
 			return
 		}
-		if pane, err := s.tm.Capture(ctx, s.tmuxName(), tmux.CaptureOpts{}); err == nil && containsAny(pane, readyMarkers) {
-			return
+		pane, err := s.tm.Capture(ctx, name, tmux.CaptureOpts{})
+		if err == nil {
+			// The first-run trust dialog blocks input; auto-accept it (the
+			// "Yes" option is preselected, so Enter confirms) and keep waiting.
+			if isTrustPrompt(pane) {
+				_ = s.tm.SendEnter(ctx, name)
+				time.Sleep(time.Second)
+				continue
+			}
+			if containsAny(pane, readyMarkers) {
+				time.Sleep(readySettle) // let the input box become live before we type
+				return
+			}
 		}
 		time.Sleep(pollInterval)
 	}
