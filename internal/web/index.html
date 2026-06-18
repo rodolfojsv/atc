@@ -787,8 +787,9 @@ function cost(s) {
 }
 
 // renderLimits paints the cached account-usage badge. The reading is a
-// snapshot from the last /usage scrape (Claude only), so we show its age and
-// let the user tap to refresh. Hidden until we have a reading.
+// point-in-time snapshot (Claude: the last /usage scrape; Copilot: the last
+// turn's account quota), so we show its age and let the user tap for detail.
+// Hidden until we have a reading.
 // bindingWindow returns the most-constrained (highest %) usage window.
 function bindingWindow(L) {
   if (!L || !L.windows || !L.windows.length) return null;
@@ -828,9 +829,14 @@ function openLimits() {
     `<b class="${w.pct >= 80 ? 'hot' : ''}">${Math.round(w.pct)}%</b>` +
     `<span class="lr">${esc(w.resets || '')}</span></div>`).join('');
   const age = L.ageSec < 90 ? 'just now' : Math.round(L.ageSec / 60) + 'm ago';
-  openModal('Claude usage', rows + `<div class="lr" style="margin-top:.7em">as of ${age}</div>`,
-    `<button class="ghost" onclick="closeModal()">Close</button>` +
-    `<button class="primary" onclick="closeModal(); refreshLimits()">Refresh</button>`);
+  const backend = (curSession || {}).backend;
+  const title = backend === 'copilot' ? 'Copilot usage' : 'Claude usage';
+  // Claude's reading comes from a manual /usage scrape, so it gets a Refresh
+  // button. Copilot's quota rides every turn's usage event and refreshes on
+  // its own, and it has no /usage command, so no Refresh button there.
+  const foot = `<button class="ghost" onclick="closeModal()">Close</button>` +
+    (backend === 'claude' ? `<button class="primary" onclick="closeModal(); refreshLimits()">Refresh</button>` : '');
+  openModal(title, rows + `<div class="lr" style="margin-top:.7em">as of ${age}</div>`, foot);
 }
 
 // refreshLimits re-runs /usage in the session; the scraped reading lands on

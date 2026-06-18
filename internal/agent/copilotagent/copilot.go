@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -272,7 +273,56 @@ func eventTranslator(sessionID string, onEvent func(agent.Event)) copilot.Sessio
 		if ok {
 			onEvent(e)
 		}
+		// Copilot has no /usage overlay to scrape (the way Claude does);
+		// instead it rides account quota snapshots on every usage event.
+		// Surface them as a limits snapshot so the account-usage badge
+		// works for Copilot too, refreshed automatically each turn.
+		if u, isUsage := ev.Data.(*rpc.AssistantUsageData); isUsage {
+			if lim, hasLim := limitsFromQuota(u.QuotaSnapshots); hasLim {
+				onEvent(lim)
+			}
+		}
 	}
+}
+
+// limitsFromQuota turns Copilot's per-quota snapshots into an account
+// rate-limit event. Copilot reports the percentage remaining, so we surface
+// the used percentage to match Claude's windows. Unlimited or empty
+// entitlements carry no meaningful bar and are skipped. Windows are sorted by
+// label so the snapshot is stable across the UI's repeated polls (Go map
+// iteration order isn't). Returns false when nothing meaningful is present.
+func limitsFromQuota(snaps map[string]rpc.AssistantUsageQuotaSnapshot) (agent.Event, bool) {
+	if len(snaps) == 0 {
+		return agent.Event{}, false
+	}
+	var windows []agent.LimitWindow
+	for key, q := range snaps {
+		if q.IsUnlimitedEntitlement {
+			continue
+		}
+		used := 100 - q.RemainingPercentage
+		if used < 0 {
+			used = 0
+		} else if used > 100 {
+			used = 100
+		}
+		w := agent.LimitWindow{Label: quotaLabel(key), Pct: used}
+		if q.ResetDate != nil {
+			w.Resets = "resets " + q.ResetDate.Local().Format("Jan 2, 3:04pm")
+		}
+		windows = append(windows, w)
+	}
+	if len(windows) == 0 {
+		return agent.Event{}, false
+	}
+	sort.Slice(windows, func(i, j int) bool { return windows[i].Label < windows[j].Label })
+	return agent.Event{Type: agent.EventLimits, LimitWindows: windows}, true
+}
+
+// quotaLabel makes a Copilot quota key (e.g. "premium_interactions") read
+// like the other account limit windows in the UI.
+func quotaLabel(key string) string {
+	return strings.ReplaceAll(key, "_", " ")
 }
 
 // Copilot event tracing: when ATC_COPILOT_TRACE names a writable file,
