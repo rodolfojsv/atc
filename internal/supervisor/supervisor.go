@@ -660,7 +660,10 @@ func (s *Supervisor) WatchStore(ctx context.Context, interval time.Duration) {
 // on a question (Copilot's ask_user), the message answers that question
 // instead of starting a new turn.
 func (s *Supervisor) Prompt(sess *Session, text string) error {
+	strace("Prompt sess=%q backend=%s status=%s hasQuestion=%t textlen=%d",
+		sess.Name, sess.Backend, sess.Status(), sess.HasQuestion(), len(text))
 	if sess.HasQuestion() {
+		strace("Prompt->answerQuestion sess=%q (consumed as question answer, not sent)", sess.Name)
 		sess.appendEntry(EntryUser, text)
 		sess.addHistory(text)
 		sess.answerQuestion(text)
@@ -670,14 +673,17 @@ func (s *Supervisor) Prompt(sess *Session, text string) error {
 	}
 	ag := sess.agentSession()
 	if ag == nil {
+		strace("Prompt->ag-nil sess=%q (session is still starting)", sess.Name)
 		return errors.New("session is still starting")
 	}
 	sess.appendEntry(EntryUser, text)
 	sess.addHistory(text)
 	sess.setStatus(StatusWorking)
 	s.poke()
+	strace("Prompt->ag.Send sess=%q", sess.Name)
 	err := ag.Send(context.Background(), text)
 	if err != nil {
+		strace("Prompt->ag.Send err sess=%q err=%v", sess.Name, err)
 		sess.setError(fmt.Sprintf("send failed: %v", err))
 		s.poke()
 	}
@@ -797,8 +803,13 @@ func (s *Supervisor) PromptWith(sess *Session, text string, atts []agent.Attachm
 func (s *Supervisor) saveAttachments(sess *Session, atts []agent.Attachment) ([]EntryAttachment, error) {
 	sess.mu.Lock()
 	base := sess.Dir
+	id := sess.id
 	sess.mu.Unlock()
-	dir := filepath.Join(base, ".atc-attachments")
+	// Namespace by session id so sessions that share a working dir — notably
+	// scratch sessions, which all run in ~/.atc/scratch — don't pile into, or
+	// clobber on Kill, one another's attachments.
+	rel := filepath.Join(".atc-attachments", id)
+	dir := filepath.Join(base, rel)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
@@ -817,7 +828,7 @@ func (s *Supervisor) saveAttachments(sess *Session, atts []agent.Attachment) ([]
 		saved[i] = EntryAttachment{
 			Name:      a.Name,
 			MediaType: a.MediaType,
-			Path:      filepath.Join(".atc-attachments", name),
+			Path:      filepath.Join(rel, name),
 		}
 	}
 	return saved, nil
@@ -946,11 +957,19 @@ func (s *Supervisor) Kill(sess *Session, removeWorktree bool) {
 		s.killed[id] = true
 		s.mu.Unlock()
 	}
-	// Drop saved attachments. For a worktree session this lives inside the
-	// worktree removed below, but direct/scratch sessions keep their dir,
-	// so clean it up explicitly either way.
+	// Drop this session's saved attachments. For a worktree session this lives
+	// inside the worktree removed below, but direct/scratch sessions keep their
+	// dir, so clean it up explicitly either way. Remove only this session's
+	// subfolder — scratch sessions share the dir, so a blanket wipe would take
+	// every scratch session's attachments with it — then drop the parent only
+	// if it's now empty.
 	if dir != "" {
-		_ = os.RemoveAll(filepath.Join(dir, ".atc-attachments"))
+		if id != "" {
+			_ = os.RemoveAll(filepath.Join(dir, ".atc-attachments", id))
+			_ = os.Remove(filepath.Join(dir, ".atc-attachments")) // succeeds only if empty
+		} else {
+			_ = os.RemoveAll(filepath.Join(dir, ".atc-attachments"))
+		}
 	}
 	if removeWorktree && worktree != "" {
 		if err := s.trees.Remove(repo, worktree, branch); err != nil {
@@ -975,11 +994,14 @@ func (s *Supervisor) Kill(sess *Session, removeWorktree bool) {
 func (s *Supervisor) Stop() {
 	s.persist()
 	for _, sess := range s.Sessions() {
+		// Unblock anything waiting on a permission/question so goroutines
+		// can exit, but do NOT Close() the agent session: a durable backend
+		// (Claude over tmux) keeps its tmux session — and the live `claude`
+		// process — alive across an atc restart, so the next run reattaches
+		// instead of re-resuming from scratch. Per-backend shutdown cleanup
+		// happens in backend.Stop() below; explicit teardown is Kill().
 		sess.RespondAll(agent.Cancel, "")
 		sess.cancelQuestion()
-		if ag := sess.agentSession(); ag != nil {
-			_ = ag.Close()
-		}
 	}
 	for _, b := range s.backends {
 		_ = b.Stop()

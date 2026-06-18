@@ -136,7 +136,7 @@ func TestPromptWithSavesToDiskForPlainBackend(t *testing.T) {
 	s := New(testConfig(t), bus.New())
 	dir := t.TempDir()
 	ag := &fakeAgent{}
-	sess := &Session{Name: "x", Dir: dir, Preset: "default", status: StatusIdle, ag: ag}
+	sess := &Session{id: "sess", Name: "x", Dir: dir, Preset: "default", status: StatusIdle, ag: ag}
 
 	if err := s.PromptWith(sess, "what is this?", []agent.Attachment{png()}); err != nil {
 		t.Fatal(err)
@@ -144,11 +144,12 @@ func TestPromptWithSavesToDiskForPlainBackend(t *testing.T) {
 	if !strings.Contains(ag.sentText, "what is this?") || !strings.Contains(ag.sentText, ".atc-attachments") {
 		t.Fatalf("prompt missing text or file reference: %q", ag.sentText)
 	}
-	files, err := os.ReadDir(filepath.Join(dir, ".atc-attachments"))
+	subdir := filepath.Join(dir, ".atc-attachments", "sess")
+	files, err := os.ReadDir(subdir)
 	if err != nil || len(files) != 1 {
 		t.Fatalf("attachment not written: %v (%d files)", err, len(files))
 	}
-	if data, _ := os.ReadFile(filepath.Join(dir, ".atc-attachments", files[0].Name())); string(data) != "\x89PNG" {
+	if data, _ := os.ReadFile(filepath.Join(subdir, files[0].Name())); string(data) != "\x89PNG" {
 		t.Fatalf("attachment content mangled: %q", data)
 	}
 }
@@ -160,7 +161,7 @@ func TestPromptWithInlinesImagesWhenSupported(t *testing.T) {
 	s := New(testConfig(t), bus.New())
 	dir := t.TempDir()
 	ag := &fakeInlineAgent{}
-	sess := &Session{Name: "x", Dir: dir, Preset: "default", status: StatusIdle, ag: ag}
+	sess := &Session{id: "sess", Name: "x", Dir: dir, Preset: "default", status: StatusIdle, ag: ag}
 
 	if err := s.PromptWith(sess, "what is this?", []agent.Attachment{png()}); err != nil {
 		t.Fatal(err)
@@ -172,7 +173,7 @@ func TestPromptWithInlinesImagesWhenSupported(t *testing.T) {
 		t.Fatalf("prompt text altered (should not reference disk path): %q", ag.sentText)
 	}
 	// The inline image is also saved for the UI and recorded on the entry.
-	files, err := os.ReadDir(filepath.Join(dir, ".atc-attachments"))
+	files, err := os.ReadDir(filepath.Join(dir, ".atc-attachments", "sess"))
 	if err != nil || len(files) != 1 {
 		t.Fatalf("inline image not persisted for viewing: %v (%d files)", err, len(files))
 	}
@@ -189,7 +190,7 @@ func TestKillRemovesAttachments(t *testing.T) {
 	s := New(testConfig(t), bus.New())
 	dir := t.TempDir()
 	ag := &fakeInlineAgent{}
-	sess := &Session{Name: "x", Dir: dir, Preset: "default", status: StatusIdle, ag: ag}
+	sess := &Session{id: "sess", Name: "x", Dir: dir, Preset: "default", status: StatusIdle, ag: ag}
 	s.sessions = append(s.sessions, sess)
 
 	if err := s.PromptWith(sess, "look", []agent.Attachment{png()}); err != nil {
@@ -211,7 +212,7 @@ func TestPromptWithMixedAttachments(t *testing.T) {
 	s := New(testConfig(t), bus.New())
 	dir := t.TempDir()
 	ag := &fakeInlineAgent{}
-	sess := &Session{Name: "x", Dir: dir, Preset: "default", status: StatusIdle, ag: ag}
+	sess := &Session{id: "sess", Name: "x", Dir: dir, Preset: "default", status: StatusIdle, ag: ag}
 
 	atts := []agent.Attachment{png(), {Name: "log.txt", MediaType: "text/plain", Data: []byte("boom")}}
 	if err := s.PromptWith(sess, "debug this", atts); err != nil {

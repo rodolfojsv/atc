@@ -36,154 +36,30 @@ func TestMessageEventsBlocks(t *testing.T) {
 }
 
 func TestTranscriptPathEncoding(t *testing.T) {
-	s := &session{id: "abc-123", spec: agent.SessionSpec{WorkingDir: "/home/u/my proj"}}
+	s := &session{id: "abc-123", claudeID: "abc-123", spec: agent.SessionSpec{WorkingDir: "/home/u/my proj"}}
 	t.Setenv("CLAUDE_CONFIG_DIR", "/cfg")
-	p, err := s.transcriptPath()
-	if err != nil {
-		t.Fatal(err)
-	}
 	want := "/cfg/projects/-home-u-my-proj/abc-123.jsonl"
-	if p != want {
+	if p := s.transcriptPath(); p != want {
 		t.Errorf("got %q, want %q", p, want)
 	}
 }
 
-func TestInitCommandsParsing(t *testing.T) {
-	const initLine = `{"type":"system","subtype":"init","slash_commands":["compact","init","deep-research"],"skills":["deep-research","code-review"]}`
-	var line streamLine
-	if err := json.Unmarshal([]byte(initLine), &line); err != nil {
-		t.Fatal(err)
+// eventsFromLine drives both History (includeUser=true) and live tailing
+// (includeUser=false). The live path must skip the user's own prompt so it
+// isn't echoed back into the transcript the user just typed into.
+func TestEventsFromLineUserVisibility(t *testing.T) {
+	userLine := []byte(`{"type":"user","message":{"role":"user","content":"hello there"}}`)
+
+	if evs := eventsFromLine(userLine, false); len(evs) != 0 {
+		t.Errorf("live tail should skip user lines, got %+v", evs)
 	}
-	s := &session{}
-	if line.Type == "system" && line.Subtype == "init" {
-		s.setCommands(line.SlashCommands, line.Skills)
-	}
-	got := s.ListCommands(context.Background())
-	var names []string
-	for _, c := range got {
-		names = append(names, c.Name)
-	}
-	// Union of both arrays, de-duplicated (deep-research appears in both).
-	want := []string{"compact", "init", "deep-research", "code-review"}
-	if strings.Join(names, ",") != strings.Join(want, ",") {
-		t.Errorf("commands = %v, want %v", names, want)
+	evs := eventsFromLine(userLine, true)
+	if len(evs) != 1 || evs[0].Type != agent.EventUserMessage || evs[0].Text != "hello there" {
+		t.Errorf("history replay should include the user message, got %+v", evs)
 	}
 }
 
-// TestLiveSmoke drives a real `claude` subprocess end to end. Opt-in
-// (spends a small amount of usage): ATC_CLAUDE_SMOKE=1 go test ./internal/agent/claudeagent/
-func TestLiveSmoke(t *testing.T) {
-	if os.Getenv("ATC_CLAUDE_SMOKE") != "1" {
-		t.Skip("set ATC_CLAUDE_SMOKE=1 to run the live claude smoke test")
-	}
-	done := make(chan agent.Event, 1)
-	var text strings.Builder
-	spec := agent.SessionSpec{
-		WorkingDir: t.TempDir(),
-		Model:      "haiku",
-		Approval:   config.ApprovalPrompt,
-		OnEvent: func(e agent.Event) {
-			switch e.Type {
-			case agent.EventMessage:
-				text.WriteString(e.Text)
-			case agent.EventIdle, agent.EventError:
-				select {
-				case done <- e:
-				default:
-				}
-			}
-		},
-	}
-	sess, err := New().NewSession(context.Background(), spec)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer sess.Close()
-
-	if err := sess.Send(context.Background(), "Reply with exactly the word OK and nothing else."); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case e := <-done:
-		if e.Type == agent.EventError {
-			t.Fatalf("session error: %s %s", e.ErrType, e.Text)
-		}
-	case <-time.After(120 * time.Second):
-		t.Fatal("timed out waiting for result")
-	}
-	if !strings.Contains(text.String(), "OK") {
-		t.Errorf("expected OK in response, got %q", text.String())
-	}
-	t.Logf("response: %q  session: %s", text.String(), sess.ID())
-
-	// Second turn exercises process reuse on the same conversation.
-	text.Reset()
-	if err := sess.Send(context.Background(), "Now reply with exactly the word SECOND and nothing else."); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case e := <-done:
-		if e.Type == agent.EventError {
-			t.Fatalf("second turn error: %s %s", e.ErrType, e.Text)
-		}
-	case <-time.After(120 * time.Second):
-		t.Fatal("timed out on second turn")
-	}
-	if !strings.Contains(text.String(), "SECOND") {
-		t.Errorf("expected SECOND, got %q", text.String())
-	}
-
-	// History should replay both prompts from the on-disk transcript.
-	users := 0
-	for _, e := range sess.History(context.Background()) {
-		if e.Type == agent.EventUserMessage {
-			users++
-		}
-	}
-	if users < 2 {
-		t.Errorf("expected ≥2 user messages in history, got %d", users)
-	}
-}
-
-// userContent must produce the API content-block shape Claude Code's
-// stream-JSON input expects: image blocks first, then the text block.
-func TestUserContentWithImages(t *testing.T) {
-	got := userContent("what is this?", []agent.Attachment{
-		{Name: "a.png", MediaType: "image/png", Data: []byte{1, 2, 3}},
-	})
-	raw, err := json.Marshal(got)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var blocks []map[string]any
-	if err := json.Unmarshal(raw, &blocks); err != nil {
-		t.Fatalf("content is not a block array: %s", raw)
-	}
-	if len(blocks) != 2 {
-		t.Fatalf("want 2 blocks, got %d: %s", len(blocks), raw)
-	}
-	if blocks[0]["type"] != "image" {
-		t.Fatalf("first block %v, want image", blocks[0]["type"])
-	}
-	src := blocks[0]["source"].(map[string]any)
-	if src["type"] != "base64" || src["media_type"] != "image/png" || src["data"] != "AQID" {
-		t.Fatalf("bad image source: %v", src)
-	}
-	if blocks[1]["type"] != "text" || blocks[1]["text"] != "what is this?" {
-		t.Fatalf("bad text block: %v", blocks[1])
-	}
-}
-
-// Without attachments the content stays a plain string — the shape
-// every Claude Code version accepts.
-func TestUserContentPlain(t *testing.T) {
-	if got := userContent("hi", nil); got != "hi" {
-		t.Fatalf("got %v, want plain string", got)
-	}
-}
-
-// AskUserQuestion must render as a readable question (headless Claude
-// can't be answered, so the user replies in prose).
+// AskUserQuestion must render as a readable question rather than a tool line.
 func TestFormatAskUserQuestion(t *testing.T) {
 	raw := json.RawMessage(`[{"type":"tool_use","name":"AskUserQuestion","input":{
 		"questions":[{"header":"Indentation","question":"Tabs or spaces?","options":[
@@ -199,7 +75,6 @@ func TestFormatAskUserQuestion(t *testing.T) {
 			t.Errorf("rendered question missing %q:\n%s", want, text)
 		}
 	}
-	// It must NOT have produced a generic tool-start line.
 	for _, e := range events {
 		if e.Type == agent.EventToolStart {
 			t.Errorf("AskUserQuestion should not render as a tool line")
@@ -210,13 +85,9 @@ func TestFormatAskUserQuestion(t *testing.T) {
 func TestHistoryRestoresUsage(t *testing.T) {
 	cfgDir := t.TempDir()
 	t.Setenv("CLAUDE_CONFIG_DIR", cfgDir)
-	workDir := "/home/u/proj"
-	s := &session{id: "hist-1", spec: agent.SessionSpec{WorkingDir: workDir}}
+	s := &session{id: "hist-1", claudeID: "hist-1", spec: agent.SessionSpec{WorkingDir: "/home/u/proj"}}
 
-	path, err := s.transcriptPath()
-	if err != nil {
-		t.Fatal(err)
-	}
+	path := s.transcriptPath()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -253,4 +124,152 @@ func TestHistoryRestoresUsage(t *testing.T) {
 	if cost != 0.012 {
 		t.Errorf("cost not restored: %v", cost)
 	}
+}
+
+// drainTranscript must emit only lines written after the recorded offset, so a
+// new turn doesn't re-emit the whole prior conversation.
+func TestDrainTranscriptFromOffset(t *testing.T) {
+	cfgDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", cfgDir)
+	s := &session{id: "drain-1", claudeID: "drain-1", spec: agent.SessionSpec{WorkingDir: "/w"}}
+
+	path := s.transcriptPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	prior := `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"old turn"}]}}` + "\n"
+	if err := os.WriteFile(path, []byte(prior), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Start this turn at end-of-file, as Send does.
+	s.offset = transcriptSize(path)
+
+	// Nothing new yet.
+	if evs := s.drainTranscript(); len(evs) != 0 {
+		t.Fatalf("expected no events before new output, got %+v", evs)
+	}
+
+	// Append a new assistant line; only it should be emitted.
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = f.WriteString(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"new turn"}]}}` + "\n")
+	_ = f.Close()
+
+	evs := s.drainTranscript()
+	if len(evs) != 1 || evs[0].Text != "new turn" {
+		t.Fatalf("expected only the new line, got %+v", evs)
+	}
+	// A second drain with no new bytes yields nothing (offset advanced).
+	if evs := s.drainTranscript(); len(evs) != 0 {
+		t.Fatalf("offset not advanced; re-emitted %+v", evs)
+	}
+}
+
+func TestShellJoin(t *testing.T) {
+	got := shellJoin([]string{"claude", "--model", "haiku", "--resume", "a'b"})
+	want := `'claude' '--model' 'haiku' '--resume' 'a'\''b'`
+	if got != want {
+		t.Errorf("shellJoin:\n got %s\nwant %s", got, want)
+	}
+}
+
+func TestIsShellAndWorkingMarkers(t *testing.T) {
+	for _, sh := range []string{"sh", "bash", "zsh", "fish"} {
+		if !isShell(sh) {
+			t.Errorf("%q should be a shell", sh)
+		}
+	}
+	for _, notSh := range []string{"claude", "node", "vim"} {
+		if isShell(notSh) {
+			t.Errorf("%q should not be a shell", notSh)
+		}
+	}
+	if !containsAny("…thinking (esc to interrupt)", workingMarkers) {
+		t.Error("expected working marker to match the busy status line")
+	}
+	if containsAny("> ", workingMarkers) {
+		t.Error("idle prompt should not match a working marker")
+	}
+	// Live-observed busy line (the spinner word rotates; the "(<n>s" counter
+	// is the stable signal).
+	if !isWorking("✢ Noodling… (49s · ↓ 2.7k tokens)") {
+		t.Error("isWorking should match the live busy spinner line")
+	}
+	if isWorking("❯ type a message\n  ? for shortcuts") {
+		t.Error("isWorking should be false on an idle input box")
+	}
+}
+
+// The first-run trust dialog must be recognized (so waitReady can auto-accept
+// it) and must not be confused with the ready splash screen.
+func TestIsTrustPrompt(t *testing.T) {
+	trust := strings.Join([]string{
+		" Accessing workspace:",
+		" /tmp/ccexp.t4Lp5i",
+		" Quick safety check: Is this a project you created or one you trust?",
+		" ❯ 1. Yes, I trust this folder",
+		"   2. No, exit",
+		" Enter to confirm · Esc to cancel",
+	}, "\n")
+	if !isTrustPrompt(trust) {
+		t.Error("expected the trust dialog to be recognized")
+	}
+	splash := "Welcome back Mauricio!\n  ⏵⏵ bypass permissions on (shift+tab to cycle)"
+	if isTrustPrompt(splash) {
+		t.Error("the ready splash should not be detected as a trust dialog")
+	}
+	if !containsAny(splash, readyMarkers) {
+		t.Error("the splash should match a ready marker")
+	}
+}
+
+// TestLiveSmoke drives a real `claude` through tmux end to end. Opt-in (needs
+// tmux + a logged-in claude, and spends a little subscription usage):
+// ATC_CLAUDE_SMOKE=1 go test ./internal/agent/claudeagent/
+func TestLiveSmoke(t *testing.T) {
+	if os.Getenv("ATC_CLAUDE_SMOKE") != "1" {
+		t.Skip("set ATC_CLAUDE_SMOKE=1 to run the live claude+tmux smoke test")
+	}
+	done := make(chan agent.Event, 1)
+	var text strings.Builder
+	spec := agent.SessionSpec{
+		WorkingDir: t.TempDir(),
+		Model:      "haiku",
+		Approval:   config.ApprovalAllowAll,
+		OnEvent: func(e agent.Event) {
+			switch e.Type {
+			case agent.EventMessage:
+				text.WriteString(e.Text)
+			case agent.EventIdle, agent.EventError:
+				select {
+				case done <- e:
+				default:
+				}
+			}
+		},
+	}
+	sess, err := New().NewSession(context.Background(), spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+
+	if err := sess.Send(context.Background(), "Reply with exactly the word OK and nothing else."); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case e := <-done:
+		if e.Type == agent.EventError {
+			t.Fatalf("session error: %s %s", e.ErrType, e.Text)
+		}
+	case <-time.After(180 * time.Second):
+		t.Fatal("timed out waiting for turn-end")
+	}
+	if !strings.Contains(text.String(), "OK") {
+		t.Errorf("expected OK in response, got %q", text.String())
+	}
+	t.Logf("response: %q  session: %s", text.String(), sess.ID())
 }
