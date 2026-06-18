@@ -53,6 +53,51 @@ func TestDetectQuestionPrompt(t *testing.T) {
 	}
 }
 
+// cursorOptionIndex must report which option the selection cursor sits on, so
+// selectIndex navigates relative to the real highlight (the resume dialog
+// defaults its cursor to a non-first option).
+func TestCursorOptionIndex(t *testing.T) {
+	cases := []struct {
+		name string
+		pane []string
+		want int
+	}{
+		{"cursor on first", []string{"  ❯ 1. A", "    2. B", "    3. C"}, 0},
+		{"cursor on second", []string{"    1. A", "  ❯ 2. B", "    3. C"}, 1},
+		{"cursor on third", []string{"    1. A", "    2. B", "  ► 3. C"}, 2},
+		{"no cursor", []string{"    1. A", "    2. B"}, -1},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := cursorOptionIndex(strings.Join(c.pane, "\n")); got != c.want {
+				t.Errorf("cursorOptionIndex = %d, want %d", got, c.want)
+			}
+		})
+	}
+}
+
+// optionIndexFor maps a bare number or matching label to the right option, and
+// returns -1 for a genuine freeform answer so it's typed rather than mis-mapped.
+func TestOptionIndexFor(t *testing.T) {
+	opts := []promptOption{{label: "Resume from summary (recommended)"}, {label: "Resume full session as-is"}, {label: "Don't ask me again"}}
+	cases := []struct {
+		answer string
+		want   int
+	}{
+		{"1", 0},
+		{" 2 ", 1},
+		{"3", 2},
+		{"4", -1}, // out of range → not a selector
+		{"full session", 1},
+		{"something else entirely", -1},
+	}
+	for _, c := range cases {
+		if got := optionIndexFor(c.answer, opts); got != c.want {
+			t.Errorf("optionIndexFor(%q) = %d, want %d", c.answer, got, c.want)
+		}
+	}
+}
+
 // A numbered list in ordinary assistant prose (no selection cursor, no
 // permission wording) must NOT be treated as an interactive prompt.
 func TestDetectProseIsNotAPrompt(t *testing.T) {

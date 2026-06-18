@@ -201,10 +201,27 @@ func (s *session) Send(ctx context.Context, prompt string) error {
 	if err := s.ensureLaunched(ctx); err != nil {
 		return err
 	}
+	name := s.tmuxName()
+	// A select dialog already on screen means this prompt is the user
+	// answering it, not a new turn. This happens when the dialog's in-memory
+	// question didn't survive an atc restart (the rendered question persists in
+	// the transcript and the dialog persists in tmux, but question/questionCh
+	// are in-memory only) — so the supervisor routes the reply here as a fresh
+	// Send instead of through OnQuestion. Drive the selection directly; pasting
+	// into a dialog that isn't a text field drops the input and Enter takes the
+	// default. Do this before the watcher starts so we don't race its own
+	// detect/answer path.
+	if pane, err := s.tm.Capture(ctx, name, tmux.CaptureOpts{}); err == nil {
+		if p, ok := detectPrompt(pane); ok {
+			tracef("Send dialog-answer id=%s kind=%s sel=%q", s.id, p.kind, prompt)
+			s.answerDialogDirect(ctx, p, prompt)
+			s.startWatch()
+			return nil
+		}
+	}
 	s.startWatch()
 	tracef("Send id=%s claudeID=%s promptLen=%d onEvent=%t path=%q",
 		s.id, s.claudeID, len(prompt), s.spec.OnEvent != nil, s.transcriptPath())
-	name := s.tmuxName()
 	if err := s.tm.SendText(ctx, name, prompt); err != nil {
 		return err
 	}
@@ -216,7 +233,150 @@ func (s *session) Send(ctx context.Context, prompt string) error {
 	if !s.confirmInput(ctx, name, prompt) {
 		tracef("Send id=%s WARNING: input did not reflect prompt before submit", s.id)
 	}
-	return s.tm.SendEnter(ctx, name)
+	if err := s.tm.SendEnter(ctx, name); err != nil {
+		return err
+	}
+	// /usage and /cost paint an ephemeral overlay that never reaches the
+	// JSONL transcript, so the watcher can't see it. Scrape the pane out of
+	// band, surface the text, and capture a limits snapshot.
+	if isUsageCommand(prompt) {
+		go s.scrapeUsage(name)
+	}
+	return nil
+}
+
+// isUsageCommand reports whether prompt is a client-side Claude Code command
+// that renders a transient overlay we must scrape rather than read from the
+// transcript.
+func isUsageCommand(prompt string) bool {
+	switch strings.TrimSpace(prompt) {
+	case "/usage", "/cost":
+		return true
+	}
+	return false
+}
+
+// usageSettle is how long the overlay needs to finish painting before we read
+// the pane. It's a TUI-version knob, like the other capture tunables.
+const usageSettle = 900 * time.Millisecond
+
+// scrapeUsage reads the /usage overlay from the pane, surfaces it as a message
+// (restoring the text readout the headless backend used to emit), parses a
+// best-effort limits snapshot, then dismisses the overlay so the prompt is
+// usable again.
+func (s *session) scrapeUsage(name string) {
+	time.Sleep(usageSettle)
+	if s.isClosed() {
+		return
+	}
+	ctx := context.Background()
+	pane, err := s.tm.Capture(ctx, name, tmux.CaptureOpts{})
+	if err != nil {
+		tracef("usage capturefail id=%s err=%v", s.id, err)
+		return
+	}
+	text := extractUsageOverlay(pane)
+	if text == "" {
+		tracef("usage no-overlay id=%s", s.id)
+		// Still try to dismiss in case an overlay is up but unrecognized.
+		_ = s.tm.SendKeys(ctx, name, "Escape")
+		return
+	}
+	s.emit(agent.Event{Type: agent.EventMessage, Text: "```\n" + text + "\n```"})
+	windows := parseUsageLimits(text)
+	s.emit(agent.Event{Type: agent.EventLimits, LimitText: text, LimitWindows: windows})
+	tracef("usage scraped id=%s windows=%d", s.id, len(windows))
+	_ = s.tm.SendKeys(ctx, name, "Escape")
+}
+
+var (
+	usageKeyword = regexp.MustCompile(`(?i)usage|limit|reset|current (session|week)|weekly|per[- ]?week|% used|tokens? (used|remaining)`)
+	boxChars     = strings.NewReplacer(
+		"│", " ", "┃", " ", "║", " ", "╭", " ", "╮", " ", "╰", " ", "╯", " ",
+		"├", " ", "┤", " ", "┌", " ", "┐", " ", "└", " ", "┘", " ",
+	)
+)
+
+// extractUsageOverlay pulls the usage panel out of a full pane capture. The
+// overlay is a bordered box drawn over the transcript; we keep the contiguous
+// run of lines around the usage-related keywords and strip box-drawing glyphs.
+// Returns "" when nothing usage-like is on screen.
+func extractUsageOverlay(pane string) string {
+	lines := strings.Split(pane, "\n")
+	first, last := -1, -1
+	for i, ln := range lines {
+		if usageKeyword.MatchString(ln) {
+			if first < 0 {
+				first = i
+			}
+			last = i
+		}
+	}
+	if first < 0 {
+		return ""
+	}
+	// Widen to include adjacent non-blank lines (bars, reset dates, totals
+	// that don't themselves contain a keyword).
+	for first > 0 && strings.TrimSpace(stripBox(lines[first-1])) != "" {
+		first--
+	}
+	for last < len(lines)-1 && strings.TrimSpace(stripBox(lines[last+1])) != "" {
+		last++
+	}
+	var out []string
+	for _, ln := range lines[first : last+1] {
+		out = append(out, strings.TrimRight(stripBox(ln), " "))
+	}
+	return strings.TrimSpace(strings.Join(out, "\n"))
+}
+
+func stripBox(s string) string {
+	s = boxChars.Replace(s)
+	// Drop runs of horizontal rule glyphs.
+	s = strings.Map(func(r rune) rune {
+		switch r {
+		case '─', '━', '═':
+			return -1
+		}
+		return r
+	}, s)
+	return s
+}
+
+// currentLimitRe matches a real rate-limit line, e.g.
+//
+//	Current week (all models): 36% used · resets Jun 20, 2:59pm (America/Chicago)
+//
+// Only these "Current …: N% used" lines are limits. The "What's contributing to
+// your limits usage?" section below them is full of unrelated percentages
+// ("80% of your usage came from subagent-heavy sessions") — taking the max over
+// the whole overlay is what surfaced a bogus 74%. Window name is group 1, the
+// percent group 2, and the reset hint group 3.
+var currentLimitRe = regexp.MustCompile(`(?i)current\s+(.+?):\s*(\d{1,3})\s*%\s*used\b\s*(?:·\s*)?(resets[^\n]*)?`)
+
+// parseUsageLimits returns every "Current …" limit window in the scraped
+// /usage text, in display order (session, weekly, per-model). If a full
+// scrollback capture contains more than one /usage block, the latest reading
+// of each window wins. Empty when no limit line is found.
+func parseUsageLimits(text string) []agent.LimitWindow {
+	var out []agent.LimitWindow
+	seen := map[string]int{} // label -> index in out, so a later block overwrites
+	for _, m := range currentLimitRe.FindAllStringSubmatch(text, -1) {
+		var pct float64
+		fmt.Sscanf(m[2], "%f", &pct)
+		w := agent.LimitWindow{
+			Label:  strings.TrimSpace(m[1]),
+			Pct:    pct,
+			Resets: strings.TrimSpace(m[3]),
+		}
+		if i, ok := seen[w.Label]; ok {
+			out[i] = w
+		} else {
+			seen[w.Label] = len(out)
+			out = append(out, w)
+		}
+	}
+	return out
 }
 
 // confirmInput polls until the pane shows the start of the prompt we just
@@ -454,11 +614,18 @@ func (s *session) watch() {
 
 		pane, err := s.tm.Capture(ctx, name, tmux.CaptureOpts{})
 		if err == nil {
-			// A permission box or AskUserQuestion picker means claude is
-			// blocked on us — answer it (this routes through OnPermission/
-			// OnQuestion and blocks until the user decides).
-			if p, ok := detectPrompt(pane); ok {
-				tracef("watch prompt id=%s kind=%s title=%q", s.id, p.kind, p.title)
+			// A permission box means claude is blocked on us — route it through
+			// OnPermission and block until the user decides.
+			//
+			// Questions (AskUserQuestion) are deliberately NOT intercepted: the
+			// interactive picker re-detected the same box every poll and asked
+			// again and again, stripping the surrounding context. Instead we let
+			// the question render as ordinary transcript text (Claude writes it
+			// to the JSONL) and the user answers with a normal chat message —
+			// the headless behavior. Send drives an on-screen select box if one
+			// is actually focused when they reply.
+			if p, ok := detectPrompt(pane); ok && p.kind == "permission" {
+				tracef("watch permission id=%s title=%q", s.id, p.title)
 				s.handlePrompt(ctx, p)
 				lastActivity = time.Now()
 				idleEmitted = false

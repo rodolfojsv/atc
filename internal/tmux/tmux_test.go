@@ -6,7 +6,37 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
+
+// chunkBytes must reassemble to the original and never split a multi-byte rune
+// (a mid-rune cut would corrupt the pasted prompt).
+func TestChunkBytes(t *testing.T) {
+	inputs := []string{
+		"",
+		"short",
+		strings.Repeat("a", 2000),
+		strings.Repeat("a", 2001),
+		strings.Repeat("a", 9999),
+		strings.Repeat("é", 1500), // 2-byte runes straddling the boundary
+		strings.Repeat("🚀", 800),  // 4-byte runes straddling the boundary
+	}
+	const max = 2000
+	for _, in := range inputs {
+		chunks := chunkBytes(in, max)
+		if got := strings.Join(chunks, ""); got != in {
+			t.Errorf("reassembly mismatch for len=%d", len(in))
+		}
+		for _, ch := range chunks {
+			if len(ch) > max {
+				t.Errorf("chunk len %d exceeds max %d", len(ch), max)
+			}
+			if !utf8.ValidString(ch) {
+				t.Errorf("chunk split a rune: %q", ch)
+			}
+		}
+	}
+}
 
 // newTestClient skips the test when tmux is not installed, so the suite stays
 // green on machines (and CI) without it.

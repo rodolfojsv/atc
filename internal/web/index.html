@@ -155,12 +155,12 @@
   #perm .q { font-weight: 600; }
   #perm pre { white-space: pre-wrap; word-break: break-word; color: var(--dim); font-size: .82em; margin: .5em 0; max-height: 8em; overflow: auto; }
   #perm .btns { display: flex; gap: .5em; flex-wrap: wrap; }
-  #ask { background: linear-gradient(180deg, #1f2a3a, #1b2433); border: 1px solid var(--accent);
-    border-radius: var(--r); padding: .8em; margin: .7em 0; position: sticky; top: 56px; z-index: 10; }
-  #ask .q { font-weight: 600; margin-bottom: .5em; }
+  /* question options dock onto the composer (chips above the input), not a floating modal */
+  #ask { margin: 0 0 .5em; padding: .55em .2em 0; border-top: 1px solid var(--accent-dim); }
+  #ask .q { font-weight: 600; margin-bottom: .5em; color: #cdddff; font-size: .9em; }
   #ask .btns { display: flex; gap: .5em; flex-wrap: wrap; }
   #ask .btns button { border-color: var(--accent); color: #cdddff; }
-  #ask .hint { color: var(--dim); font-size: .82em; margin-top: .5em; }
+  #ask .hint { color: var(--dim); font-size: .8em; margin-top: .4em; }
 
   /* composer (focus + new) */
   .composer { position: sticky; bottom: 0; background: linear-gradient(180deg, transparent, var(--bg) 22%);
@@ -206,6 +206,17 @@
   .actions .spacer { flex: 1; }
   .morelist { display: flex; flex-direction: column; gap: .5em; }
   .morelist button { width: 100%; text-align: left; padding: .75em .8em; font-size: 1em; }
+  /* cached account-usage badge in the header; tap to refresh (runs /usage) */
+  .lim { font-size: .74em; color: var(--dim); border: 1px solid var(--line); border-radius: 20px;
+    padding: .12em .6em; cursor: pointer; white-space: nowrap; margin-left: .5em; }
+  .lim:hover { border-color: var(--accent); color: #cdddff; }
+  .lim.hot { color: var(--err); border-color: var(--err); }
+  .limrow { display: flex; align-items: baseline; gap: .6em; padding: .35em 0; border-bottom: 1px solid var(--line); }
+  .limrow:last-of-type { border-bottom: 0; }
+  .limrow .lw { flex: 1; }
+  .limrow b { font-variant-numeric: tabular-nums; }
+  .limrow b.hot { color: var(--err); }
+  .limrow .lr, .lr { color: var(--dim); font-size: .82em; }
   #stat { color: var(--dim); font-size: .82em; min-height: 1.3em; padding: 0 .2em; }
   #stat.err { color: var(--err); }
 
@@ -272,6 +283,7 @@
   <header>
     <span class="logo" onclick="showBoard()">atc</span>
     <span class="crumb" id="crumb"></span>
+    <span class="lim hidden" id="limBadge" onclick="openLimits()"></span>
     <span class="spacer"></span>
     <button id="notifyBtn" class="ghost icon" onclick="toggleNotify()" title="Notify on permission / done">🔔</button>
     <button id="appBtn" class="ghost icon" onclick="openAppPanel()" title="Get the app / pair a device">📱</button>
@@ -339,11 +351,11 @@
     <!-- FOCUS -->
     <div id="focus" class="hidden">
       <div id="perm" class="hidden"></div>
-      <div id="ask" class="hidden"></div>
       <div id="transcript"></div>
       <div class="composer">
         <button id="newpill" class="newpill hidden" onclick="jumpToLatest()">↓ new messages</button>
         <div class="thumbs" id="thumbs"></div>
+        <div id="ask" class="hidden"></div>
         <div id="completion" class="completion hidden"></div>
         <div class="inputbar" id="focusBar">
           <textarea id="prompt" placeholder="Message… (Enter to send · Ctrl/Shift+Enter for newline)" rows="1"></textarea>
@@ -774,6 +786,61 @@ function cost(s) {
   return p.join(' · ');
 }
 
+// renderLimits paints the cached account-usage badge. The reading is a
+// snapshot from the last /usage scrape (Claude only), so we show its age and
+// let the user tap to refresh. Hidden until we have a reading.
+// bindingWindow returns the most-constrained (highest %) usage window.
+function bindingWindow(L) {
+  if (!L || !L.windows || !L.windows.length) return null;
+  return L.windows.reduce((a, b) => b.pct > a.pct ? b : a, L.windows[0]);
+}
+
+function renderLimits(s) {
+  const el = $('limBadge');
+  const bind = bindingWindow(s.limits);
+  if (bind) {
+    el.classList.remove('hidden');
+    const age = s.limits.ageSec < 90 ? 'now' : Math.round(s.limits.ageSec / 60) + 'm';
+    el.textContent = '◔ ' + Math.round(bind.pct) + '% ' + bind.label + ' · ' + age;
+    el.classList.toggle('hot', bind.pct >= 80);
+    el.title = 'tap to see all limits';
+    return;
+  }
+  // No reading yet. The scrape only runs when /usage does, so show a tappable
+  // trigger rather than hiding (otherwise there's no way to get the first
+  // reading). Only Claude has a /usage overlay to scrape.
+  if (s.backend === 'claude') {
+    el.classList.remove('hidden', 'hot');
+    el.textContent = '◔ usage?';
+    el.title = 'tap to check account usage';
+  } else {
+    el.classList.add('hidden');
+  }
+}
+
+// openLimits shows every usage window (session, weekly, per-model) in a panel.
+// With no reading yet it just kicks off the first /usage scrape.
+function openLimits() {
+  const L = curSession && curSession.limits;
+  if (!L || !L.windows || !L.windows.length) { refreshLimits(); return; }
+  const rows = L.windows.map(w =>
+    `<div class="limrow"><span class="lw">${esc(w.label)}</span>` +
+    `<b class="${w.pct >= 80 ? 'hot' : ''}">${Math.round(w.pct)}%</b>` +
+    `<span class="lr">${esc(w.resets || '')}</span></div>`).join('');
+  const age = L.ageSec < 90 ? 'just now' : Math.round(L.ageSec / 60) + 'm ago';
+  openModal('Claude usage', rows + `<div class="lr" style="margin-top:.7em">as of ${age}</div>`,
+    `<button class="ghost" onclick="closeModal()">Close</button>` +
+    `<button class="primary" onclick="closeModal(); refreshLimits()">Refresh</button>`);
+}
+
+// refreshLimits re-runs /usage in the session; the scraped reading lands on
+// the next poll. Visible flash to the overlay in the session is expected.
+function refreshLimits() {
+  if (!current) return;
+  sendMessage('/usage', []);
+  setStat('refreshing usage…');
+}
+
 // ---- board ----
 // While a hold-to-delete is in progress we skip re-rendering so the
 // 2s poll can't wipe the card out from under the press.
@@ -1110,7 +1177,8 @@ async function pollFocus() {
   curSession = s;
   histList = data.transcript.filter(e => e.kind === 'user').map(e => e.text); // for ↑/↓ prompt recall
   currentAuto = s.autoApprove;
-  $('crumb').textContent = `${s.name} · ${s.status}${s.model ? ' · ' + s.model : ''}${cost(s) ? ' · ' + cost(s) : ''}`;
+  $('crumb').textContent = `${s.name} · ${s.status}${s.scheduleName ? ' · ⏱ ' + s.scheduleName : ''}${s.model ? ' · ' + s.model : ''}${cost(s) ? ' · ' + cost(s) : ''}`;
+  renderLimits(s);
 
   const html = data.transcript.map(renderEntry).join('');
   if (html !== lastRender) {
@@ -1178,6 +1246,13 @@ function renderEntry(e) {
       ).join('') + '</div>';
     }
     return `<div class="e user">${esc(text)}${atts}</div>`;
+  }
+  // Question records carry the prompt + numbered options + a "reply with…"
+  // hint (the full form the TUI needs in its transcript). On the web the
+  // docked picker already shows the options, so keep only the prompt line here
+  // as a concise record rather than repeating the whole thing.
+  if (e.kind === 'system' && e.text.startsWith('❓')) {
+    return `<div class="e system">${esc(e.text.split('\n')[0])}</div>`;
   }
   const cls = { assistant: 'assistant', tool: 'tool', system: 'system', error: 'error' }[e.kind] || 'system';
   const cursor = e.partial ? '<span class="cursor"> ▍</span>' : '';

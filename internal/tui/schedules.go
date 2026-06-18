@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -10,13 +11,16 @@ import (
 	"github.com/rodolfojsv/atc/internal/supervisor"
 )
 
-// openSchedules renders the scheduled-task list (read-only) into the
-// shared viewport. Each task shows its cron, next fire, and recent run
-// timeline — quiet "no-update" fires included, since they cost nothing.
+// openSchedules renders the Scheduled section into the shared viewport:
+// each configured task with its cron, next fire, and the sessions it has
+// produced. Schedule-launched sessions are hidden from the main board once
+// they finish and live here instead — selectable with ↑↓ and openable with
+// enter, so you "follow the link" into the run's transcript.
 func (m *Model) openSchedules() (tea.Model, tea.Cmd) {
 	m.mode = modeSchedules
+	m.schedCursor = 0
 	m.layoutFocus()
-	m.vp.SetContent(m.schedulesContent())
+	m.renderSchedules()
 	m.vp.GotoTop()
 	return m, nil
 }
@@ -25,6 +29,31 @@ func (m *Model) updateSchedules(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "q", "s":
 		m.mode = modeBoard
+		return m, nil
+	case "up", "k":
+		if m.schedCursor > 0 {
+			m.schedCursor--
+			m.renderSchedules()
+			m.scrollSchedToCursor()
+		}
+		return m, nil
+	case "down", "j":
+		if m.schedCursor < len(m.schedSessions)-1 {
+			m.schedCursor++
+			m.renderSchedules()
+			m.scrollSchedToCursor()
+		}
+		return m, nil
+	case "enter":
+		if m.schedCursor >= 0 && m.schedCursor < len(m.schedSessions) {
+			m.target = m.schedSessions[m.schedCursor]
+			m.mode = modeFocus
+			m.vpFollow = true
+			m.histIdx, m.histDraft = -1, ""
+			m.layoutFocus()
+			m.refreshViewport()
+			return m, m.input.Focus()
+		}
 		return m, nil
 	}
 	var cmd tea.Cmd
@@ -36,19 +65,82 @@ func (m *Model) viewSchedules() string {
 	var b strings.Builder
 	b.WriteString(styleTitle.Render("atc") + " scheduled tasks\n")
 	b.WriteString(m.vp.View() + "\n\n")
-	b.WriteString(keybar("↑↓/wheel", "scroll", "esc", "back"))
+	if len(m.schedSessions) > 0 {
+		b.WriteString(keybar("↑↓", "select", "enter", "open", "esc", "back"))
+	} else {
+		b.WriteString(keybar("↑↓/wheel", "scroll", "esc", "back"))
+	}
 	if m.flash != "" {
 		b.WriteString("  " + styleFlash.Render(m.flash))
 	}
 	return b.String()
 }
 
-func (m *Model) schedulesContent() string {
+// renderSchedules rebuilds the viewport content and the flat selection list.
+// It clamps the cursor to the number of openable sessions first, so the
+// highlight in the rendered content lands on the row enter will open.
+func (m *Model) renderSchedules() {
+	openable := 0
+	for _, sess := range m.sup.Sessions() {
+		if sess.View().ScheduleName != "" {
+			openable++
+		}
+	}
+	if m.schedCursor >= openable {
+		m.schedCursor = openable - 1
+	}
+	if m.schedCursor < 0 {
+		m.schedCursor = 0
+	}
+	content, sessions, _ := m.schedulesContent()
+	m.schedSessions = sessions
+	m.vp.SetContent(content)
+}
+
+// scrollSchedToCursor keeps the highlighted session row inside the viewport
+// when the list is longer than the visible window.
+func (m *Model) scrollSchedToCursor() {
+	_, _, selLine := m.schedulesContent()
+	if selLine < 0 {
+		return
+	}
+	top := m.vp.YOffset
+	bottom := top + m.vp.Height - 1
+	switch {
+	case selLine < top:
+		m.vp.SetYOffset(selLine)
+	case selLine > bottom:
+		m.vp.SetYOffset(selLine - m.vp.Height + 1)
+	}
+}
+
+// schedulesContent renders the Scheduled section and returns, alongside the
+// text, the openable sessions in display order and the viewport line of the
+// currently selected one (-1 if there is no selection).
+func (m *Model) schedulesContent() (string, []*supervisor.Session, int) {
 	scheds := m.sup.Schedules()
 	if len(scheds) == 0 {
-		return styleDim.Render(`  no schedules configured — add them under "schedules" in config.json`)
+		return styleDim.Render(`  no schedules configured — add them under "schedules" in config.json`), nil, -1
 	}
+
+	// Index the schedule-launched sessions atc currently knows (live on the
+	// board or adopted from the store) by their schedule name.
+	bySched := map[string][]*supervisor.Session{}
+	for _, sess := range m.sup.Sessions() {
+		if n := sess.View().ScheduleName; n != "" {
+			bySched[n] = append(bySched[n], sess)
+		}
+	}
+
 	var b strings.Builder
+	var ordered []*supervisor.Session
+	selLine := -1
+	line := 0
+	write := func(s string) {
+		b.WriteString(s + "\n")
+		line++
+	}
+
 	for _, s := range scheds {
 		mode := styleDim.Render("  [read-only]")
 		if s.Write {
@@ -66,17 +158,50 @@ func (m *Model) schedulesContent() string {
 		if !s.LastUpdate.IsZero() {
 			since = "updated " + relTime(s.LastUpdate)
 		}
-		b.WriteString(styleSection.Render("  "+s.Name) + styleDim.Render("  "+s.Cron) + mode + precheck + "\n")
-		b.WriteString(styleDim.Render(fmt.Sprintf("    %s · %s", since, next)) + "\n")
-		if len(s.Runs) == 0 {
-			b.WriteString(styleDim.Render("    no runs recorded yet") + "\n")
+		write(styleSection.Render("  "+s.Name) + styleDim.Render("  "+s.Cron) + mode + precheck)
+		write(styleDim.Render(fmt.Sprintf("    %s · %s", since, next)))
+
+		// The sessions this schedule has produced, newest first, as a
+		// selectable list — the "link" into each run.
+		sessions := bySched[s.Name]
+		sort.SliceStable(sessions, func(i, j int) bool {
+			return sessions[i].View().Created.After(sessions[j].View().Created)
+		})
+		for _, sess := range sessions {
+			selected := len(ordered) == m.schedCursor
+			if selected {
+				selLine = line
+			}
+			write(scheduledSessionLine(sess.View(), selected))
+			ordered = append(ordered, sess)
+		}
+
+		// Quiet/older fires from the run log, for context (no session to open).
+		if len(sessions) == 0 && len(s.Runs) == 0 {
+			write(styleDim.Render("    no runs recorded yet"))
 		}
 		for _, r := range s.Runs {
-			b.WriteString("    " + runLine(r) + "\n")
+			// Skip "updated" runs whose session is already shown above.
+			if r.Result == "updated" && r.Session != "" {
+				continue
+			}
+			write("    " + runLine(r))
 		}
-		b.WriteString("\n")
+		write("")
 	}
-	return b.String()
+	return b.String(), ordered, selLine
+}
+
+// scheduledSessionLine renders one selectable session row in the Scheduled
+// view: a cursor marker, status, name, and age.
+func scheduledSessionLine(v supervisor.SessionView, selected bool) string {
+	marker := "    "
+	if selected {
+		marker = "  " + styleSel.Render("▸") + " "
+	}
+	row := fmt.Sprintf("%s%s  %s  %s",
+		marker, padANSI(statusLabel(v.Status), statusWidth), v.Name, styleDim.Render(relTime(v.Created)))
+	return row
 }
 
 // runLine renders one timeline entry: when it fired and what came of it.

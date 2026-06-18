@@ -65,11 +65,12 @@ const (
 	EventError // fatal session error
 	EventContext
 	EventUsage
+	EventLimits // account rate-limit snapshot (Claude /usage scrape)
 )
 
 var eventTypeNames = [...]string{
 	"turn_start", "intent", "text_delta", "message", "user_message",
-	"tool_start", "tool_failed", "idle", "error", "context", "usage",
+	"tool_start", "tool_failed", "idle", "error", "context", "usage", "limits",
 }
 
 func (t EventType) String() string {
@@ -95,6 +96,18 @@ type Event struct {
 	CostUSD                   float64 // estimated dollars (Claude Code)
 	NanoAiu                   float64 // billed AI credits ×1e-9 (Copilot)
 	Model                     string
+
+	// EventLimits (best-effort, scraped from Claude's /usage overlay)
+	LimitWindows []LimitWindow // every "Current …" window reported (session, weekly, …)
+	LimitText    string        // raw overlay text, surfaced verbatim too
+}
+
+// LimitWindow is one account rate-limit window from Claude's /usage, e.g.
+// "week (all models)" at 36%, resetting at a given time.
+type LimitWindow struct {
+	Label  string  // window name, e.g. "session", "week (all models)"
+	Pct    float64 // 0..100 used
+	Resets string  // human reset hint, e.g. "resets Jun 20, 2:59pm"
 }
 
 // SessionSpec configures a new or resumed session.

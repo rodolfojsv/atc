@@ -66,6 +66,16 @@ type Usage struct {
 	Model         string
 }
 
+// Limits is a best-effort account rate-limit snapshot, scraped from
+// Claude's /usage overlay. It's a point-in-time reading (AsOf), refreshed
+// only when the user runs /usage, not continuously polled. Windows holds every
+// reported window (session, weekly, per-model) so the UI can show them all.
+type Limits struct {
+	Windows []agent.LimitWindow
+	Text    string    // raw overlay text
+	AsOf    time.Time // when this reading was captured
+}
+
 type permissionAnswer struct {
 	decision agent.Decision
 	feedback string
@@ -117,6 +127,11 @@ type Session struct {
 	ReadOnly bool   // backend plan mode: inspect but never modify
 	Model    string // configured model ("" = backend default); usage reports the actual one
 	Created  time.Time
+	// ScheduleName is the name of the schedule that launched this session,
+	// "" for manually started ones. It hides a finished scheduled run from
+	// the main board (it lives in the Scheduled section instead) and scopes
+	// retention cleanup. Immutable after creation.
+	ScheduleName string
 
 	// BaseBranch/BaseCommit record where the worktree branched off,
 	// for diff review and merge-back.
@@ -174,6 +189,7 @@ type SessionView struct {
 	Category                                           string
 	CreatedBy                                          string // per-device clientId of the creator; "" for TUI/scheduler
 	NotifyTopic                                        string // ntfy topic of the creator's device; "" = none
+	ScheduleName                                       string // schedule that launched this session; "" if started manually
 	Created                                            time.Time
 	SinceEvent                                         time.Duration // time since the last backend event (0 = none yet)
 }
@@ -233,7 +249,7 @@ func (s *Session) View() SessionView {
 		BaseBranch: s.BaseBranch, Intent: s.intent, Err: s.errMsg, Usage: s.usage,
 		AutoApprove: s.autoApprove, ReadOnly: s.ReadOnly, Created: s.Created,
 		Pinned: s.pinned, Category: s.category, CreatedBy: s.createdBy,
-		NotifyTopic: s.notifyTopic,
+		NotifyTopic: s.notifyTopic, ScheduleName: s.ScheduleName,
 	}
 	if len(s.pending) > 0 {
 		head := s.pending[0]

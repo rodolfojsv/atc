@@ -13,6 +13,41 @@ import (
 	"github.com/rodolfojsv/atc/internal/config"
 )
 
+// The badge must headline the binding "Current …" window and ignore the
+// "What's contributing…" stats below, whose percentages ("80% of your usage
+// came from…") are not limits — reading the max over the whole overlay is what
+// produced a bogus 74%.
+func TestParseUsageLimits(t *testing.T) {
+	overlay := strings.Join([]string{
+		"You are currently using your subscription to power your Claude Code usage",
+		"",
+		"Current session: 0% used · resets Jun 17, 7:49pm (America/Chicago)",
+		"Current week (all models): 36% used · resets Jun 20, 2:59pm (America/Chicago)",
+		"Current week (Sonnet only): 0% used · resets Jun 20, 3pm (America/Chicago)",
+		"",
+		"What's contributing to your limits usage?",
+		"Last 7d · 9952 requests · 125 sessions",
+		"  80% of your usage came from subagent-heavy sessions",
+		"  67% of your usage was at >150k context",
+	}, "\n")
+	windows := parseUsageLimits(overlay)
+	if len(windows) != 3 {
+		t.Fatalf("want 3 windows (session, all models, Sonnet), got %d: %+v", len(windows), windows)
+	}
+	want := []struct {
+		label string
+		pct   float64
+	}{{"session", 0}, {"week (all models)", 36}, {"week (Sonnet only)", 0}}
+	for i, w := range want {
+		if windows[i].Label != w.label || windows[i].Pct != w.pct {
+			t.Errorf("window %d = %q %v%%, want %q %v%%", i, windows[i].Label, windows[i].Pct, w.label, w.pct)
+		}
+	}
+	if !strings.Contains(windows[1].Resets, "Jun 20") {
+		t.Errorf("all-models resets = %q, want a Jun 20 hint", windows[1].Resets)
+	}
+}
+
 func TestMessageEventsStringContent(t *testing.T) {
 	events := messageEvents(json.RawMessage(`"plain answer"`))
 	if len(events) != 1 || events[0].Type != agent.EventMessage || events[0].Text != "plain answer" {
