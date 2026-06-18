@@ -614,11 +614,18 @@ func (s *session) watch() {
 
 		pane, err := s.tm.Capture(ctx, name, tmux.CaptureOpts{})
 		if err == nil {
-			// A permission box or AskUserQuestion picker means claude is
-			// blocked on us — answer it (this routes through OnPermission/
-			// OnQuestion and blocks until the user decides).
-			if p, ok := detectPrompt(pane); ok {
-				tracef("watch prompt id=%s kind=%s title=%q", s.id, p.kind, p.title)
+			// A permission box means claude is blocked on us — route it through
+			// OnPermission and block until the user decides.
+			//
+			// Questions (AskUserQuestion) are deliberately NOT intercepted: the
+			// interactive picker re-detected the same box every poll and asked
+			// again and again, stripping the surrounding context. Instead we let
+			// the question render as ordinary transcript text (Claude writes it
+			// to the JSONL) and the user answers with a normal chat message —
+			// the headless behavior. Send drives an on-screen select box if one
+			// is actually focused when they reply.
+			if p, ok := detectPrompt(pane); ok && p.kind == "permission" {
+				tracef("watch permission id=%s title=%q", s.id, p.title)
 				s.handlePrompt(ctx, p)
 				lastActivity = time.Now()
 				idleEmitted = false

@@ -114,15 +114,12 @@ func detectPrompt(pane string) (promptInfo, bool) {
 
 // --- Answering ------------------------------------------------------------
 
-// handlePrompt resolves a detected prompt via the right callback and submits
-// the answer, then waits for the box to clear.
+// handlePrompt resolves a detected permission box via OnPermission and submits
+// the answer, then waits for the box to clear. Only permission boxes reach
+// here; questions are left to render as transcript text and be answered in chat
+// (see watch), so they don't get re-asked through an interactive picker.
 func (s *session) handlePrompt(ctx context.Context, p promptInfo) {
-	switch p.kind {
-	case "permission":
-		s.answerPermission(ctx, p)
-	default:
-		s.answerQuestion(ctx, p)
-	}
+	s.answerPermission(ctx, p)
 	s.waitPromptCleared(ctx)
 }
 
@@ -164,29 +161,6 @@ func (s *session) answerPermission(ctx context.Context, p promptInfo) {
 			_ = s.tm.SendKeys(ctx, name, "Escape")
 		}
 	}
-}
-
-func (s *session) answerQuestion(ctx context.Context, p promptInfo) {
-	name := s.tmuxName()
-	q := agent.Question{Prompt: p.title, AllowFreeform: true}
-	for _, o := range p.options {
-		q.Options = append(q.Options, o.label)
-	}
-	answer, ok := "", false
-	if s.spec.OnQuestion != nil {
-		answer, ok = s.spec.OnQuestion(q)
-	}
-	if !ok {
-		_ = s.tm.SendKeys(ctx, name, "Escape")
-		return
-	}
-	if i := indexMatching(p.options, []string{answer}); i >= 0 {
-		s.selectIndex(ctx, i)
-		return
-	}
-	// No matching option: type the answer as freeform.
-	_ = s.tm.SendText(ctx, name, answer)
-	_ = s.tm.SendEnter(ctx, name)
 }
 
 // selectMatch selects the first option matching any marker, or the fallback
