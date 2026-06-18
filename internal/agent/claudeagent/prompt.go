@@ -199,15 +199,71 @@ func (s *session) selectMatch(ctx context.Context, p promptInfo, markers []strin
 	s.selectIndex(ctx, i)
 }
 
-// selectIndex moves the highlight to slice position i (assuming it starts at
-// the top) and confirms. Arrow navigation is used rather than number keys
-// because it doesn't depend on the TUI binding digit shortcuts.
-func (s *session) selectIndex(ctx context.Context, i int) {
+// selectIndex moves the highlight to option position target and confirms.
+// Arrow navigation is used rather than number keys because it doesn't depend
+// on the TUI binding digit shortcuts. The starting row is read from the live
+// pane rather than assumed to be the top: dialogs like the resume prompt
+// default their cursor to a non-first option, so navigating relative to where
+// the cursor actually is keeps the selection correct.
+func (s *session) selectIndex(ctx context.Context, target int) {
 	name := s.tmuxName()
-	for k := 0; k < i; k++ {
+	cur := 0
+	if pane, err := s.tm.Capture(ctx, name, tmux.CaptureOpts{}); err == nil {
+		if c := cursorOptionIndex(pane); c >= 0 {
+			cur = c
+		}
+	}
+	for cur < target {
 		_ = s.tm.SendKeys(ctx, name, "Down")
+		cur++
+	}
+	for cur > target {
+		_ = s.tm.SendKeys(ctx, name, "Up")
+		cur--
 	}
 	_ = s.tm.SendEnter(ctx, name)
+}
+
+// cursorOptionIndex returns the 0-based position of the currently highlighted
+// option in the menu on screen (the option line carrying the selection cursor
+// glyph), or -1 if no cursor is visible.
+func cursorOptionIndex(pane string) int {
+	idx := -1
+	for _, ln := range strings.Split(pane, "\n") {
+		if m := promptOptionRe.FindStringSubmatch(ln); m != nil {
+			idx++
+			if m[1] != "" {
+				return idx
+			}
+		}
+	}
+	return -1
+}
+
+// answerDialogDirect answers a select dialog that is already on screen with the
+// user's text — used when a prompt arrives for a dialog whose in-memory
+// question didn't survive an atc restart (so it never routed through
+// OnQuestion). A bare option number or matching option text selects that row;
+// anything else is typed as a freeform answer.
+func (s *session) answerDialogDirect(ctx context.Context, p promptInfo, answer string) {
+	if i := optionIndexFor(answer, p.options); i >= 0 {
+		s.selectIndex(ctx, i)
+		return
+	}
+	name := s.tmuxName()
+	_ = s.tm.SendText(ctx, name, answer)
+	_ = s.tm.SendEnter(ctx, name)
+}
+
+// optionIndexFor maps a freeform answer to an option index: a bare 1-based
+// number selects that option; otherwise the first option whose label contains
+// the answer. Returns -1 when nothing matches.
+func optionIndexFor(answer string, options []promptOption) int {
+	a := strings.TrimSpace(answer)
+	if n, err := strconv.Atoi(a); err == nil && n >= 1 && n <= len(options) {
+		return n - 1
+	}
+	return indexMatching(options, []string{a})
 }
 
 // waitPromptCleared polls until the box is gone (or a deadline), so the watch
