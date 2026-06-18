@@ -21,6 +21,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // Client runs tmux subcommands. The zero value is not usable; call New.
@@ -122,8 +123,42 @@ func (c *Client) KillSession(ctx context.Context, name string) error {
 // content like "Enter" or text starting with '-' is sent verbatim. It does
 // not submit; follow with SendEnter.
 func (c *Client) SendText(ctx context.Context, name, text string) error {
-	_, err := c.run(ctx, "send-keys", "-t", name, "-l", "--", text)
-	return err
+	// send-keys takes the literal text as a single command argument, so a long
+	// prompt (or a large paste) overflows tmux's command buffer — "command too
+	// long". Split into chunks and send them in order; they land in the input
+	// buffer exactly as one piece would, with no change to keystroke semantics.
+	const maxChunk = 2000 // bytes per send-keys, well under tmux's limit
+	if len(text) <= maxChunk {
+		_, err := c.run(ctx, "send-keys", "-t", name, "-l", "--", text)
+		return err
+	}
+	for _, chunk := range chunkBytes(text, maxChunk) {
+		if _, err := c.run(ctx, "send-keys", "-t", name, "-l", "--", chunk); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// chunkBytes splits s into pieces of at most max bytes without ever cutting a
+// multi-byte UTF-8 rune (a split mid-rune would corrupt the pasted text).
+func chunkBytes(s string, max int) []string {
+	var out []string
+	for len(s) > max {
+		cut := max
+		for cut > 0 && !utf8.RuneStart(s[cut]) {
+			cut--
+		}
+		if cut == 0 { // single rune longer than max (shouldn't happen); hard split
+			cut = max
+		}
+		out = append(out, s[:cut])
+		s = s[cut:]
+	}
+	if len(s) > 0 {
+		out = append(out, s)
+	}
+	return out
 }
 
 // SendKeys sends one or more tmux key names (interpreted), e.g. "Enter",
