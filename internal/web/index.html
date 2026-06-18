@@ -1160,8 +1160,25 @@ let freshOpen = false; // first render after opening a session jumps to the late
 const FOLLOW_SLOP = 120; // px from the bottom still counts as "following"
 function scroller() { return document.scrollingElement || document.documentElement; }
 function distFromBottom() { const e = scroller(); return e.scrollHeight - e.scrollTop - e.clientHeight; }
+// Pin to the bottom across a few frames: one synchronous scrollTop = scrollHeight
+// lands on the bottom *as currently measured*, but markdown reflow and late-loading
+// screenshots (img.shot has no reserved height) grow the transcript right after, so a
+// single assignment leaves you short — and an undershoot past FOLLOW_SLOP keeps the
+// pill stuck. Re-assert until `pinUntil` elapses so trailing layout can't strand us.
+let pinUntil = 0, pinning = false;
+function pinBottom(ms) {
+  pinUntil = Date.now() + ms;
+  if (pinning) return; // extend the existing chain instead of stacking rAF loops
+  pinning = true;
+  const e = scroller();
+  (function step() {
+    e.scrollTop = e.scrollHeight;
+    if (Date.now() < pinUntil) requestAnimationFrame(step);
+    else pinning = false;
+  })();
+}
 // Tapping the pill (or scrolling to the bottom yourself) dismisses it and follows again.
-function jumpToLatest() { const e = scroller(); e.scrollTop = e.scrollHeight; $('newpill').classList.add('hidden'); }
+function jumpToLatest() { $('newpill').classList.add('hidden'); pinBottom(400); }
 window.addEventListener('scroll', () => {
   if (distFromBottom() <= FOLLOW_SLOP) $('newpill').classList.add('hidden');
 }, { passive: true });
@@ -1191,6 +1208,7 @@ async function pollFocus() {
     const el = $('transcript');
     const sc = scroller();
     const prevTop = sc.scrollTop;
+    const wasFresh = freshOpen;
     const stick = freshOpen || distFromBottom() <= FOLLOW_SLOP;
     el.innerHTML = html; lastRender = html; freshOpen = false;
     linkifyFiles(el); // make .md path mentions clickable (DOM only changes, lastRender stays the string)
@@ -1198,7 +1216,10 @@ async function pollFocus() {
     // reading position untouched — restore it only if the innerHTML swap made the
     // browser clamp scrollTop, so a 1s poll can't fight an active scroll — and
     // surface a "↓ new messages" pill they can tap to catch up on demand.
-    if (stick) { sc.scrollTop = sc.scrollHeight; $('newpill').classList.add('hidden'); }
+    // On a fresh open the transcript often carries screenshots that load after this
+    // measure, so pin across frames like the pill; while following live output a cheap
+    // one-shot is enough (the next poll re-pins) and won't fight a scroll-up gesture.
+    if (stick) { if (wasFresh) pinBottom(400); else sc.scrollTop = sc.scrollHeight; $('newpill').classList.add('hidden'); }
     else { if (sc.scrollTop !== prevTop) sc.scrollTop = prevTop; $('newpill').classList.remove('hidden'); }
   }
 
