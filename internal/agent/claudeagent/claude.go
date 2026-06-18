@@ -35,7 +35,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -552,24 +551,20 @@ func (s *session) claudeArgs(resume bool) []string {
 	return args
 }
 
-// discoverClaudeID waits for the session's jsonl to appear. If the file we
-// expect (named by --session-id) shows up, claudeID is already correct;
-// otherwise we adopt the newest transcript created since launch. Caller holds mu.
+// discoverClaudeID waits for the session's own jsonl (named by --session-id)
+// to appear so the first tail/replay reads from the right file. claudeID is
+// seeded to s.id in the constructor and is never reassigned to another file:
+// modern Claude Code honors --session-id, and adopting the "newest" transcript
+// in the dir cross-binds concurrent sessions that share a project directory
+// (one session ends up tailing another's transcript). If the expected file
+// never shows up within the deadline we leave claudeID == id and let the tail
+// loop pick it up once it does. Caller holds mu.
 func (s *session) discoverClaudeID() {
-	dir := s.transcriptDir()
-	expected := filepath.Join(dir, s.id+".jsonl")
+	expected := filepath.Join(s.transcriptDir(), s.id+".jsonl")
 	deadline := time.Now().Add(idDiscovery)
-	start := time.Now().Add(-2 * time.Second) // small skew allowance
 	for time.Now().Before(deadline) {
 		if _, err := os.Stat(expected); err == nil {
 			return // --session-id honored; claudeID already == id
-		}
-		if newest := newestTranscript(dir, start); newest != "" {
-			id := strings.TrimSuffix(filepath.Base(newest), ".jsonl")
-			s.mu.Lock()
-			s.claudeID = id
-			s.mu.Unlock()
-			return
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
@@ -771,35 +766,6 @@ func transcriptSize(path string) int64 {
 		return 0
 	}
 	return fi.Size()
-}
-
-// newestTranscript returns the most recently modified *.jsonl in dir whose
-// modtime is at/after `after`, or "" if none.
-func newestTranscript(dir string, after time.Time) string {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return ""
-	}
-	type cand struct {
-		path string
-		mod  time.Time
-	}
-	var cands []cand
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
-			continue
-		}
-		info, err := e.Info()
-		if err != nil || info.ModTime().Before(after) {
-			continue
-		}
-		cands = append(cands, cand{filepath.Join(dir, e.Name()), info.ModTime()})
-	}
-	if len(cands) == 0 {
-		return ""
-	}
-	sort.Slice(cands, func(i, j int) bool { return cands[i].mod.After(cands[j].mod) })
-	return cands[0].path
 }
 
 // History replays the persisted transcript as events, oldest first.
