@@ -50,7 +50,27 @@ type Supervisor struct {
 	notify        func()
 	notifyPending bool
 
+	// limits is the most recent account rate-limit snapshot (from any
+	// session's /usage scrape). Account usage is global, not per-session, so
+	// it lives here and every session's view reports the same reading.
+	limMu  sync.Mutex
+	limits Limits
+
 	headless bool
+}
+
+// setLimits records the latest account usage snapshot (any session's scrape).
+func (s *Supervisor) setLimits(l Limits) {
+	s.limMu.Lock()
+	s.limits = l
+	s.limMu.Unlock()
+}
+
+// Limits returns the most recent account rate-limit snapshot, account-wide.
+func (s *Supervisor) Limits() Limits {
+	s.limMu.Lock()
+	defer s.limMu.Unlock()
+	return s.limits
 }
 
 func New(cfg *config.Config, b *bus.Bus) *Supervisor {
@@ -1057,6 +1077,8 @@ func (s *Supervisor) handleEvent(sess *Session, e agent.Event) {
 	case agent.EventError:
 		sess.setError(fmt.Sprintf("%s: %s", e.ErrType, e.Text))
 		s.publish(bus.Error, sess, map[string]any{"errorType": e.ErrType, "message": e.Text})
+	case agent.EventLimits:
+		s.setLimits(Limits{Windows: e.LimitWindows, Text: e.LimitText, AsOf: time.Now()})
 	case agent.EventContext:
 		sess.updateContext(e.CurrentTokens, e.TokenLimit)
 	case agent.EventUsage:

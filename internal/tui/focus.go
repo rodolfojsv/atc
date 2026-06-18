@@ -365,6 +365,15 @@ func (m *Model) viewFocus() string {
 	if cost := humanCost(v.Usage); cost != "—" {
 		b.WriteString(styleDim.Render("  ·  " + cost))
 	}
+	if lm := m.sup.Limits(); !lm.AsOf.IsZero() && len(lm.Windows) > 0 {
+		bind := lm.Windows[0]
+		for _, w := range lm.Windows[1:] {
+			if w.Pct > bind.Pct {
+				bind = w
+			}
+		}
+		b.WriteString(styleDim.Render(fmt.Sprintf("  ·  %.0f%% %s", bind.Pct, bind.Label)))
+	}
 	b.WriteString(styleDim.Render("  ·  " + v.Backend))
 	b.WriteString("\n")
 	b.WriteString(m.vp.View() + "\n")

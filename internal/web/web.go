@@ -179,6 +179,19 @@ type sessionJSON struct {
 	Pending      *permissionJSON `json:"pending,omitempty"`
 	PendingCount int             `json:"pendingCount,omitempty"`
 	Question     *questionJSON   `json:"question,omitempty"`
+	Limits       *limitsJSON     `json:"limits,omitempty"`
+}
+
+type limitsJSON struct {
+	Windows []limitWindowJSON `json:"windows,omitempty"`
+	Text    string            `json:"text,omitempty"`
+	AgeSec  float64           `json:"ageSec"`
+}
+
+type limitWindowJSON struct {
+	Label  string  `json:"label"`
+	Pct    float64 `json:"pct"`
+	Resets string  `json:"resets,omitempty"`
 }
 
 type permissionJSON struct {
@@ -207,7 +220,7 @@ type attachmentJSON struct {
 	IsImage bool   `json:"isImage"`
 }
 
-func toSessionJSON(v supervisor.SessionView) sessionJSON {
+func (s *Server) toSessionJSON(v supervisor.SessionView) sessionJSON {
 	out := sessionJSON{
 		Name: v.Name, Repo: v.Repo, Dir: v.Dir, Branch: v.Branch, BaseBranch: v.BaseBranch,
 		Worktree: v.Worktree != "", Backend: v.Backend, Preset: v.Preset,
@@ -229,6 +242,15 @@ func toSessionJSON(v supervisor.SessionView) sessionJSON {
 	}
 	if v.Question != nil {
 		out.Question = &questionJSON{Prompt: v.Question.Prompt, Options: v.Question.Options, AllowFreeform: v.Question.AllowFreeform}
+	}
+	// Account usage is global, not per-session: every session reports the same
+	// most-recent snapshot, so the badge stays put when switching chats.
+	if lim := s.sup.Limits(); !lim.AsOf.IsZero() {
+		lj := &limitsJSON{Text: lim.Text, AgeSec: time.Since(lim.AsOf).Seconds()}
+		for _, w := range lim.Windows {
+			lj.Windows = append(lj.Windows, limitWindowJSON{Label: w.Label, Pct: w.Pct, Resets: w.Resets})
+		}
+		out.Limits = lj
 	}
 	return out
 }
@@ -287,7 +309,7 @@ func (s *Server) handleList(w http.ResponseWriter, _ *http.Request) {
 	sessions := s.sup.Sessions()
 	out := make([]sessionJSON, 0, len(sessions))
 	for _, sess := range sessions {
-		out = append(out, toSessionJSON(sess.View()))
+		out = append(out, s.toSessionJSON(sess.View()))
 	}
 	writeJSON(w, out)
 }
@@ -376,7 +398,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	writeJSON(w, toSessionJSON(sess.View()))
+	writeJSON(w, s.toSessionJSON(sess.View()))
 }
 
 func (s *Server) session(w http.ResponseWriter, r *http.Request) *supervisor.Session {
@@ -409,7 +431,7 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 		transcript = append(transcript, ej)
 	}
 	writeJSON(w, map[string]any{
-		"session":    toSessionJSON(sess.View()),
+		"session":    s.toSessionJSON(sess.View()),
 		"transcript": transcript,
 	})
 }
