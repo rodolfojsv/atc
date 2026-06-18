@@ -1177,7 +1177,7 @@ async function pollFocus() {
   curSession = s;
   histList = data.transcript.filter(e => e.kind === 'user').map(e => e.text); // for ↑/↓ prompt recall
   currentAuto = s.autoApprove;
-  $('crumb').textContent = `${s.name} · ${s.status}${s.model ? ' · ' + s.model : ''}${cost(s) ? ' · ' + cost(s) : ''}`;
+  $('crumb').textContent = `${s.name} · ${s.status}${s.scheduleName ? ' · ⏱ ' + s.scheduleName : ''}${s.model ? ' · ' + s.model : ''}${cost(s) ? ' · ' + cost(s) : ''}`;
   renderLimits(s);
 
   const html = data.transcript.map(renderEntry).join('');

@@ -24,25 +24,26 @@ func defaultStore() store {
 }
 
 type savedSession struct {
-	ID          string    `json:"id"`
-	Name        string    `json:"name"`
-	Repo        string    `json:"repo"`
-	Dir         string    `json:"dir"`
-	Worktree    string    `json:"worktree,omitempty"`
-	Branch      string    `json:"branch,omitempty"`
-	Backend     string    `json:"backend,omitempty"` // empty = copilot (pre-backend files)
-	Preset      string    `json:"preset,omitempty"`
-	Model       string    `json:"model,omitempty"`
-	ReadOnly    bool      `json:"readOnly,omitempty"`
-	AutoApprove bool      `json:"autoApprove,omitempty"`
-	Pinned      bool      `json:"pinned,omitempty"`
-	Category    string    `json:"category,omitempty"`
-	CreatedBy   string    `json:"createdBy,omitempty"`   // per-device clientId of the creator
-	NotifyTopic string    `json:"notifyTopic,omitempty"` // ntfy topic of the creator's device
-	BaseBranch  string    `json:"baseBranch,omitempty"`
-	BaseCommit  string    `json:"baseCommit,omitempty"`
-	Status      string    `json:"status,omitempty"` // session status at last persist
-	Created     time.Time `json:"created"`
+	ID           string    `json:"id"`
+	Name         string    `json:"name"`
+	Repo         string    `json:"repo"`
+	Dir          string    `json:"dir"`
+	Worktree     string    `json:"worktree,omitempty"`
+	Branch       string    `json:"branch,omitempty"`
+	Backend      string    `json:"backend,omitempty"` // empty = copilot (pre-backend files)
+	Preset       string    `json:"preset,omitempty"`
+	Model        string    `json:"model,omitempty"`
+	ReadOnly     bool      `json:"readOnly,omitempty"`
+	AutoApprove  bool      `json:"autoApprove,omitempty"`
+	Pinned       bool      `json:"pinned,omitempty"`
+	Category     string    `json:"category,omitempty"`
+	CreatedBy    string    `json:"createdBy,omitempty"`    // per-device clientId of the creator
+	NotifyTopic  string    `json:"notifyTopic,omitempty"`  // ntfy topic of the creator's device
+	ScheduleName string    `json:"scheduleName,omitempty"` // schedule that launched it; "" if manual
+	BaseBranch   string    `json:"baseBranch,omitempty"`
+	BaseCommit   string    `json:"baseCommit,omitempty"`
+	Status       string    `json:"status,omitempty"` // session status at last persist
+	Created      time.Time `json:"created"`
 
 	// Usage snapshot at last persist — restored on resume because the
 	// runtimes' own logs don't reliably persist usage events.

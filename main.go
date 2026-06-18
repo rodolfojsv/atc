@@ -128,6 +128,9 @@ func cmdTUI(argv []string) int {
 	// Adopt sessions other atc processes finish while we're open —
 	// e.g. Task Scheduler `atc run` jobs land on the board live.
 	go sup.WatchStore(ctx, 3*time.Second)
+	// Auto-clean finished scheduled sessions per config.scheduledRetentionDays
+	// (no-op when unset). Hourly is plenty for a day-grained retention.
+	go sup.PruneScheduledLoop(ctx, time.Hour)
 	if err := startSchedules(ctx, *configPath, sup); err != nil {
 		fmt.Fprintln(os.Stderr, "atc:", err)
 		return 1
@@ -199,6 +202,7 @@ func cmdServe(argv []string) int {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go sup.WatchStore(ctx, 3*time.Second)
+	go sup.PruneScheduledLoop(ctx, time.Hour)
 	if err := startSchedules(ctx, *configPath, sup); err != nil {
 		fmt.Fprintln(os.Stderr, "atc:", err)
 		return 1
@@ -337,12 +341,13 @@ func fireSchedule(s config.Schedule, sup *supervisor.Supervisor, runLog schedrun
 	}
 
 	sess, err := sup.NewSession(supervisor.NewSessionOptions{
-		Name:        name,
-		Repo:        s.Repo,
-		Preset:      s.Preset,
-		UseWorktree: s.Worktree,
-		Prompt:      s.Prompt,
-		ReadOnly:    !s.Write, // scheduled tasks are read-only unless write:true
+		Name:         name,
+		Repo:         s.Repo,
+		Preset:       s.Preset,
+		UseWorktree:  s.Worktree,
+		Prompt:       s.Prompt,
+		ReadOnly:     !s.Write, // scheduled tasks are read-only unless write:true
+		ScheduleName: name,
 	})
 	if err != nil {
 		rec(schedrun.Run{Result: schedrun.Errored, Detail: err.Error()})

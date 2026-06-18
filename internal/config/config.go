@@ -136,8 +136,16 @@ type Config struct {
 	Presets            map[string]Preset   `json:"presets,omitempty"`
 	Hooks              map[string][]string `json:"hooks,omitempty"`
 	Schedules          []Schedule          `json:"schedules,omitempty"`
-	Web                Web                 `json:"web,omitempty"`
-	Ntfy               Ntfy                `json:"ntfy,omitempty"`
+	// ScheduledRetentionDays auto-cleans finished schedule-originated
+	// sessions (and their worktrees) older than this many days, so a
+	// recurring task doesn't pile up sessions forever. 0 (the default)
+	// keeps them indefinitely. Only sessions launched by a schedule are
+	// affected — manually started sessions are never auto-removed. The
+	// sweep runs on a timer while atc is open and once after each headless
+	// `atc run`, so cron-driven schedules self-clean even with no UI open.
+	ScheduledRetentionDays int  `json:"scheduledRetentionDays,omitempty"`
+	Web                    Web  `json:"web,omitempty"`
+	Ntfy                   Ntfy `json:"ntfy,omitempty"`
 }
 
 // Path returns the default config file location:

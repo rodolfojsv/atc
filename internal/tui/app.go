@@ -83,6 +83,12 @@ type Model struct {
 	// renameInput backs the rename modal (the 'r' key).
 	catInput    textinput.Model
 	renameInput textinput.Model
+
+	// Scheduled view (the 's' key) selection state: schedSessions is the
+	// flattened, openable list of schedule-launched sessions in display
+	// order; schedCursor indexes it.
+	schedCursor   int
+	schedSessions []*supervisor.Session
 }
 
 func New(sup *supervisor.Supervisor, cfg *config.Config) *Model {
@@ -122,6 +128,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.clampCursor()
 		if m.mode == modeFocus && m.target != nil {
 			m.refreshViewport()
+		}
+		if m.mode == modeSchedules {
+			m.renderSchedules()
 		}
 		// A focused/killed modal target may have errored or closed.
 		if m.mode == modePerm && (m.target == nil || m.target.View().Pending == nil) {
@@ -233,11 +242,33 @@ func groupBoard(sessions []*supervisor.Session) []boardGroup {
 	return groups
 }
 
+// boardSessions is the session list the main board shows: every session
+// except schedule-originated ones that have already settled — those are
+// reachable only through the Scheduled view (the 's' key). A scheduled
+// session that is still running or awaiting input stays on the board so it
+// isn't missed; it moves out only once it's done or errored.
+func (m *Model) boardSessions() []*supervisor.Session {
+	all := m.sup.Sessions()
+	out := make([]*supervisor.Session, 0, len(all))
+	for _, sess := range all {
+		v := sess.View()
+		if v.ScheduleName != "" && isSettled(v.Status) {
+			continue
+		}
+		out = append(out, sess)
+	}
+	return out
+}
+
+func isSettled(st supervisor.Status) bool {
+	return st == supervisor.StatusDone || st == supervisor.StatusError || st == supervisor.StatusClosed
+}
+
 // ordered is the board's sessions flattened in display order, so the
 // cursor indexes the same sequence the board renders.
 func (m *Model) ordered() []*supervisor.Session {
 	var out []*supervisor.Session
-	for _, g := range groupBoard(m.sup.Sessions()) {
+	for _, g := range groupBoard(m.boardSessions()) {
 		out = append(out, g.sessions...)
 	}
 	return out
@@ -532,7 +563,7 @@ func (m *Model) viewBoard() string {
 		"enter", "attach", "n", "new", "a", "approve", "p", "pin", "c", "category", "r", "rename", "d", "diff", "e", "export", "s", "schedules", "A", "auto⚡", "x", "abort", "K", "kill", "q", "quit"))
 	footerStr := footerBuf.String()
 
-	groups := groupBoard(m.sup.Sessions())
+	groups := groupBoard(m.boardSessions())
 	if len(groups) == 0 {
 		b.WriteString(styleDim.Render("  no sessions — press ") + styleKey.Render("[n]") + styleDim.Render(" to launch an agent") + "\n")
 	} else {

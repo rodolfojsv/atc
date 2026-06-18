@@ -148,26 +148,27 @@ func (s *Server) auth(next http.HandlerFunc) http.Handler {
 // --- DTOs ----------------------------------------------------------
 
 type sessionJSON struct {
-	Name       string    `json:"name"`
-	Repo       string    `json:"repo"`
-	Dir        string    `json:"dir"`
-	Branch     string    `json:"branch,omitempty"`
-	BaseBranch string    `json:"baseBranch,omitempty"`
-	Worktree   bool      `json:"worktree"`
-	Backend    string    `json:"backend"`
-	Preset     string    `json:"preset,omitempty"`
-	Model      string    `json:"model,omitempty"`
-	Status     string    `json:"status"`
-	Intent     string    `json:"intent,omitempty"`
-	Err        string    `json:"err,omitempty"`
-	LastLine   string    `json:"lastLine,omitempty"`
-	ReadOnly   bool      `json:"readOnly"`
-	AutoOK     bool      `json:"autoApprove"`
-	Pinned     bool      `json:"pinned,omitempty"`
-	Category   string    `json:"category,omitempty"`
-	CreatedBy  string    `json:"createdBy,omitempty"`
-	Created    time.Time `json:"created"`
-	SinceEvent float64   `json:"sinceEventSec,omitempty"`
+	Name         string    `json:"name"`
+	Repo         string    `json:"repo"`
+	Dir          string    `json:"dir"`
+	Branch       string    `json:"branch,omitempty"`
+	BaseBranch   string    `json:"baseBranch,omitempty"`
+	Worktree     bool      `json:"worktree"`
+	Backend      string    `json:"backend"`
+	Preset       string    `json:"preset,omitempty"`
+	Model        string    `json:"model,omitempty"`
+	Status       string    `json:"status"`
+	Intent       string    `json:"intent,omitempty"`
+	Err          string    `json:"err,omitempty"`
+	LastLine     string    `json:"lastLine,omitempty"`
+	ReadOnly     bool      `json:"readOnly"`
+	AutoOK       bool      `json:"autoApprove"`
+	Pinned       bool      `json:"pinned,omitempty"`
+	Category     string    `json:"category,omitempty"`
+	CreatedBy    string    `json:"createdBy,omitempty"`
+	ScheduleName string    `json:"scheduleName,omitempty"`
+	Created      time.Time `json:"created"`
+	SinceEvent   float64   `json:"sinceEventSec,omitempty"`
 
 	InTokens      int64   `json:"inTokens"`
 	OutTokens     int64   `json:"outTokens"`
@@ -227,7 +228,7 @@ func (s *Server) toSessionJSON(v supervisor.SessionView) sessionJSON {
 		Model: v.Model, Status: string(v.Status), Intent: v.Intent,
 		Err: v.Err, LastLine: v.LastLine, ReadOnly: v.ReadOnly,
 		AutoOK: v.AutoApprove, Pinned: v.Pinned, Category: v.Category,
-		CreatedBy: v.CreatedBy, Created: v.Created,
+		CreatedBy: v.CreatedBy, ScheduleName: v.ScheduleName, Created: v.Created,
 		SinceEvent:    v.SinceEvent.Seconds(),
 		InTokens:      v.Usage.InputTokens,
 		OutTokens:     v.Usage.OutputTokens,
@@ -309,9 +310,23 @@ func (s *Server) handleList(w http.ResponseWriter, _ *http.Request) {
 	sessions := s.sup.Sessions()
 	out := make([]sessionJSON, 0, len(sessions))
 	for _, sess := range sessions {
-		out = append(out, s.toSessionJSON(sess.View()))
+		v := sess.View()
+		// Schedule-originated sessions drop off the board once they settle —
+		// they're reachable through the Scheduled section (each schedule's
+		// run timeline links to them). Still-running or attention-needing
+		// ones stay visible so they aren't missed. Mirrors the TUI board.
+		if v.ScheduleName != "" && boardSettled(v.Status) {
+			continue
+		}
+		out = append(out, s.toSessionJSON(v))
 	}
 	writeJSON(w, out)
+}
+
+// boardSettled reports whether a session has reached a terminal state and
+// so may be hidden from the live board.
+func boardSettled(st supervisor.Status) bool {
+	return st == supervisor.StatusDone || st == supervisor.StatusError || st == supervisor.StatusClosed
 }
 
 type scheduleJSON struct {

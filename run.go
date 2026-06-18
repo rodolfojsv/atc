@@ -66,6 +66,7 @@ func cmdRun(argv []string) int {
 				if opts.Name == "" {
 					opts.Name = s.Name
 				}
+				opts.ScheduleName = s.Name
 				if !opts.UseWorktree {
 					opts.UseWorktree = s.Worktree
 				}
@@ -170,6 +171,15 @@ func cmdRun(argv []string) int {
 			fmt.Fprintln(os.Stderr, "atc run: export:", err)
 		}
 	}
+	// Self-clean: reap finished scheduled sessions left by earlier cron runs
+	// that no UI ever adopted, per the configured retention. The session we
+	// just ran is too fresh to match, so this only trims old ones.
+	if cfg.ScheduledRetentionDays > 0 {
+		if n := sup.PruneScheduled(time.Duration(cfg.ScheduledRetentionDays) * 24 * time.Hour); n > 0 {
+			fmt.Printf("atc run: cleaned up %d expired scheduled session(s)\n", n)
+		}
+	}
+
 	if v.Status == supervisor.StatusError {
 		fmt.Fprintln(os.Stderr, "atc run:", v.Err)
 		return 1

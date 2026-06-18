@@ -226,19 +226,20 @@ func (s *Supervisor) ActiveCount() int {
 }
 
 type NewSessionOptions struct {
-	Name        string
-	NameHint    string // derives an auto-name when Name is empty; never sent to the agent (the web form passes its first prompt here)
-	Category    string // board category; empty defaults to the repo (see defaultCategory)
-	Repo        string // repo or plain directory the agent runs in
-	UseWorktree bool
-	Backend     string // "copilot" (default) or "claude"
-	Preset      string
-	Model       string // overrides preset model, then config model
-	Prompt      string // optional first prompt
-	ReadOnly    bool   // plan mode: the agent inspects but never modifies
-	AutoApprove bool   // start in allow-all (deny-list still gates Copilot)
-	CreatedBy   string // opaque per-device clientId of the creator (web/app); "" for TUI
-	NotifyTopic string // ntfy topic of the creator's device; "" for TUI/scheduler
+	Name         string
+	NameHint     string // derives an auto-name when Name is empty; never sent to the agent (the web form passes its first prompt here)
+	Category     string // board category; empty defaults to the repo (see defaultCategory)
+	Repo         string // repo or plain directory the agent runs in
+	UseWorktree  bool
+	Backend      string // "copilot" (default) or "claude"
+	Preset       string
+	Model        string // overrides preset model, then config model
+	Prompt       string // optional first prompt
+	ReadOnly     bool   // plan mode: the agent inspects but never modifies
+	AutoApprove  bool   // start in allow-all (deny-list still gates Copilot)
+	CreatedBy    string // opaque per-device clientId of the creator (web/app); "" for TUI
+	NotifyTopic  string // ntfy topic of the creator's device; "" for TUI/scheduler
+	ScheduleName string // schedule that launched this session; "" for interactive sessions
 }
 
 // NewSession validates the target directory, registers a session
@@ -303,6 +304,7 @@ func (s *Supervisor) NewSession(opts NewSessionOptions) (*Session, error) {
 		Preset: presetName, ReadOnly: opts.ReadOnly, Model: model,
 		Created: time.Now(), status: StatusStarting, autoApprove: autoApprove,
 		category: category, createdBy: opts.CreatedBy, notifyTopic: opts.NotifyTopic,
+		ScheduleName: opts.ScheduleName,
 	}
 	s.mu.Lock()
 	s.sessions = append(s.sessions, sess)
@@ -373,8 +375,21 @@ func (s *Supervisor) uniqueName(name string) string {
 	if !taken[name] {
 		return name
 	}
+	// On collision, disambiguate with a timestamp (month-day, hour-minute)
+	// rather than a bare counter, so repeated runs of the same-named task —
+	// notably a recurring schedule — read chronologically (foo-0618-1430)
+	// instead of foo-2, foo-3. Fall back to seconds, then a counter, if two
+	// land in the same minute (or second).
+	now := time.Now()
+	if c := name + "-" + now.Format("0102-1504"); !taken[c] {
+		return c
+	}
+	base := name + "-" + now.Format("0102-150405")
+	if !taken[base] {
+		return base
+	}
 	for i := 2; ; i++ {
-		if c := fmt.Sprintf("%s-%d", name, i); !taken[c] {
+		if c := fmt.Sprintf("%s-%d", base, i); !taken[c] {
 			return c
 		}
 	}
@@ -486,7 +501,8 @@ func (s *Supervisor) ResumeAll() int {
 			Created: sv.Created, BaseBranch: sv.BaseBranch, BaseCommit: sv.BaseCommit,
 			autoApprove: sv.AutoApprove, pinned: sv.Pinned, category: sv.Category,
 			createdBy: sv.CreatedBy, notifyTopic: sv.NotifyTopic,
-			status: StatusStarting, id: sv.ID,
+			ScheduleName: sv.ScheduleName,
+			status:       StatusStarting, id: sv.ID,
 		}
 		s.mu.Lock()
 		s.sessions = append(s.sessions, sess)
@@ -600,8 +616,9 @@ func (s *Supervisor) persist() {
 				Preset: sess.Preset, Model: firstNonEmpty(sess.usage.Model, sess.Model), ReadOnly: sess.ReadOnly,
 				AutoApprove: sess.autoApprove,
 				Pinned:      sess.pinned, Category: sess.category, CreatedBy: sess.createdBy,
-				NotifyTopic: sess.notifyTopic,
-				BaseBranch:  sess.BaseBranch, BaseCommit: sess.BaseCommit,
+				NotifyTopic:  sess.notifyTopic,
+				ScheduleName: sess.ScheduleName,
+				BaseBranch:   sess.BaseBranch, BaseCommit: sess.BaseCommit,
 				Status: string(sess.status), Created: sess.Created,
 				InTokens: sess.usage.InputTokens, OutTokens: sess.usage.OutputTokens,
 				NanoAiu: sess.usage.NanoAiu, CostUSD: sess.usage.CostUSD,
@@ -662,8 +679,9 @@ func (s *Supervisor) WatchStore(ctx context.Context, interval time.Duration) {
 				Preset: sv.Preset, ReadOnly: sv.ReadOnly, Model: sv.Model,
 				Created: sv.Created, BaseBranch: sv.BaseBranch, BaseCommit: sv.BaseCommit,
 				pinned: sv.Pinned, category: sv.Category, createdBy: sv.CreatedBy,
-				notifyTopic: sv.NotifyTopic,
-				status:      StatusStarting, id: sv.ID,
+				notifyTopic:  sv.NotifyTopic,
+				ScheduleName: sv.ScheduleName,
+				status:       StatusStarting, id: sv.ID,
 			}
 			s.mu.Lock()
 			s.sessions = append(s.sessions, sess)
@@ -674,6 +692,96 @@ func (s *Supervisor) WatchStore(ctx context.Context, interval time.Duration) {
 			s.poke()
 		}
 	}
+}
+
+// PruneScheduledLoop sweeps finished schedule-originated sessions on a
+// timer until ctx is cancelled, honoring the configured retention. It
+// returns immediately when retention is disabled (0 days), so callers can
+// always start it unconditionally.
+func (s *Supervisor) PruneScheduledLoop(ctx context.Context, interval time.Duration) {
+	maxAge := time.Duration(s.cfg.ScheduledRetentionDays) * 24 * time.Hour
+	if maxAge <= 0 {
+		return
+	}
+	s.PruneScheduled(maxAge) // sweep once at startup, then on the interval
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.PruneScheduled(maxAge)
+		}
+	}
+}
+
+// PruneScheduled removes schedule-originated sessions that have settled
+// (done/error/closed) and are older than maxAge — dropping the board
+// entry, the resume-store record, and the worktree. This is how recurring
+// schedules self-clean: the TUI/web call it on a timer, and a headless
+// `atc run` calls it once after finishing, which also reaps store-only
+// sessions left by earlier runs that no UI ever adopted. maxAge <= 0
+// disables it. Sessions still running or awaiting input are kept, as are
+// all manually started sessions. Returns how many were removed.
+func (s *Supervisor) PruneScheduled(maxAge time.Duration) int {
+	if maxAge <= 0 {
+		return 0
+	}
+	cutoff := time.Now().Add(-maxAge)
+	removed := 0
+
+	// In-memory pass: tear down adopted/live scheduled sessions on the board.
+	for _, sess := range s.Sessions() {
+		v := sess.View()
+		if v.ScheduleName == "" || !settled(v.Status) || !v.Created.Before(cutoff) {
+			continue
+		}
+		s.log.Log(logx.Info, "session.prune", map[string]any{"session": v.Name, "schedule": v.ScheduleName})
+		s.Kill(sess, true) // finished scheduled run: drop its worktree too
+		removed++
+	}
+
+	// Store-only pass: prune entries no live session represents — e.g. a
+	// cron `atc run` that wrote sessions while no TUI/web was open to adopt
+	// them. Remove their worktrees and rewrite the store without them.
+	live := map[string]bool{}
+	for _, sess := range s.Sessions() {
+		sess.mu.Lock()
+		if sess.id != "" {
+			live[sess.id] = true
+		}
+		sess.mu.Unlock()
+	}
+	var keep []savedSession
+	changed := false
+	for _, sv := range s.store.load() {
+		if !live[sv.ID] && sv.ScheduleName != "" && sv.settled() && sv.Created.Before(cutoff) {
+			if sv.Worktree != "" {
+				_ = s.trees.Remove(sv.Repo, sv.Worktree, sv.Branch)
+			}
+			if sv.ID != "" {
+				s.mu.Lock()
+				s.killed[sv.ID] = true // never re-adopt a pruned session
+				s.mu.Unlock()
+			}
+			s.log.Log(logx.Info, "session.prune", map[string]any{"session": sv.Name, "schedule": sv.ScheduleName, "store": true})
+			changed = true
+			removed++
+			continue
+		}
+		keep = append(keep, sv)
+	}
+	if changed {
+		_ = s.store.save(keep)
+	}
+	return removed
+}
+
+// settled reports whether a session has reached a terminal state and so is
+// safe to hide from the board or prune.
+func settled(st Status) bool {
+	return st == StatusDone || st == StatusError || st == StatusClosed
 }
 
 // Prompt sends a user message to the session. When the agent is waiting

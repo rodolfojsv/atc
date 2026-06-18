@@ -105,6 +105,7 @@ Note: real `config.json` must be plain JSON — the `//` comments below are illu
     "waiting-on-permission": ["powershell", "-File", "hooks/toast.ps1"],
     "finished": ["powershell", "-File", "hooks/teams-webhook.ps1"]
   },
+  "scheduledRetentionDays": 14,                 // auto-delete finished scheduled sessions older than this (0 = keep forever)
   "schedules": [
     { "name": "pr-triage", "cron": "*/15 9-18 * * 1-5", "preset": "default", "repo": "C:/dev/app",
       "precheck": "~/scripts/check-prs.sh",        // skip (no tokens) unless something changed
@@ -146,6 +147,8 @@ Scheduled prompts get expensive when every firing wakes the agent — yet most o
 - **fails to start** (missing script, bad dir, >60s) → recorded as an `error` instead of a silent skip.
 
 Every firing's outcome — `updated` / `no-update` / `error` — is appended to `~/.atc/schedule-runs.jsonl` and shown as a per-task **run timeline** in the **Scheduled** band of the board (web, and the TUI overlay via `s`). So you can see "checked at 12:15, no changes" without it ever costing a token; `updated` rows deep-link to the session that ran.
+
+**Scheduled sessions stay out of the main board.** A schedule's sessions surface on the board only while they're *running* or *need your input* — once a run finishes (done/error) it drops off the board and lives in the **Scheduled** section instead, openable from its schedule's run timeline (TUI: press `s`, select with ↑↓, `enter` to open; web: tap the `↗ session` link). This keeps a recurring task from burying your interactive work. To stop finished runs piling up indefinitely, set **`scheduledRetentionDays`** in config: atc auto-deletes finished scheduled sessions (and their worktrees) older than that — on a timer while it's open, and once after each headless `atc run`, so cron-driven schedules self-clean even with no UI running. `0` (the default) keeps them forever. Manually started sessions are never auto-removed. (Repeated runs of the same schedule are named with a timestamp suffix — `pr-triage-0618-1430` — rather than `pr-triage-2`, so the Scheduled list reads chronologically.)
 
 A minimal precheck is just *fetch a cheap signal → compare to stored state → exit 0/1*:
 
