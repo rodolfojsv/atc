@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -43,11 +44,13 @@ func (b *Backend) Name() string { return "copilot" }
 func (b *Backend) Stop() error { return b.client.Stop() }
 
 func (b *Backend) NewSession(ctx context.Context, spec agent.SessionSpec) (agent.Session, error) {
+	servers, mcpErr := loadMCPServers()
 	sdk, err := b.client.CreateSession(ctx, &copilot.SessionConfig{
 		Model:               spec.Model,
 		WorkingDirectory:    spec.WorkingDir,
 		ClientName:          "atc",
 		Streaming:           copilot.Bool(true),
+		MCPServers:          servers,
 		OnPermissionRequest: permissionHandler(spec.OnPermission),
 		OnUserInputRequest:  userInputHandler(spec.OnQuestion),
 	})
@@ -55,15 +58,18 @@ func (b *Backend) NewSession(ctx context.Context, spec agent.SessionSpec) (agent
 		return nil, err
 	}
 	sdk.On(eventTranslator(sdk.SessionID, spec.OnEvent))
+	reportMCPLoad(spec.OnEvent, servers, mcpErr)
 	return &session{sdk: sdk, readOnly: spec.ReadOnly, emit: spec.OnEvent}, nil
 }
 
 func (b *Backend) ResumeSession(ctx context.Context, spec agent.SessionSpec) (agent.Session, error) {
+	servers, _ := loadMCPServers()
 	sdk, err := b.client.ResumeSession(ctx, spec.SessionID, &copilot.ResumeSessionConfig{
 		ClientName:          "atc",
 		WorkingDirectory:    spec.WorkingDir,
 		Model:               spec.Model,
 		Streaming:           copilot.Bool(true),
+		MCPServers:          servers,
 		OnPermissionRequest: permissionHandler(spec.OnPermission),
 		OnUserInputRequest:  userInputHandler(spec.OnQuestion),
 	})
@@ -159,6 +165,8 @@ func (s *session) invokeCommand(ctx context.Context, name, input string) error {
 	}
 	switch r := res.(type) {
 	case *rpc.SlashCommandAgentPromptResult:
+		// Becomes a real agent turn, which emits its own idle when it
+		// finishes — don't emit one here too.
 		return s.sendPrompt(ctx, r.Prompt)
 	case *rpc.SlashCommandTextResult:
 		s.emitMessage(r.Text)
@@ -173,6 +181,10 @@ func (s *session) invokeCommand(ctx context.Context, name, input string) error {
 		}
 		s.emitMessage("/" + r.Command + " needs a subcommand: " + strings.Join(names, ", "))
 	}
+	// These results resolve synchronously without a turn lifecycle, so the
+	// runtime never sends a turn-end event. Emit idle ourselves; otherwise
+	// the supervisor leaves the session stuck "working" (e.g. after /mcp).
+	s.emitIdle()
 	return nil
 }
 
@@ -181,6 +193,15 @@ func (s *session) emitMessage(text string) {
 		return
 	}
 	s.emit(agent.Event{Type: agent.EventMessage, Text: text})
+}
+
+// emitIdle marks the end of a turn that resolved without the runtime's own
+// turn-end event (a synchronous slash command), so the supervisor can move
+// the session out of "working".
+func (s *session) emitIdle() {
+	if s.emit != nil {
+		s.emit(agent.Event{Type: agent.EventIdle})
+	}
 }
 
 // ListCommands returns the session's invocable slash commands and skills
@@ -272,7 +293,56 @@ func eventTranslator(sessionID string, onEvent func(agent.Event)) copilot.Sessio
 		if ok {
 			onEvent(e)
 		}
+		// Copilot has no /usage overlay to scrape (the way Claude does);
+		// instead it rides account quota snapshots on every usage event.
+		// Surface them as a limits snapshot so the account-usage badge
+		// works for Copilot too, refreshed automatically each turn.
+		if u, isUsage := ev.Data.(*rpc.AssistantUsageData); isUsage {
+			if lim, hasLim := limitsFromQuota(u.QuotaSnapshots); hasLim {
+				onEvent(lim)
+			}
+		}
 	}
+}
+
+// limitsFromQuota turns Copilot's per-quota snapshots into an account
+// rate-limit event. Copilot reports the percentage remaining, so we surface
+// the used percentage to match Claude's windows. Unlimited or empty
+// entitlements carry no meaningful bar and are skipped. Windows are sorted by
+// label so the snapshot is stable across the UI's repeated polls (Go map
+// iteration order isn't). Returns false when nothing meaningful is present.
+func limitsFromQuota(snaps map[string]rpc.AssistantUsageQuotaSnapshot) (agent.Event, bool) {
+	if len(snaps) == 0 {
+		return agent.Event{}, false
+	}
+	var windows []agent.LimitWindow
+	for key, q := range snaps {
+		if q.IsUnlimitedEntitlement {
+			continue
+		}
+		used := 100 - q.RemainingPercentage
+		if used < 0 {
+			used = 0
+		} else if used > 100 {
+			used = 100
+		}
+		w := agent.LimitWindow{Label: quotaLabel(key), Pct: used}
+		if q.ResetDate != nil {
+			w.Resets = "resets " + q.ResetDate.Local().Format("Jan 2, 3:04pm")
+		}
+		windows = append(windows, w)
+	}
+	if len(windows) == 0 {
+		return agent.Event{}, false
+	}
+	sort.Slice(windows, func(i, j int) bool { return windows[i].Label < windows[j].Label })
+	return agent.Event{Type: agent.EventLimits, LimitWindows: windows}, true
+}
+
+// quotaLabel makes a Copilot quota key (e.g. "premium_interactions") read
+// like the other account limit windows in the UI.
+func quotaLabel(key string) string {
+	return strings.ReplaceAll(key, "_", " ")
 }
 
 // Copilot event tracing: when ATC_COPILOT_TRACE names a writable file,

@@ -38,6 +38,32 @@ func TestReadSessionFile(t *testing.T) {
 			t.Errorf("expected refusal for %q", bad)
 		}
 	}
+
+	// Copilot sessions may reference files in their own
+	// ~/.copilot/session-state/<id>/files dir, which lives outside the repo.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // Windows
+	stateDir := filepath.Join(home, ".copilot", "session-state", "sess-123", "files")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "salesforce_response.md"), []byte("# out"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	csess := &Session{Name: "c", Dir: dir, Backend: "copilot", id: "sess-123", status: StatusDone}
+	if name, data, err := s.ReadSessionFile(csess, filepath.Join(stateDir, "salesforce_response.md")); err != nil || name != "salesforce_response.md" || string(data) != "# out" {
+		t.Fatalf("copilot session-state read: name=%q data=%q err=%v", name, data, err)
+	}
+	// Another session's state dir is still off-limits.
+	if _, _, err := s.ReadSessionFile(csess, filepath.Join(home, ".copilot", "session-state", "other", "x.md")); err == nil {
+		t.Error("expected refusal for another session's state dir")
+	}
+	// A claude session gets no such exemption.
+	clsess := &Session{Name: "cl", Dir: dir, Backend: "claude", id: "sess-123", status: StatusDone}
+	if _, _, err := s.ReadSessionFile(clsess, filepath.Join(stateDir, "salesforce_response.md")); err == nil {
+		t.Error("expected refusal for claude backend reading copilot state dir")
+	}
 }
 
 func TestAutoName(t *testing.T) {

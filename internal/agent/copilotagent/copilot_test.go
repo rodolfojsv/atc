@@ -58,3 +58,39 @@ func TestCopilotTrace(t *testing.T) {
 		}
 	}
 }
+
+// limitsFromQuota powers Copilot's account-usage badge: quota reports the
+// percentage remaining, the badge shows percentage used, unlimited/empty
+// entitlements are dropped, and windows come out label-sorted (Go map order
+// is random) so the snapshot doesn't reshuffle on every poll.
+func TestLimitsFromQuota(t *testing.T) {
+	if _, ok := limitsFromQuota(nil); ok {
+		t.Fatal("no snapshots should yield no limits event")
+	}
+
+	snaps := map[string]rpc.AssistantUsageQuotaSnapshot{
+		"premium_interactions": {RemainingPercentage: 25},
+		"chat":                 {RemainingPercentage: 90},
+		"completions":          {IsUnlimitedEntitlement: true, RemainingPercentage: 0},
+	}
+	e, ok := limitsFromQuota(snaps)
+	if !ok {
+		t.Fatal("want a limits event")
+	}
+	if e.Type != agent.EventLimits {
+		t.Fatalf("want EventLimits, got %v", e.Type)
+	}
+	// Unlimited entitlement dropped; remaining two sorted by label.
+	want := []agent.LimitWindow{
+		{Label: "chat", Pct: 10},
+		{Label: "premium interactions", Pct: 75},
+	}
+	if len(e.LimitWindows) != len(want) {
+		t.Fatalf("want %d windows, got %d: %+v", len(want), len(e.LimitWindows), e.LimitWindows)
+	}
+	for i, w := range want {
+		if e.LimitWindows[i].Label != w.Label || e.LimitWindows[i].Pct != w.Pct {
+			t.Errorf("window %d = %+v, want %+v", i, e.LimitWindows[i], w)
+		}
+	}
+}

@@ -65,7 +65,7 @@ const (
 	EventError // fatal session error
 	EventContext
 	EventUsage
-	EventLimits // account rate-limit snapshot (Claude /usage scrape)
+	EventLimits // account rate-limit snapshot (Claude /usage scrape; Copilot quota)
 )
 
 var eventTypeNames = [...]string{
@@ -97,7 +97,8 @@ type Event struct {
 	NanoAiu                   float64 // billed AI credits ×1e-9 (Copilot)
 	Model                     string
 
-	// EventLimits (best-effort, scraped from Claude's /usage overlay)
+	// EventLimits (best-effort: scraped from Claude's /usage overlay, or
+	// derived from Copilot's per-turn account quota snapshots)
 	LimitWindows []LimitWindow // every "Current …" window reported (session, weekly, …)
 	LimitText    string        // raw overlay text, surfaced verbatim too
 }

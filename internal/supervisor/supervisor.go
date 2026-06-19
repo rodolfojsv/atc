@@ -1210,9 +1210,28 @@ const maxFileReadBytes = 2 << 20
 // that escapes the dir (via "..") is refused. Returns the base name and
 // contents. This is the file equivalent of what the agent can already
 // see, exposed read-only to the (token-gated, tailnet-bound) web UI.
+// confinedToAny reports whether target (already absolute and cleaned) sits
+// within at least one of roots — i.e. it doesn't escape via "..". Empty roots
+// are ignored.
+func confinedToAny(target string, roots []string) bool {
+	for _, root := range roots {
+		if root == "" {
+			continue
+		}
+		r, err := filepath.Rel(root, target)
+		if err != nil || r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
 func (s *Supervisor) ReadSessionFile(sess *Session, rel string) (string, []byte, error) {
 	sess.mu.Lock()
 	base := sess.Dir
+	backend := sess.Backend
+	id := sess.id
 	sess.mu.Unlock()
 	if base == "" {
 		return "", nil, errors.New("session has no directory yet")
@@ -1226,7 +1245,17 @@ func (s *Supervisor) ReadSessionFile(sess *Session, rel string) (string, []byte,
 		target = filepath.Join(base, target)
 	}
 	target = filepath.Clean(target)
-	if r, err := filepath.Rel(base, target); err != nil || r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) {
+	// The file must live inside the session's working directory, or — for
+	// Copilot — inside that session's own ~/.copilot/session-state/<id>
+	// scratch dir, where the agent writes generated files (e.g.
+	// salesforce_response.md) that fall outside the repo.
+	roots := []string{base}
+	if backend == "copilot" && id != "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			roots = append(roots, filepath.Join(home, ".copilot", "session-state", id))
+		}
+	}
+	if !confinedToAny(target, roots) {
 		return "", nil, errors.New("path is outside the session directory")
 	}
 	fi, err := os.Stat(target)

@@ -66,10 +66,12 @@ type Usage struct {
 	Model         string
 }
 
-// Limits is a best-effort account rate-limit snapshot, scraped from
-// Claude's /usage overlay. It's a point-in-time reading (AsOf), refreshed
-// only when the user runs /usage, not continuously polled. Windows holds every
-// reported window (session, weekly, per-model) so the UI can show them all.
+// Limits is a best-effort account rate-limit snapshot. For Claude it's scraped
+// from the /usage overlay (a point-in-time reading, refreshed only when the
+// user runs /usage); for Copilot it's derived from the account quota snapshots
+// that ride each turn's usage event (refreshed automatically). AsOf records
+// when it was captured. Windows holds every reported window (session, weekly,
+// per-model) so the UI can show them all.
 type Limits struct {
 	Windows []agent.LimitWindow
 	Text    string    // raw overlay text
