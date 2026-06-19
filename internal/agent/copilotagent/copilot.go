@@ -410,8 +410,8 @@ func traceContent(data rpc.SessionEventData) string {
 		if d.CopilotUsage != nil {
 			nano = fmt.Sprintf("%v", d.CopilotUsage.TotalNanoAiu)
 		}
-		return fmt.Sprintf("model=%q in=%s out=%s cost=%s nanoAiu=%s quotas=%d",
-			d.Model, ptrStr(d.InputTokens), ptrStr(d.OutputTokens), fptrStr(d.Cost), nano, len(d.QuotaSnapshots))
+		return fmt.Sprintf("model=%q in=%s out=%s cost=%s nanoAiu=%s quotas=[%s]",
+			d.Model, ptrStr(d.InputTokens), ptrStr(d.OutputTokens), fptrStr(d.Cost), nano, quotaTrace(d.QuotaSnapshots))
 	case *rpc.SessionUsageInfoData:
 		return fmt.Sprintf("current=%d limit=%d", d.CurrentTokens, d.TokenLimit)
 	default:
@@ -434,6 +434,24 @@ func fptrStr(p *float64) string {
 		return "<nil>"
 	}
 	return fmt.Sprintf("%v", *p)
+}
+
+// quotaTrace dumps each quota snapshot's absolute counts so we can see whether
+// the SDK actually populates UsedRequests/EntitlementRequests (both flagged
+// "internal") for external clients, or only the remaining percentage.
+func quotaTrace(snaps map[string]rpc.AssistantUsageQuotaSnapshot) string {
+	keys := make([]string, 0, len(snaps))
+	for k := range snaps {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		q := snaps[k]
+		parts = append(parts, fmt.Sprintf("%s:used=%d/max=%d rem=%.0f%% unlimited=%v",
+			k, q.UsedRequests, q.EntitlementRequests, q.RemainingPercentage, q.IsUnlimitedEntitlement))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // translateData maps SDK event payloads onto normalized events.
