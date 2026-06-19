@@ -43,6 +43,27 @@ func (b *Backend) Name() string { return "copilot" }
 
 func (b *Backend) Stop() error { return b.client.Stop() }
 
+// customAgents maps atc's backend-neutral agent definitions to the Copilot
+// SDK's CustomAgentConfig, so agents tagged from atc config drive the
+// session without any .github/agents files in the repo.
+func customAgents(defs []agent.AgentDef) []copilot.CustomAgentConfig {
+	if len(defs) == 0 {
+		return nil
+	}
+	out := make([]copilot.CustomAgentConfig, 0, len(defs))
+	for _, d := range defs {
+		out = append(out, copilot.CustomAgentConfig{
+			Name:        d.Name,
+			DisplayName: d.Name,
+			Description: d.Description,
+			Prompt:      d.Prompt,
+			Tools:       d.Tools,
+			Model:       d.Model,
+		})
+	}
+	return out
+}
+
 func (b *Backend) NewSession(ctx context.Context, spec agent.SessionSpec) (agent.Session, error) {
 	servers, mcpErr := loadMCPServers()
 	sdk, err := b.client.CreateSession(ctx, &copilot.SessionConfig{
@@ -51,6 +72,8 @@ func (b *Backend) NewSession(ctx context.Context, spec agent.SessionSpec) (agent
 		ClientName:          "atc",
 		Streaming:           copilot.Bool(true),
 		MCPServers:          servers,
+		CustomAgents:        customAgents(spec.Agents),
+		Agent:               spec.Agent,
 		OnPermissionRequest: permissionHandler(spec.OnPermission),
 		OnUserInputRequest:  userInputHandler(spec.OnQuestion),
 	})
@@ -70,6 +93,8 @@ func (b *Backend) ResumeSession(ctx context.Context, spec agent.SessionSpec) (ag
 		Model:               spec.Model,
 		Streaming:           copilot.Bool(true),
 		MCPServers:          servers,
+		CustomAgents:        customAgents(spec.Agents),
+		Agent:               spec.Agent,
 		OnPermissionRequest: permissionHandler(spec.OnPermission),
 		OnUserInputRequest:  userInputHandler(spec.OnQuestion),
 	})

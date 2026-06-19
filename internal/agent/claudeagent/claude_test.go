@@ -328,3 +328,64 @@ func TestLiveSmoke(t *testing.T) {
 	}
 	t.Logf("response: %q  session: %s", text.String(), sess.ID())
 }
+
+// claudeArgs must inject atc-config agents as --agents JSON and activate
+// the tagged one with --agent, so a session can be driven by a custom
+// persona without any .claude/agents files in the repo.
+func TestClaudeArgsTagsAgent(t *testing.T) {
+	s := &session{id: "agent-1", claudeID: "agent-1", spec: agent.SessionSpec{
+		Agent: "reviewer",
+		Agents: []agent.AgentDef{
+			{Name: "reviewer", Description: "code reviewer", Prompt: "review carefully", Tools: []string{"Read", "Grep"}, Model: "sonnet"},
+			{Name: "scribe", Prompt: "write docs"},
+		},
+	}}
+	args := s.claudeArgs(false)
+
+	js := flagValue(t, args, "--agents")
+	if js == "" {
+		t.Fatal("expected --agents flag")
+	}
+	var got map[string]map[string]any
+	if err := json.Unmarshal([]byte(js), &got); err != nil {
+		t.Fatalf("--agents is not valid JSON: %v", err)
+	}
+	if _, ok := got["reviewer"]; !ok {
+		t.Fatalf("reviewer agent missing from --agents: %s", js)
+	}
+	if _, ok := got["scribe"]; !ok {
+		t.Fatalf("scribe agent missing from --agents: %s", js)
+	}
+	if got["reviewer"]["prompt"] != "review carefully" {
+		t.Errorf("reviewer prompt = %v", got["reviewer"]["prompt"])
+	}
+	// scribe has no tools/model: those keys must be omitted, not empty.
+	if _, ok := got["scribe"]["tools"]; ok {
+		t.Errorf("empty tools should be omitted: %s", js)
+	}
+	if v := flagValue(t, args, "--agent"); v != "reviewer" {
+		t.Errorf("--agent = %q, want reviewer", v)
+	}
+}
+
+// No configured agents → neither flag appears.
+func TestClaudeArgsNoAgents(t *testing.T) {
+	s := &session{id: "plain-1", claudeID: "plain-1", spec: agent.SessionSpec{}}
+	args := s.claudeArgs(false)
+	for _, a := range args {
+		if a == "--agents" || a == "--agent" {
+			t.Fatalf("unexpected agent flag in %v", args)
+		}
+	}
+}
+
+// flagValue returns the argument following the named flag, or "".
+func flagValue(t *testing.T, args []string, flag string) string {
+	t.Helper()
+	for i, a := range args {
+		if a == flag && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
+}

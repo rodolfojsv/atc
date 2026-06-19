@@ -624,7 +624,45 @@ func (s *session) claudeArgs(resume bool) []string {
 	default:
 		args = append(args, "--permission-mode", "acceptEdits")
 	}
+	// Inject atc-config agents inline so they need not live in the repo's
+	// .claude/agents, then activate the tagged one as the primary persona.
+	if js := agentsJSON(s.spec.Agents); js != "" {
+		args = append(args, "--agents", js)
+	}
+	if s.spec.Agent != "" {
+		args = append(args, "--agent", s.spec.Agent)
+	}
 	return args
+}
+
+// agentsJSON renders atc's agent definitions as Claude Code's --agents
+// payload: a JSON object keyed by agent name. Empty tools/model are
+// omitted (Claude treats a missing tools list as "all tools"). Returns ""
+// when there are no agents to inject.
+func agentsJSON(defs []agent.AgentDef) string {
+	if len(defs) == 0 {
+		return ""
+	}
+	type claudeAgent struct {
+		Description string   `json:"description,omitempty"`
+		Prompt      string   `json:"prompt"`
+		Tools       []string `json:"tools,omitempty"`
+		Model       string   `json:"model,omitempty"`
+	}
+	m := make(map[string]claudeAgent, len(defs))
+	for _, d := range defs {
+		m[d.Name] = claudeAgent{
+			Description: d.Description,
+			Prompt:      d.Prompt,
+			Tools:       d.Tools,
+			Model:       d.Model,
+		}
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }
 
 // discoverClaudeID waits for the session's own jsonl (named by --session-id)

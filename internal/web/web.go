@@ -291,6 +291,7 @@ func (s *Server) handleMeta(w http.ResponseWriter, _ *http.Request) {
 		"repos":              s.cfg.Repos,
 		"backends":           s.sup.Backends(),
 		"presets":            presets,
+		"agents":             s.cfg.AgentNames(),
 		"categories":         s.sup.Categories(),
 		"defaultRepo":        defaultRepo,
 		"defaultBackend":     defaultBackend,
@@ -383,6 +384,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		Repo        string `json:"repo"`
 		Backend     string `json:"backend"`
 		Preset      string `json:"preset"`
+		Agent       string `json:"agent"`
 		Model       string `json:"model"`
 		Prompt      string `json:"prompt"`
 		Worktree    bool   `json:"worktree"`
@@ -407,7 +409,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	sess, err := s.sup.NewSession(supervisor.NewSessionOptions{
 		Name: req.Name, NameHint: req.NameHint, Repo: repo, Backend: req.Backend,
-		Preset: req.Preset, Model: req.Model, Prompt: req.Prompt,
+		Preset: req.Preset, Agent: req.Agent, Model: req.Model, Prompt: req.Prompt,
 		UseWorktree: req.Worktree && !scratch, ReadOnly: req.ReadOnly, AutoApprove: req.AutoApprove,
 		CreatedBy: clientID(r), NotifyTopic: notifyTopic(r),
 	})

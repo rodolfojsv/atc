@@ -233,6 +233,7 @@ type NewSessionOptions struct {
 	UseWorktree  bool
 	Backend      string // "copilot" (default) or "claude"
 	Preset       string
+	Agent        string // custom agent to tag (a key in config.Agents); overrides the preset's agent
 	Model        string // overrides preset model, then config model
 	Prompt       string // optional first prompt
 	ReadOnly     bool   // plan mode: the agent inspects but never modifies
@@ -298,10 +299,18 @@ func (s *Supervisor) NewSession(opts NewSessionOptions) (*Session, error) {
 		category = s.defaultCategory(repo)
 	}
 
+	// Resolve the tagged agent: explicit opt wins, else the preset's
+	// agent. An unknown name is dropped (it would otherwise make a
+	// backend reject the launch) rather than failing the session.
+	agentName := firstNonEmpty(opts.Agent, preset.Agent)
+	if agentName != "" && !s.cfg.HasAgent(agentName) {
+		agentName = ""
+	}
+
 	autoApprove := opts.AutoApprove || s.cfg.DefaultAutoApprove
 	sess := &Session{
 		Name: name, Repo: repo, Dir: repo, Backend: backendName,
-		Preset: presetName, ReadOnly: opts.ReadOnly, Model: model,
+		Preset: presetName, Agent: agentName, ReadOnly: opts.ReadOnly, Model: model,
 		Created: time.Now(), status: StatusStarting, autoApprove: autoApprove,
 		category: category, createdBy: opts.CreatedBy, notifyTopic: opts.NotifyTopic,
 		ScheduleName: opts.ScheduleName,
@@ -399,6 +408,7 @@ func (s *Supervisor) spec(sess *Session, model string) agent.SessionSpec {
 	sess.mu.Lock()
 	dir := sess.Dir
 	auto := sess.autoApprove
+	agentName := sess.Agent
 	sess.mu.Unlock()
 	approval := s.cfg.Preset(sess.Preset).Approval
 	// A session started in auto-approve runs unattended: surface that to
@@ -408,15 +418,46 @@ func (s *Supervisor) spec(sess *Session, model string) agent.SessionSpec {
 	if auto {
 		approval = config.ApprovalAllowAll
 	}
+	// Inject every configured custom agent so they're available for
+	// delegation, and activate the one tagged onto this session (if still
+	// defined). Keeping these out of the repo is the whole point: it lets
+	// agents drive sessions in repos where you can't add .github/.claude.
+	agents := s.agentDefs()
+	if agentName != "" && !s.cfg.HasAgent(agentName) {
+		agentName = ""
+	}
 	return agent.SessionSpec{
 		WorkingDir:   dir,
 		Model:        model,
+		Agents:       agents,
+		Agent:        agentName,
 		Approval:     approval,
 		ReadOnly:     sess.ReadOnly,
 		OnEvent:      func(e agent.Event) { s.handleEvent(sess, e) },
 		OnPermission: s.permissionFunc(sess),
 		OnQuestion:   s.questionFunc(sess),
 	}
+}
+
+// agentDefs converts the configured custom agents into the backend-neutral
+// form the adapters consume, in stable name order.
+func (s *Supervisor) agentDefs() []agent.AgentDef {
+	names := s.cfg.AgentNames()
+	if len(names) == 0 {
+		return nil
+	}
+	defs := make([]agent.AgentDef, 0, len(names))
+	for _, n := range names {
+		a := s.cfg.Agents[n]
+		defs = append(defs, agent.AgentDef{
+			Name:        n,
+			Description: a.Description,
+			Prompt:      a.Prompt,
+			Tools:       a.Tools,
+			Model:       a.Model,
+		})
+	}
+	return defs
 }
 
 func (s *Supervisor) launch(sess *Session, model, prompt string, useWorktree bool) {
@@ -497,7 +538,7 @@ func (s *Supervisor) ResumeAll() int {
 		sess := &Session{
 			Name: s.uniqueName(wt.CleanName(sv.Name)), Repo: sv.Repo, Dir: sv.Dir,
 			Worktree: sv.Worktree, Branch: sv.Branch, Backend: backendName,
-			Preset: sv.Preset, ReadOnly: sv.ReadOnly, Model: sv.Model,
+			Preset: sv.Preset, Agent: sv.Agent, ReadOnly: sv.ReadOnly, Model: sv.Model,
 			Created: sv.Created, BaseBranch: sv.BaseBranch, BaseCommit: sv.BaseCommit,
 			autoApprove: sv.AutoApprove, pinned: sv.Pinned, category: sv.Category,
 			createdBy: sv.CreatedBy, notifyTopic: sv.NotifyTopic,
@@ -613,7 +654,7 @@ func (s *Supervisor) persist() {
 			saved = append(saved, savedSession{
 				ID: sess.id, Name: sess.Name, Repo: sess.Repo, Dir: sess.Dir,
 				Worktree: sess.Worktree, Branch: sess.Branch, Backend: sess.Backend,
-				Preset: sess.Preset, Model: firstNonEmpty(sess.usage.Model, sess.Model), ReadOnly: sess.ReadOnly,
+				Preset: sess.Preset, Agent: sess.Agent, Model: firstNonEmpty(sess.usage.Model, sess.Model), ReadOnly: sess.ReadOnly,
 				AutoApprove: sess.autoApprove,
 				Pinned:      sess.pinned, Category: sess.category, CreatedBy: sess.createdBy,
 				NotifyTopic:  sess.notifyTopic,
@@ -676,7 +717,7 @@ func (s *Supervisor) WatchStore(ctx context.Context, interval time.Duration) {
 			sess := &Session{
 				Name: s.uniqueName(wt.CleanName(sv.Name)), Repo: sv.Repo, Dir: sv.Dir,
 				Worktree: sv.Worktree, Branch: sv.Branch, Backend: backendName,
-				Preset: sv.Preset, ReadOnly: sv.ReadOnly, Model: sv.Model,
+				Preset: sv.Preset, Agent: sv.Agent, ReadOnly: sv.ReadOnly, Model: sv.Model,
 				Created: sv.Created, BaseBranch: sv.BaseBranch, BaseCommit: sv.BaseCommit,
 				pinned: sv.Pinned, category: sv.Category, createdBy: sv.CreatedBy,
 				notifyTopic:  sv.NotifyTopic,

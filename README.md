@@ -32,6 +32,7 @@ Design priorities, in order:
 
 - **Session board** — live status per agent: idle / working / **waiting on permission** / done / error, with per-session token usage and context-window fill.
 - **Two backends** — each session runs on **GitHub Copilot** (default, via the Copilot SDK) or **Claude Code** (via `claude` in headless stream-JSON mode); pick per session in the form or per preset (`"backend": "claude"`). Caveat: Claude's CLI has no runtime permission callback, so atc's interactive approval flow applies to Copilot sessions only — for Claude, `prompt` maps to Claude Code's `acceptEdits` permission mode and `allow-all` to `bypassPermissions`, and Claude Code's own settings.json rules still apply.
+- **Custom agents (tagging)** — define agent personas once in atc's config (`agents`) and **tag** a session with one in the new-session form, a preset (`"agent": "name"`), or a schedule. atc injects them at launch — Copilot via the SDK's custom-agent config, Claude via `--agents`/`--agent` — so a tagged persona drives the session **without committing `.github/agents` or `.claude/agents` to the repo**. Built for locked-down work repos where you can't add those directories. See [Custom agents](#custom-agents).
 - **Session resume & adoption** — open sessions are recorded in `~/.atc/sessions.json`; the next `atc` run reattaches to them with transcripts restored, and a running board adopts sessions finished by other atc processes (scheduled `atc run` jobs) live. Killed sessions are forgotten. Agents don't keep *running* while atc is closed — for that, run atc inside tmux (e.g. under WSL).
 - **Attach / detach** — focus any session to watch its stream and send prompts; detach back to the board without interrupting it. Assistant replies render as **markdown** (headings, bold, code blocks — like Copilot CLI); your prompts are highlighted; tool calls and atc notices are dimmed one-liners (`⚙ bash · go test ./...`) so the analysis stays readable.
 - **Worktree-per-session** — one keypress starts an agent in a fresh git worktree; cleanup on close. Parallel agents never collide in the same checkout.
@@ -99,7 +100,15 @@ Note: real `config.json` must be plain JSON — the `//` comments below are illu
   "presets": {
     "default": { "approval": "prompt" },
     "scratch": { "approval": "allow-all" },  // deny-list still applies
-    "claude":  { "backend": "claude" }        // Claude Code sessions
+    "claude":  { "backend": "claude" },       // Claude Code sessions
+    "review":  { "agent": "reviewer" }         // tag every session from this preset with the "reviewer" agent
+  },
+  "agents": {                                  // custom personas, injected at launch (no repo files needed)
+    "reviewer": {
+      "description": "Careful code reviewer",
+      "prompt": "You are a meticulous senior reviewer. Point out bugs and risks; don't rewrite.",
+      "model": "claude-sonnet-4-6"             // optional; tools optional too (names are backend-specific)
+    }
   },
   "hooks": {
     "waiting-on-permission": ["powershell", "-File", "hooks/toast.ps1"],
@@ -114,6 +123,43 @@ Note: real `config.json` must be plain JSON — the `//` comments below are illu
   ]
 }
 ```
+
+## Custom agents
+
+Both backends let you run a session as a **custom agent** — a named persona with its own system prompt (and optionally tools/model). Normally those definitions live in the repo (`.github/agents/*.md` for Copilot, `.claude/agents/*.md` for Claude), which is a problem on a repo where you **can't or shouldn't commit them** — a corporate checkout, a repo with a locked-down `.github/`, or anything you don't own.
+
+atc sidesteps that: define agents **once in atc's own config**, then **tag** a session with one. atc injects the definition into the backend at launch, so nothing lands in the repo.
+
+```json
+{
+  "agents": {
+    "reviewer": {
+      "description": "Careful code reviewer",
+      "prompt": "You are a meticulous senior reviewer. Flag bugs and risks; don't rewrite code.",
+      "tools": ["Read", "Grep", "Bash"],     // optional — omit for all tools (names are backend-specific)
+      "model": "claude-sonnet-4-6"            // optional — overrides the session model for this agent
+    },
+    "scribe": { "prompt": "You write and tidy docs. Never touch code." }
+  }
+}
+```
+
+Three ways to tag a session with one:
+
+- **New-session form** — an **Agent** picker appears (TUI and web) once any agents are configured; `(none)` leaves the backend's default agent in charge.
+- **Preset** — `"agent": "reviewer"` on a preset pins it for every session started from that preset.
+- **Schedule** — `"agent": "reviewer"` on a schedule entry, for unattended runs.
+
+How it maps under the hood:
+
+- **Copilot** — all configured agents are passed as the SDK's custom agents (so they're also available for delegation), and the tagged one is activated as the session's agent.
+- **Claude** — atc passes the agents inline via `--agents '<json>'` and activates the tagged one with `--agent <name>`. These are session-only; nothing is written to `~/.claude` or the repo.
+
+Notes:
+
+- **Tool names are backend-specific.** A `tools` list written for Claude (`Read`, `Bash`, …) won't match Copilot's tool names. Omit `tools` (the default = all tools) for an agent you want to use on either backend, or keep backend-specific agents.
+- A tagged agent that no longer exists in config is silently ignored (the session runs with the default agent) rather than failing to launch.
+- This is independent of any `.github/agents` / `.claude/agents` the repo *does* have — those still load as usual; tagging just adds atc-managed personas on top.
 
 ## Scheduled prompts
 
