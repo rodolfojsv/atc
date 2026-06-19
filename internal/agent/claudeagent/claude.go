@@ -277,6 +277,14 @@ const usageRefreshInterval = 10 * time.Minute
 // announce posts the raw overlay text as a message (what a manual /usage wants);
 // the throttled auto-refresh passes false so it only updates the badge.
 func (s *session) scrapeUsage(name string, announce bool) {
+	// A manual /usage arrived as a prompt, so the supervisor marked the session
+	// working — but it runs no turn and writes no transcript, so the watcher
+	// won't emit idle on its own. Return the session to "done" on every exit
+	// path, or it hangs in "working" forever. (The auto-refresh fires from idle,
+	// so it's already done and passes announce=false.)
+	if announce {
+		defer s.emit(agent.Event{Type: agent.EventIdle})
+	}
 	time.Sleep(usageSettle)
 	if s.isClosed() {
 		return
