@@ -284,6 +284,14 @@ func (s *Supervisor) NewSession(opts NewSessionOptions) (*Session, error) {
 	if name == "" {
 		name = autoName(firstNonEmpty(opts.Prompt, opts.NameHint), repo)
 	}
+	// Every scheduled run gets a month-day/hour-minute suffix so recurring
+	// schedules read chronologically (foo-0618-1430) and stay distinct
+	// across runs — even headless `atc run` invocations, which start with an
+	// empty session list and so would otherwise never collide. uniqueName
+	// still disambiguates the rare two-in-one-minute case.
+	if opts.ScheduleName != "" {
+		name += "-" + time.Now().Format("0102-1504")
+	}
 	name = s.uniqueName(name)
 
 	model := opts.Model
