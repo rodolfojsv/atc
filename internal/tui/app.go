@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -56,6 +57,12 @@ type Model struct {
 	width  int
 	height int
 	flash  string
+
+	// Vim-style board navigation: boardCount is the pending numeric prefix
+	// (0 = none) that repeats j/k, and boardGPending records a first 'g'
+	// awaiting a second to form 'gg'.
+	boardCount    int
+	boardGPending bool
 
 	target   *supervisor.Session // focused / modal subject
 	vp       viewport.Model
@@ -282,6 +289,63 @@ func (m *Model) selected() *supervisor.Session {
 	return ordered[m.cursor]
 }
 
+// boardVimMotion handles vim-style cursor motions on the board: a digit
+// prefix (e.g. "10j"), "gg"/"G" to the ends of the list, and count-repeated
+// j/k/↑/↓. It returns true when it consumed the key; for any other key it
+// clears the pending count and g-prefix and returns false so the caller's
+// normal keybinds run. The arithmetic lives in boardMotion so it can be
+// tested without a live supervisor.
+func (m *Model) boardVimMotion(key string) bool {
+	var handled bool
+	m.cursor, m.boardCount, m.boardGPending, handled =
+		boardMotion(m.cursor, len(m.ordered()), m.boardCount, m.boardGPending, key)
+	return handled
+}
+
+// boardMotion computes the next board-cursor state for a vim-style key:
+// digit prefixes accumulate into count, "gg" jumps to the top and "G" to the
+// bottom, and j/k/↑/↓ move by max(count, 1). It returns handled=false for any
+// other key, with count and gPending cleared, so normal keybinds run.
+func boardMotion(cursor, n, count int, gPending bool, key string) (newCursor, newCount int, newGPending, handled bool) {
+	clamp := func(i int) int {
+		if n == 0 {
+			return 0
+		}
+		return min(max(i, 0), n-1)
+	}
+	// Accumulate a numeric prefix. A lone leading "0" has no list meaning, so
+	// it falls through rather than starting a count.
+	if len(key) == 1 && key[0] >= '0' && key[0] <= '9' && !(key == "0" && count == 0) {
+		count = count*10 + int(key[0]-'0')
+		if count > n { // cap so a long digit run can't overflow
+			count = n
+		}
+		return cursor, count, gPending, true
+	}
+	switch key {
+	case "g":
+		if gPending { // gg → top, or "<count>gg" → that 1-based row
+			return clamp(pick(count > 0, count-1, 0)), 0, false, true
+		}
+		return cursor, count, true, true
+	case "G": // G → bottom, or "<count>G" → that 1-based row
+		return clamp(pick(count > 0, count-1, n-1)), 0, false, true
+	case "up", "k":
+		return clamp(cursor - max(count, 1)), 0, false, true
+	case "down", "j":
+		return clamp(cursor + max(count, 1)), 0, false, true
+	}
+	return cursor, 0, false, false
+}
+
+// pick returns a when cond holds, else b — a small ternary for cursor math.
+func pick(cond bool, a, b int) int {
+	if cond {
+		return a
+	}
+	return b
+}
+
 func (m *Model) clampCursor() {
 	if n := len(m.ordered()); m.cursor >= n && n > 0 {
 		m.cursor = n - 1
@@ -291,15 +355,14 @@ func (m *Model) clampCursor() {
 }
 
 func (m *Model) updateBoard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Vim-style cursor motion: a numeric prefix repeats j/k, gg jumps to the
+	// top and G to the bottom. The board has no text input, so these keys are
+	// free to mean motion; anything else clears the pending count/g-prefix
+	// and is handled below as usual.
+	if m.boardVimMotion(msg.String()) {
+		return m, nil
+	}
 	switch msg.String() {
-	case "up", "k":
-		if m.cursor > 0 {
-			m.cursor--
-		}
-	case "down", "j":
-		if m.cursor < len(m.ordered())-1 {
-			m.cursor++
-		}
 	case "enter":
 		if sess := m.selected(); sess != nil {
 			m.target = sess
@@ -560,7 +623,7 @@ func (m *Model) viewBoard() string {
 	}
 	footerBuf.WriteString(footer + "\n")
 	footerBuf.WriteString("\n" + keybar(
-		"enter", "attach", "n", "new", "a", "approve", "p", "pin", "c", "category", "r", "rename", "d", "diff", "e", "export", "s", "schedules", "A", "auto⚡", "x", "abort", "K", "kill", "q", "quit"))
+		"j/k·gg·G", "move", "enter", "attach", "n", "new", "a", "approve", "p", "pin", "c", "category", "r", "rename", "d", "diff", "e", "export", "s", "schedules", "A", "auto⚡", "x", "abort", "K", "kill", "q", "quit"))
 	footerStr := footerBuf.String()
 
 	groups := groupBoard(m.boardSessions())
@@ -568,8 +631,17 @@ func (m *Model) viewBoard() string {
 		b.WriteString(styleDim.Render("  no sessions — press ") + styleKey.Render("[n]") + styleDim.Render(" to launch an agent") + "\n")
 	} else {
 		nameW, dirW, tokW, costW, ctxW := 18, 22, 12, 9, 5
-		header := fmt.Sprintf("  %-*s %-*s %-*s %*s %*s %*s  %s",
-			nameW, "SESSION", dirW, "DIR", statusWidth, "STATUS", tokW, "TOKENS", costW, "COST", ctxW, "CTX", "DETAIL")
+		// Vim-style relative-number gutter: width fits the largest number we
+		// might show (the current row's 1-based position, up to the count) so
+		// the user can see the count to type for "<n>j" / "<n>k".
+		total := 0
+		for _, g := range groups {
+			total += len(g.sessions)
+		}
+		gutterW := len(strconv.Itoa(max(total, 1)))
+		gutterPad := strings.Repeat(" ", gutterW+1)
+		header := fmt.Sprintf("%s  %-*s %-*s %-*s %*s %*s %*s  %s",
+			gutterPad, nameW, "SESSION", dirW, "DIR", statusWidth, "STATUS", tokW, "TOKENS", costW, "COST", ctxW, "CTX", "DETAIL")
 		b.WriteString(styleHeader.Render(header) + "\n")
 		// Section headers appear only once the user has organized things:
 		// a single Uncategorized group renders flat, exactly as before.
@@ -584,13 +656,14 @@ func (m *Model) viewBoard() string {
 		idx := 0
 		for _, g := range groups {
 			if showHeaders {
-				lines = append(lines, styleSection.Render("  "+g.title)+styleDim.Render(fmt.Sprintf("  (%d)", len(g.sessions))))
+				lines = append(lines, gutterPad+styleSection.Render("  "+g.title)+styleDim.Render(fmt.Sprintf("  (%d)", len(g.sessions))))
 			}
 			for _, sess := range g.sessions {
 				if idx == m.cursor {
 					cursorLine = len(lines)
 				}
-				lines = append(lines, m.sessionRow(sess.View(), idx == m.cursor, nameW, dirW, tokW, costW, ctxW))
+				row := relGutter(idx, m.cursor, gutterW) + m.sessionRow(sess.View(), idx == m.cursor, nameW, dirW, tokW, costW, ctxW)
+				lines = append(lines, row)
 				idx++
 			}
 		}
@@ -637,6 +710,21 @@ func windowLines(lines []string, cursorLine, avail int) []string {
 }
 
 // sessionRow renders one board row for a session view.
+// relGutter renders the vim-style line-number gutter for board row idx given
+// the cursor row: the current row shows its 1-based absolute position (so you
+// know where you are), every other row the distance to the cursor — so
+// "<n>j" / "<n>k" lands on the row labeled n.
+func relGutter(idx, cursor, w int) string {
+	num := idx - cursor
+	if num < 0 {
+		num = -num
+	}
+	if idx == cursor {
+		return styleKey.Render(fmt.Sprintf("%*d ", w, idx+1))
+	}
+	return styleDim.Render(fmt.Sprintf("%*d ", w, num))
+}
+
 func (m *Model) sessionRow(v supervisor.SessionView, selected bool, nameW, dirW, tokW, costW, ctxW int) string {
 	dir := filepath.Base(v.Dir)
 	if v.Worktree != "" {

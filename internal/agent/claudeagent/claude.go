@@ -822,17 +822,19 @@ type transcriptLine struct {
 	} `json:"message"`
 }
 
-// eventsFromLine converts one transcript line to events. includeUser controls
-// whether the user's own prompts are emitted (true for History replay, false
-// for live tailing where the prompt was just typed by the user).
-func eventsFromLine(raw []byte, includeUser bool) []agent.Event {
+// eventsFromLine converts one transcript line to events. replay is true for
+// History replay and false for live tailing. It governs two things that the
+// live UI renders out of band: the user's own prompts (just typed, so not
+// re-emitted live) and an AskUserQuestion box (surfaced as interactive chips
+// via OnQuestion live, but only as text on replay where no chips exist).
+func eventsFromLine(raw []byte, replay bool) []agent.Event {
 	var line transcriptLine
 	if json.Unmarshal(raw, &line) != nil || line.IsMeta || line.Message == nil {
 		return nil
 	}
 	switch line.Type {
 	case "user":
-		if !includeUser {
+		if !replay {
 			return nil
 		}
 		var out []agent.Event
@@ -854,7 +856,7 @@ func eventsFromLine(raw []byte, includeUser bool) []agent.Event {
 		}
 		return out
 	case "assistant":
-		out := messageEvents(line.Message.Content)
+		out := messageEvents(line.Message.Content, replay)
 		if u := line.Message.Usage; u != nil && (u.InputTokens > 0 || u.OutputTokens > 0) {
 			out = append(out, agent.Event{
 				Type:         agent.EventUsage,
@@ -882,8 +884,11 @@ type usageBlock struct {
 }
 
 // messageEvents converts an assistant message's content blocks into transcript
-// events. Content is either a plain string or a block array.
-func messageEvents(content json.RawMessage) []agent.Event {
+// events. Content is either a plain string or a block array. replay keeps an
+// AskUserQuestion box rendered as text on History replay; live, the watcher
+// surfaces it as interactive chips through OnQuestion, so emitting the text too
+// would double up.
+func messageEvents(content json.RawMessage, replay bool) []agent.Event {
 	var out []agent.Event
 	var text string
 	if json.Unmarshal(content, &text) == nil {
@@ -903,11 +908,14 @@ func messageEvents(content json.RawMessage) []agent.Event {
 				out = append(out, agent.Event{Type: agent.EventMessage, Text: b.Text})
 			}
 		case "tool_use":
-			// AskUserQuestion has no answer channel here; render it so the user
-			// can reply in their next prompt.
+			// AskUserQuestion is surfaced live as interactive chips via
+			// OnQuestion, so render it as text only on replay (no chips there);
+			// emitting it live too would duplicate the question.
 			if b.Name == "AskUserQuestion" {
-				if q := formatAskUserQuestion(b.Input); q != "" {
-					out = append(out, agent.Event{Type: agent.EventMessage, Text: q})
+				if replay {
+					if q := formatAskUserQuestion(b.Input); q != "" {
+						out = append(out, agent.Event{Type: agent.EventMessage, Text: q})
+					}
 				}
 				continue
 			}
