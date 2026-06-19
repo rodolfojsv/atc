@@ -126,6 +126,7 @@ type Session struct {
 	Branch   string // worktree branch
 	Backend  string // "copilot" | "claude"
 	Preset   string
+	Agent    string // custom agent tagged onto the session ("" = backend default)
 	ReadOnly bool   // backend plan mode: inspect but never modify
 	Model    string // configured model ("" = backend default); usage reports the actual one
 	Created  time.Time

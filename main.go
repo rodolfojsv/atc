@@ -344,6 +344,7 @@ func fireSchedule(s config.Schedule, sup *supervisor.Supervisor, runLog schedrun
 		Name:         name,
 		Repo:         s.Repo,
 		Preset:       s.Preset,
+		Agent:        s.Agent,
 		UseWorktree:  s.Worktree,
 		Prompt:       s.Prompt,
 		ReadOnly:     !s.Write, // scheduled tasks are read-only unless write:true

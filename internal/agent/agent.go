@@ -113,11 +113,29 @@ type LimitWindow struct {
 	Max    int64   // entitlement cap (0 when unknown or unlimited)
 }
 
+// AgentDef is a backend-neutral custom-agent definition that atc injects
+// into a session at launch (so the agent need not live in the repo). The
+// supervisor builds these from config.Agents; each adapter maps them to
+// its backend (Copilot CustomAgentConfig, Claude --agents JSON).
+type AgentDef struct {
+	Name        string
+	Description string
+	Prompt      string
+	Tools       []string // empty = all tools (tool names are backend-specific)
+	Model       string
+}
+
 // SessionSpec configures a new or resumed session.
 type SessionSpec struct {
 	SessionID  string // resume target; "" for a new session
 	WorkingDir string
 	Model      string
+	// Agents are custom agents to make available in the session, injected
+	// at launch rather than read from the repo. Agent names the one to
+	// activate as the primary persona (it must match an Agents entry);
+	// empty leaves the backend's default agent in charge.
+	Agents []AgentDef
+	Agent  string
 	// Approval is config.ApprovalPrompt or ApprovalAllowAll. Backends
 	// without runtime permission callbacks map it to their own native
 	// permission mechanism.

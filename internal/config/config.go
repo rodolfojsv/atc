@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 )
 
 // Approval modes for a preset. Allow-all is still gated by the
@@ -20,6 +21,29 @@ type Preset struct {
 	Approval string `json:"approval,omitempty"`
 	Model    string `json:"model,omitempty"`
 	Backend  string `json:"backend,omitempty"` // "copilot" (default) or "claude"
+	// Agent pins a custom agent (a key in Config.Agents) as the session's
+	// primary persona. Empty uses the backend default agent. The
+	// new-session form's agent picker overrides this per session.
+	Agent string `json:"agent,omitempty"`
+}
+
+// AgentDef is a custom agent defined in atc's config and "tagged" onto a
+// session — atc injects it into the backend at launch, so it works in
+// repos where you can't (or don't want to) commit a `.github/agents` or
+// `.claude/agents` directory. The same definition drives either backend:
+// Copilot via SessionConfig.CustomAgents/Agent, Claude via --agents/--agent.
+type AgentDef struct {
+	// Description is a one-line summary of what the agent is for.
+	Description string `json:"description,omitempty"`
+	// Prompt is the agent's system prompt / persona instructions.
+	Prompt string `json:"prompt"`
+	// Tools optionally restricts the agent to these tool names; empty
+	// means all tools. Tool names are backend-specific (Claude uses
+	// "Read"/"Bash"/…; Copilot its own set), so a tool list only applies
+	// cleanly when the session runs on the matching backend.
+	Tools []string `json:"tools,omitempty"`
+	// Model optionally overrides the model for this agent.
+	Model string `json:"model,omitempty"`
 }
 
 // Schedule launches a session with a canned prompt on a cron expression
@@ -38,6 +62,10 @@ type Schedule struct {
 	// write:true only for tasks you intend to make changes (and pair it
 	// with an allow-all preset for unattended approval).
 	Write bool `json:"write,omitempty"`
+	// Agent pins a custom agent (a key in Config.Agents) for the scheduled
+	// session, the same as a preset's agent. Empty uses the preset's agent
+	// (if any), else the backend default.
+	Agent string `json:"agent,omitempty"`
 	// Precheck is an optional shell command run in Repo before each fire.
 	// Exit 0 means "something changed, run the prompt"; a non-zero exit
 	// means "nothing new, skip" — no session is created and no tokens are
@@ -131,11 +159,16 @@ type Config struct {
 	// DefaultAutoApprove starts new sessions in allow-all (the ⚡ auto
 	// state) without a per-session toggle. Deny-list still gates Copilot;
 	// for Claude this means the process spawns in bypassPermissions.
-	DefaultAutoApprove bool                `json:"defaultAutoApprove,omitempty"`
-	Model              string              `json:"model,omitempty"`
-	Presets            map[string]Preset   `json:"presets,omitempty"`
-	Hooks              map[string][]string `json:"hooks,omitempty"`
-	Schedules          []Schedule          `json:"schedules,omitempty"`
+	DefaultAutoApprove bool              `json:"defaultAutoApprove,omitempty"`
+	Model              string            `json:"model,omitempty"`
+	Presets            map[string]Preset `json:"presets,omitempty"`
+	// Agents are custom agents you can tag onto a session (in the
+	// new-session form, a preset's "agent", or a schedule's "agent"),
+	// keyed by name. atc injects them into the backend at launch so they
+	// work without committing agent files to the repo.
+	Agents    map[string]AgentDef `json:"agents,omitempty"`
+	Hooks     map[string][]string `json:"hooks,omitempty"`
+	Schedules []Schedule          `json:"schedules,omitempty"`
 	// ScheduledRetentionDays auto-cleans finished schedule-originated
 	// sessions (and their worktrees) older than this many days, so a
 	// recurring task doesn't pile up sessions forever. 0 (the default)
@@ -201,4 +234,21 @@ func (c *Config) Preset(name string) Preset {
 		return p
 	}
 	return Preset{Approval: ApprovalPrompt}
+}
+
+// HasAgent reports whether name is a defined custom agent.
+func (c *Config) HasAgent(name string) bool {
+	_, ok := c.Agents[name]
+	return ok
+}
+
+// AgentNames returns the configured custom-agent names in sorted order,
+// for stable picker ordering in the forms.
+func (c *Config) AgentNames() []string {
+	names := make([]string, 0, len(c.Agents))
+	for n := range c.Agents {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
 }

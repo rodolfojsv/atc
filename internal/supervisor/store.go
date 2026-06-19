@@ -32,6 +32,7 @@ type savedSession struct {
 	Branch       string    `json:"branch,omitempty"`
 	Backend      string    `json:"backend,omitempty"` // empty = copilot (pre-backend files)
 	Preset       string    `json:"preset,omitempty"`
+	Agent        string    `json:"agent,omitempty"` // tagged custom agent ("" = backend default)
 	Model        string    `json:"model,omitempty"`
 	ReadOnly     bool      `json:"readOnly,omitempty"`
 	AutoApprove  bool      `json:"autoApprove,omitempty"`

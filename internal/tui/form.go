@@ -22,10 +22,15 @@ type sessionForm struct {
 	repoPick int
 	presets  []string
 	preset   int
+	agents   []string // "(none)" + configured agent names; empty-ish when none configured
+	agent    int
 	readOnly bool
 	worktree bool
 	focus    int
 }
+
+// agentNone is the first agent-picker choice: don't tag a custom agent.
+const agentNone = "(none)"
 
 const (
 	rowName = iota
@@ -35,6 +40,7 @@ const (
 	rowRepo
 	rowPrompt
 	rowPreset
+	rowAgent
 	rowMode
 	rowWorktree
 	rowCount
@@ -79,11 +85,14 @@ func newSessionForm(cfg *config.Config, backends []string, defaultBackend string
 		}
 	}
 
+	agents := append([]string{agentNone}, cfg.AgentNames()...)
+
 	f := sessionForm{
 		inputs:   []textinput.Model{name, repo, prompt, model},
 		backends: backends,
 		repos:    cfg.Repos,
 		presets:  presets,
+		agents:   agents,
 		worktree: true,
 	}
 	for i, b := range backends {
@@ -102,15 +111,29 @@ func newSessionForm(cfg *config.Config, backends []string, defaultBackend string
 	return f
 }
 
+// rowHidden reports whether a row is omitted from the form (and so should
+// be skipped during navigation): the repo picker with no configured repos,
+// the agent picker with no configured agents.
+func (f *sessionForm) rowHidden(row int) bool {
+	switch row {
+	case rowRepoPick:
+		return len(f.repos) == 0
+	case rowAgent:
+		return len(f.agents) <= 1 // only "(none)"
+	}
+	return false
+}
+
 func (f *sessionForm) setFocus(row int) tea.Cmd {
+	// Infer direction from the pre-wrap target so skipping a hidden row
+	// keeps moving the way the user pressed (down skips forward, up back).
+	dir := 1
+	if row < f.focus {
+		dir = -1
+	}
 	row = (row + rowCount) % rowCount
-	if row == rowRepoPick && len(f.repos) == 0 {
-		// Skip the picker row when no repos are configured.
-		if row > f.focus || (f.focus == rowCount-1 && row == rowRepoPick) {
-			row = rowRepo
-		} else {
-			row = rowBackend
-		}
+	for f.rowHidden(row) {
+		row = (row + dir + rowCount) % rowCount
 	}
 	f.focus = row
 	for j := range f.inputs {
@@ -124,6 +147,15 @@ func (f *sessionForm) setFocus(row int) tea.Cmd {
 		return textinput.Blink
 	}
 	return nil
+}
+
+// selectedAgent returns the tagged agent name, or "" for the "(none)"
+// choice (or when no agents are configured).
+func (f *sessionForm) selectedAgent() string {
+	if f.agent <= 0 || f.agent >= len(f.agents) {
+		return ""
+	}
+	return f.agents[f.agent]
 }
 
 // cycle moves a picker selection by delta within n choices.
@@ -142,6 +174,8 @@ func (f *sessionForm) cycleAt(delta int) bool {
 		f.inputs[1].SetValue(f.repos[f.repoPick])
 	case rowPreset:
 		f.preset = cycle(f.preset, delta, len(f.presets))
+	case rowAgent:
+		f.agent = cycle(f.agent, delta, len(f.agents))
 	case rowMode:
 		f.readOnly = !f.readOnly
 	case rowWorktree:
@@ -190,6 +224,7 @@ func (m *Model) submitForm() (tea.Model, tea.Cmd) {
 		Backend:     f.backends[f.backend],
 		Model:       strings.TrimSpace(f.inputs[3].Value()),
 		Preset:      f.presets[f.preset],
+		Agent:       f.selectedAgent(),
 		UseWorktree: f.worktree,
 		ReadOnly:    f.readOnly,
 	}
@@ -229,6 +264,9 @@ func (m *Model) viewForm() string {
 	row(rowRepo, "Repo", f.inputs[1].View())
 	row(rowPrompt, "Prompt", f.inputs[2].View())
 	row(rowPreset, "Preset", "◂ "+f.presets[f.preset]+" ▸")
+	if len(f.agents) > 1 {
+		row(rowAgent, "Agent", "◂ "+f.agents[f.agent]+" ▸")
+	}
 	modeLabel := "[ ] normal — agent may act (per approval policy)"
 	if f.readOnly {
 		modeLabel = "[x] read-only — plan mode, inspect but never modify"
