@@ -372,7 +372,11 @@ func (m *Model) viewFocus() string {
 				bind = w
 			}
 		}
-		b.WriteString(styleDim.Render(fmt.Sprintf("  ·  %.0f%% %s", bind.Pct, bind.Label)))
+		amount := fmt.Sprintf("%.0f%%", bind.Pct)
+		if bind.Max > 0 {
+			amount = humanTokens(bind.Used) + "/" + humanTokens(bind.Max)
+		}
+		b.WriteString(styleDim.Render("  ·  " + amount + " " + bind.Label))
 	}
 	b.WriteString(styleDim.Render("  ·  " + v.Backend))
 	b.WriteString("\n")

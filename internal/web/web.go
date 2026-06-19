@@ -193,6 +193,8 @@ type limitWindowJSON struct {
 	Label  string  `json:"label"`
 	Pct    float64 `json:"pct"`
 	Resets string  `json:"resets,omitempty"`
+	Used   int64   `json:"used,omitempty"`
+	Max    int64   `json:"max,omitempty"`
 }
 
 type permissionJSON struct {
@@ -249,7 +251,7 @@ func (s *Server) toSessionJSON(v supervisor.SessionView) sessionJSON {
 	if lim := s.sup.Limits(); !lim.AsOf.IsZero() {
 		lj := &limitsJSON{Text: lim.Text, AgeSec: time.Since(lim.AsOf).Seconds()}
 		for _, w := range lim.Windows {
-			lj.Windows = append(lj.Windows, limitWindowJSON{Label: w.Label, Pct: w.Pct, Resets: w.Resets})
+			lj.Windows = append(lj.Windows, limitWindowJSON{Label: w.Label, Pct: w.Pct, Resets: w.Resets, Used: w.Used, Max: w.Max})
 		}
 		out.Limits = lj
 	}

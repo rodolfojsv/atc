@@ -796,13 +796,24 @@ function bindingWindow(L) {
   return L.windows.reduce((a, b) => b.pct > a.pct ? b : a, L.windows[0]);
 }
 
+// fmtCount renders a request count compactly: 15480 -> "15.5k", 30000 -> "30k".
+function fmtCount(n) {
+  if (n < 1000) return '' + n;
+  const k = n / 1000;
+  return (n % 1000 === 0 ? k.toFixed(0) : k.toFixed(1)) + 'k';
+}
+// windowAmount shows "15.5k/30k" when the absolute cap is known, else the %.
+function windowAmount(w) {
+  return w && w.max ? fmtCount(w.used) + '/' + fmtCount(w.max) : Math.round(w.pct) + '%';
+}
+
 function renderLimits(s) {
   const el = $('limBadge');
   const bind = bindingWindow(s.limits);
   if (bind) {
     el.classList.remove('hidden');
     const age = s.limits.ageSec < 90 ? 'now' : Math.round(s.limits.ageSec / 60) + 'm';
-    el.textContent = '◔ ' + Math.round(bind.pct) + '% ' + bind.label + ' · ' + age;
+    el.textContent = '◔ ' + windowAmount(bind) + ' ' + bind.label + ' · ' + age;
     el.classList.toggle('hot', bind.pct >= 80);
     el.title = 'tap to see all limits';
     return;
@@ -826,7 +837,7 @@ function openLimits() {
   if (!L || !L.windows || !L.windows.length) { refreshLimits(); return; }
   const rows = L.windows.map(w =>
     `<div class="limrow"><span class="lw">${esc(w.label)}</span>` +
-    `<b class="${w.pct >= 80 ? 'hot' : ''}">${Math.round(w.pct)}%</b>` +
+    `<b class="${w.pct >= 80 ? 'hot' : ''}">${w.max ? esc(w.used.toLocaleString() + ' / ' + w.max.toLocaleString()) : Math.round(w.pct) + '%'}</b>` +
     `<span class="lr">${esc(w.resets || '')}</span></div>`).join('');
   const age = L.ageSec < 90 ? 'just now' : Math.round(L.ageSec / 60) + 'm ago';
   const backend = (curSession || {}).backend;

@@ -109,6 +109,8 @@ type LimitWindow struct {
 	Label  string  // window name, e.g. "session", "week (all models)"
 	Pct    float64 // 0..100 used
 	Resets string  // human reset hint, e.g. "resets Jun 20, 2:59pm"
+	Used   int64   // requests consumed this window (0 when not reported)
+	Max    int64   // entitlement cap (0 when unknown or unlimited)
 }
 
 // SessionSpec configures a new or resumed session.
