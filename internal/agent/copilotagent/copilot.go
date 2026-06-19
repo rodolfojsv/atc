@@ -350,6 +350,11 @@ func limitsFromQuota(snaps map[string]rpc.AssistantUsageQuotaSnapshot) (agent.Ev
 // quotaLabel makes a Copilot quota key (e.g. "premium_interactions") read
 // like the other account limit windows in the UI.
 func quotaLabel(key string) string {
+	// "premium_interactions" is the metered quota; Microsoft surfaces it as
+	// "AIC" (AI credits), so match that wording rather than the raw key.
+	if key == "premium_interactions" {
+		return "AIC"
+	}
 	return strings.ReplaceAll(key, "_", " ")
 }
 
