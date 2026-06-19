@@ -43,6 +43,7 @@ type PermissionFunc func(req PermissionRequest) (Decision, string)
 type Question struct {
 	Prompt        string   // the question text
 	Options       []string // suggested choices (may be empty)
+	OptionDetails []string // per-option descriptions, parallel to Options (entries may be ""); nil if none
 	AllowFreeform bool     // whether a free-text answer is allowed
 }
 

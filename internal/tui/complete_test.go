@@ -8,6 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/rodolfojsv/atc/internal/config"
 	"github.com/rodolfojsv/atc/internal/supervisor"
 )
 
@@ -75,6 +76,58 @@ func TestAtMentionCompletion(t *testing.T) {
 	items := fuzzyFilter(m.fileList, "pol", 6)
 	if len(items) == 0 || items[0] != "internal/policy/policy.go" {
 		t.Errorf("mention filter: %v", items)
+	}
+}
+
+// Accepting an "@" completion must keep the leading "@": the agent needs
+// "@path" to eagerly load the file, not a bare path it treats as prose.
+func TestAtMentionKeepsPrefixOnAccept(t *testing.T) {
+	m := testModel(t)
+	m.mode = modeFocus
+	m.input.SetValue("review @pol")
+	m.comp = completion{active: true, kind: '@', token: "@pol", items: []string{"internal/policy/policy.go"}}
+	m.acceptCompletion()
+	if got, want := m.input.Value(), "review @internal/policy/policy.go "; got != want {
+		t.Errorf("accept inserted %q, want %q", got, want)
+	}
+}
+
+// An agent picked from the "@" menu becomes a real subagent mention
+// (@agent-<name>), which is how a Claude session hands the turn to it.
+func TestAtMentionAgentInsert(t *testing.T) {
+	m := testModel(t)
+	m.mode = modeFocus
+	m.input.SetValue("@agent-rev")
+	m.comp = completion{active: true, kind: '@', token: "@agent-rev", items: []string{"agent-reviewer"}}
+	m.acceptCompletion()
+	if got, want := m.input.Value(), "@agent-reviewer "; got != want {
+		t.Errorf("accept inserted %q, want %q", got, want)
+	}
+}
+
+// agentMentions surfaces config agents and .claude/agents as "agent-<name>"
+// candidates for a Claude session, and nothing for Copilot.
+func TestAgentMentions(t *testing.T) {
+	dir := t.TempDir()
+	full := filepath.Join(dir, ".claude", "agents", "scribe.md")
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(full, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := testModel(t)
+	m.cfg.Agents = map[string]config.AgentDef{"reviewer": {Prompt: "p"}}
+
+	m.target = &supervisor.Session{Dir: dir, Backend: "claude"}
+	got := strings.Join(m.agentMentions(), " ")
+	if !strings.Contains(got, "agent-reviewer") || !strings.Contains(got, "agent-scribe") {
+		t.Errorf("claude mentions = %q, want config + .claude/agents", got)
+	}
+
+	m.target = &supervisor.Session{Dir: dir, Backend: "copilot"}
+	if got := m.agentMentions(); got != nil {
+		t.Errorf("copilot should yield no @agent mentions, got %v", got)
 	}
 }
 

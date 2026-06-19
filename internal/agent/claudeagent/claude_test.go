@@ -137,6 +137,38 @@ func TestFormatAskUserQuestion(t *testing.T) {
 	}
 }
 
+// Option descriptions are sourced from the transcript (the pane truncates long
+// ones). questionDetailMap flattens an AskUserQuestion's questions into a
+// label->description map, and matchDetail tolerates a pane-truncated label.
+func TestQuestionDetailFromTranscript(t *testing.T) {
+	var input map[string]any
+	raw := `{"questions":[{"header":"Deploy","question":"Which strategy?","options":[
+		{"label":"Blue-green","description":"Two identical environments, switch all at once."},
+		{"label":"Canary","description":"Release to a small subset first."},
+		{"label":"Type something.","description":""}]}]}`
+	if err := json.Unmarshal([]byte(raw), &input); err != nil {
+		t.Fatal(err)
+	}
+	m := questionDetailMap(input)
+	if m["Blue-green"] != "Two identical environments, switch all at once." {
+		t.Errorf("Blue-green desc wrong: %q", m["Blue-green"])
+	}
+	if _, ok := m["Type something."]; ok {
+		t.Error("options without a description must be omitted")
+	}
+
+	// Exact match, and a pane-truncated label falls back to a prefix match.
+	if matchDetail(m, "Canary") != "Release to a small subset first." {
+		t.Errorf("exact match failed: %q", matchDetail(m, "Canary"))
+	}
+	if matchDetail(m, "Blue-gre…") != "Two identical environments, switch all at once." {
+		t.Errorf("truncated-label prefix match failed: %q", matchDetail(m, "Blue-gre…"))
+	}
+	if matchDetail(m, "Nonexistent") != "" {
+		t.Errorf("unexpected match: %q", matchDetail(m, "Nonexistent"))
+	}
+}
+
 func TestHistoryRestoresUsage(t *testing.T) {
 	cfgDir := t.TempDir()
 	t.Setenv("CLAUDE_CONFIG_DIR", cfgDir)

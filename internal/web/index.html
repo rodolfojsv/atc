@@ -160,6 +160,13 @@
   #ask .q { font-weight: 600; margin-bottom: .5em; color: #cdddff; font-size: .9em; }
   #ask .btns { display: flex; gap: .5em; flex-wrap: wrap; }
   #ask .btns button { border-color: var(--accent); color: #cdddff; }
+  /* rich layout: when options carry descriptions, stack them full-width with the
+     label above its description so the context Claude wrote is readable */
+  #ask .btns.rich { flex-direction: column; align-items: stretch; }
+  #ask .btns.rich button { display: flex; flex-direction: column; align-items: flex-start;
+    gap: .15em; text-align: left; padding: .5em .7em; width: 100%; }
+  #ask .btns.rich .ol { font-weight: 600; }
+  #ask .btns.rich .od { color: var(--dim); font-size: .82em; font-weight: 400; white-space: normal; }
   #ask .hint { color: var(--dim); font-size: .8em; margin-top: .4em; }
 
   /* composer (focus + new) */
@@ -1250,10 +1257,15 @@ async function pollFocus() {
   const ask = $('ask');
   if (s.question) {
     ask.classList.remove('hidden');
-    const opts = (s.question.options || []).map((o, i) =>
-      `<button onclick="answerQuestion(${i})">${esc(o)}</button>`).join('');
+    const details = s.question.optionDetails || [];
+    const hasDetails = details.some(d => d);
+    const opts = (s.question.options || []).map((o, i) => {
+      const d = details[i];
+      return `<button onclick="answerQuestion(${i})"><span class="ol">${esc(o)}</span>` +
+        (d ? `<span class="od">${esc(d)}</span>` : '') + `</button>`;
+    }).join('');
     ask.innerHTML = `<div class="q">❓ ${esc(s.question.prompt)}</div>` +
-      (opts ? `<div class="btns">${opts}</div>` : '') +
+      (opts ? `<div class="btns${hasDetails ? ' rich' : ''}">${opts}</div>` : '') +
       `<div class="hint">${s.question.allowFreeform !== false ? 'Tap an option or type your answer below.' : 'Tap an option above.'}</div>`;
     window._askOptions = s.question.options || [];
   } else {
@@ -1551,8 +1563,13 @@ function syncCompletion(ctx) {
   } else if (at) {
     const token = at[1];
     const data = ctx.getData();
-    const files = fuzzyFilter((data && data.files) || [], token.slice(1), 6);
-    if (files.length) comp = { kind: '@', token, items: files.map(f => ({ insert: f, label: f })), sel: 0, ctx };
+    // "@" resolves to a working-dir file OR an inline subagent mention
+    // (agent-<name>); both are post-"@" text the accept step re-prefixes.
+    const cands = ((data && data.files) || []).concat((data && data.agents) || []);
+    // Generous cap so several same-named files all appear; the popup
+    // scrolls (CSS max-height) and arrow-nav keeps the selection in view.
+    const hits = fuzzyFilter(cands, token.slice(1), 50);
+    if (hits.length) comp = { kind: '@', token, items: hits.map(f => ({ insert: f, label: f })), sel: 0, ctx };
   }
   if (!comp) { hidePopup(ctx.popupEl); return; }
   renderComp();
@@ -1568,13 +1585,20 @@ function renderComp() {
     return `<div class="crow${i === comp.sel ? ' sel' : ''}" onmousedown="event.preventDefault();comp.sel=${i};acceptCompletion()">${body}</div>`;
   }).join('');
   el.classList.remove('hidden');
+  // Keep the highlighted row visible as arrow-nav walks a long list.
+  const sel = el.querySelector('.crow.sel');
+  if (sel) sel.scrollIntoView({ block: 'nearest' });
 }
 function acceptCompletion() {
   if (!comp || !comp.items.length) return;
   const it = comp.items[comp.sel];
   const t = comp.ctx.inputEl, popup = comp.ctx.popupEl;
   const before = t.value.slice(0, t.value.length - comp.token.length);
-  t.value = before + it.insert + ' ';
+  // Re-add the "@" for file/agent mentions: the leading "@" is what makes
+  // the agent eagerly load a file or hand off to a subagent. ("/" inserts
+  // carry their own slash already.)
+  const insert = comp.kind === '@' ? '@' + it.insert : it.insert;
+  t.value = before + insert + ' ';
   comp = null; hidePopup(popup);
   if (t.id === 'prompt') autosize(t);
   t.focus(); t.setSelectionRange(t.value.length, t.value.length);

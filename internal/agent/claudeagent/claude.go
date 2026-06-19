@@ -1050,6 +1050,81 @@ func anyMap(m map[string]any) any {
 
 // formatAskUserQuestion turns AskUserQuestion's input into a readable markdown
 // prompt for the transcript.
+// latestQuestionDetails scans the transcript for the most recent
+// AskUserQuestion tool call and returns a label->description map across all its
+// questions. The on-screen picker truncates long descriptions, so we read the
+// full text Claude wrote from the transcript and match it to the scraped option
+// labels. Returns nil if no AskUserQuestion is found.
+func (s *session) latestQuestionDetails() map[string]string {
+	f, err := os.Open(s.transcriptPath())
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+
+	var found map[string]string
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+	for sc.Scan() {
+		var line transcriptLine
+		if json.Unmarshal(sc.Bytes(), &line) != nil || line.Message == nil || line.Type != "assistant" {
+			continue
+		}
+		var blocks []contentBlock
+		if json.Unmarshal(line.Message.Content, &blocks) != nil {
+			continue
+		}
+		for _, b := range blocks {
+			if b.Type == "tool_use" && b.Name == "AskUserQuestion" {
+				if m := questionDetailMap(b.Input); m != nil {
+					found = m // keep scanning: the last one wins
+				}
+			}
+		}
+	}
+	return found
+}
+
+// matchDetail finds a label's description in m, tolerating a label the pane
+// truncated with an ellipsis by falling back to a prefix match.
+func matchDetail(m map[string]string, label string) string {
+	label = strings.TrimSpace(label)
+	if d, ok := m[label]; ok {
+		return d
+	}
+	if trimmed := strings.TrimRight(label, "… "); trimmed != label && trimmed != "" {
+		for k, d := range m {
+			if strings.HasPrefix(k, trimmed) {
+				return d
+			}
+		}
+	}
+	return ""
+}
+
+// questionDetailMap flattens an AskUserQuestion input into label->description
+// across all its questions (entries without a description are skipped).
+func questionDetailMap(input map[string]any) map[string]string {
+	qs, _ := input["questions"].([]any)
+	out := map[string]string{}
+	for _, qi := range qs {
+		m, _ := qi.(map[string]any)
+		opts, _ := m["options"].([]any)
+		for _, oi := range opts {
+			om, _ := oi.(map[string]any)
+			label, _ := om["label"].(string)
+			desc, _ := om["description"].(string)
+			if label != "" && desc != "" {
+				out[strings.TrimSpace(label)] = strings.TrimSpace(desc)
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 func formatAskUserQuestion(input map[string]any) string {
 	qs, _ := input["questions"].([]any)
 	var b strings.Builder

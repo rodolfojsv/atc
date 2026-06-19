@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -15,9 +16,15 @@ import (
 // "/" at the start of the prompt picks an atc command.
 
 const (
-	maxCompletionItems = 6
-	maxFileWalk        = 4000
-	fileCacheTTL       = 30 * time.Second
+	// maxCompletionItems caps the candidate pool the "@" picker fuzzy-matches.
+	// It's generous so several same-named files all show up; the overlay
+	// only renders completionWindow of them at once and scrolls.
+	maxCompletionItems = 50
+	// completionWindow is how many rows the overlay shows at once. Arrowing
+	// past the edge scrolls the window, with a "↑/↓ N more" hint.
+	completionWindow = 8
+	maxFileWalk      = 4000
+	fileCacheTTL     = 30 * time.Second
 )
 
 var slashCommands = []struct{ name, desc string }{
@@ -83,11 +90,53 @@ func (m *Model) syncCompletion() {
 	}
 	if strings.HasPrefix(last, "@") {
 		query := strings.TrimPrefix(last, "@")
-		items := fuzzyFilter(m.sessionFiles(), query, maxCompletionItems)
+		// Candidates are working-dir files plus agent mentions, so "@foo"
+		// can resolve to either a file (@path) or a subagent (@agent-foo).
+		// Copy off the cached file slice before appending so we don't grow
+		// its backing array.
+		cands := append(append([]string{}, m.sessionFiles()...), m.agentMentions()...)
+		items := fuzzyFilter(cands, query, maxCompletionItems)
 		if len(items) > 0 {
 			m.comp = completion{active: true, kind: '@', token: last, items: items}
 		}
 	}
+}
+
+// agentMentions lists the subagents that can be invoked inline with an
+// "@agent-<name>" mention in a Claude session: atc-config agents (injected
+// at launch via --agents) plus any .claude/agents in the repo and the
+// user's ~/.claude. Each entry is the post-"@" text ("agent-<name>"), so
+// acceptCompletion can prepend "@" the same way it does for files. Claude
+// only: Copilot's inline-agent syntax differs and its agents are picked
+// via the session form instead.
+func (m *Model) agentMentions() []string {
+	if m.target == nil || m.target.View().Backend != "claude" {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	add := func(name string) {
+		if name == "" || seen[name] {
+			return
+		}
+		seen[name] = true
+		out = append(out, "agent-"+name)
+	}
+	if m.cfg != nil {
+		for _, n := range m.cfg.AgentNames() {
+			add(n)
+		}
+	}
+	dir := m.target.View().Dir
+	for _, p := range globAll(filepath.Join(dir, ".claude", "agents", "*.md")) {
+		add(strings.TrimSuffix(filepath.Base(p), ".md"))
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		for _, p := range globAll(filepath.Join(home, ".claude", "agents", "*.md")) {
+			add(strings.TrimSuffix(filepath.Base(p), ".md"))
+		}
+	}
+	return out
 }
 
 // sessionFiles walks the focused session's working directory (cached
@@ -376,6 +425,14 @@ func (m *Model) acceptCompletion() {
 	if m.comp.kind == '/' {
 		choice = strings.SplitN(choice, "  —  ", 2)[0]
 	}
+	// "@" candidates are the post-"@" text (a file path or "agent-<name>");
+	// re-add the "@" so the agent receives a real mention — the leading "@"
+	// is what makes Claude eagerly load a file or hand off to a subagent.
+	// Dropping it (the old behavior) left a bare path the agent treated as
+	// plain prose.
+	if m.comp.kind == '@' {
+		choice = "@" + choice
+	}
 	// Replace just the completed token (it may sit after other text), so
 	// "/" works mid-prompt the same way "@" does.
 	val := strings.TrimSuffix(m.input.Value(), m.comp.token)
@@ -384,14 +441,56 @@ func (m *Model) acceptCompletion() {
 	m.syncFocusLayout()
 }
 
+// compWindow returns the [start,end) slice of items to display, scrolled
+// to keep the selection visible within completionWindow rows.
+func (m *Model) compWindow() (start, end int) {
+	n := len(m.comp.items)
+	if n <= completionWindow {
+		return 0, n
+	}
+	start = m.comp.sel - completionWindow/2
+	if start < 0 {
+		start = 0
+	}
+	if start > n-completionWindow {
+		start = n - completionWindow
+	}
+	return start, start + completionWindow
+}
+
+// completionLines is the height renderCompletion occupies (window rows plus
+// any "↑/↓ N more" hint rows), so the focus layout reserves exactly that.
+func (m *Model) completionLines() int {
+	if !m.comp.active || len(m.comp.items) == 0 {
+		return 0
+	}
+	start, end := m.compWindow()
+	lines := end - start
+	if start > 0 {
+		lines++
+	}
+	if end < len(m.comp.items) {
+		lines++
+	}
+	return lines
+}
+
 func (m *Model) renderCompletion() string {
+	start, end := m.compWindow()
+	n := len(m.comp.items)
 	var b strings.Builder
-	for i, it := range m.comp.items {
-		line := "  " + truncate(it, m.width-6)
+	if start > 0 {
+		b.WriteString(styleDim.Render(fmt.Sprintf("  ↑ %d more", start)) + "\n")
+	}
+	for i := start; i < end; i++ {
+		line := "  " + truncate(m.comp.items[i], m.width-6)
 		if i == m.comp.sel {
-			line = styleKey.Render("▸ ") + truncate(it, m.width-6)
+			line = styleKey.Render("▸ ") + truncate(m.comp.items[i], m.width-6)
 		}
 		b.WriteString(line + "\n")
+	}
+	if end < n {
+		b.WriteString(styleDim.Render(fmt.Sprintf("  ↓ %d more", n-end)) + "\n")
 	}
 	return b.String()
 }

@@ -33,7 +33,11 @@ type cmdInfo struct {
 type completeJSON struct {
 	Commands []cmdInfo `json:"commands"`
 	Files    []string  `json:"files"`
-	Skills   []string  `json:"skills"`
+	// Agents are inline "@agent-<name>" mention candidates (each entry is
+	// the post-"@" text), so the client can offer subagents in the "@"
+	// menu alongside files. Claude sessions only.
+	Agents []string `json:"agents"`
+	Skills []string `json:"skills"`
 }
 
 // handleComplete serves the prompt-box completion lists for a session.
@@ -45,6 +49,7 @@ func (s *Server) handleComplete(w http.ResponseWriter, r *http.Request) {
 	v := sess.View()
 	out := completeJSON{
 		Files:    s.cachedFiles(v.Dir),
+		Agents:   s.agentMentions(v.Dir, v.Backend),
 		Skills:   skillsInventory(v.Dir),
 		Commands: slashCompletions(r.Context(), sess, v),
 	}
@@ -53,6 +58,9 @@ func (s *Server) handleComplete(w http.ResponseWriter, r *http.Request) {
 	}
 	if out.Files == nil {
 		out.Files = []string{}
+	}
+	if out.Agents == nil {
+		out.Agents = []string{}
 	}
 	writeJSON(w, out)
 }
@@ -65,9 +73,10 @@ func (s *Server) handleComplete(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleCompleteDir(w http.ResponseWriter, r *http.Request) {
 	dir := r.URL.Query().Get("dir")
 	backend := r.URL.Query().Get("backend")
-	out := completeJSON{Commands: []cmdInfo{}, Files: []string{}}
+	out := completeJSON{Commands: []cmdInfo{}, Files: []string{}, Agents: []string{}}
 	if dir != "" {
 		out.Files = s.cachedFiles(dir)
+		out.Agents = s.agentMentions(dir, backend)
 		out.Skills = skillsInventory(dir)
 		if c := fsCompletions(dir, backend); c != nil {
 			out.Commands = c
@@ -75,6 +84,9 @@ func (s *Server) handleCompleteDir(w http.ResponseWriter, r *http.Request) {
 	}
 	if out.Files == nil {
 		out.Files = []string{}
+	}
+	if out.Agents == nil {
+		out.Agents = []string{}
 	}
 	writeJSON(w, out)
 }
@@ -165,6 +177,40 @@ func githubSkills(dir string) []cmdInfo {
 			name = strings.TrimSuffix(filepath.Base(p), ".md")
 		}
 		out = append(out, cmdInfo{Name: "/" + name, Desc: frontmatterDesc(p)})
+	}
+	return out
+}
+
+// agentMentions lists inline "@agent-<name>" mention candidates for a
+// Claude session (each entry is the post-"@" text "agent-<name>"):
+// atc-config agents injected via --agents, plus any .claude/agents in the
+// repo and the user's ~/.claude. Copilot's inline-agent syntax differs and
+// its agents are chosen via the session form, so this returns nil there.
+func (s *Server) agentMentions(dir, backend string) []string {
+	if backend != "claude" && backend != "" {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	add := func(name string) {
+		if name == "" || seen[name] {
+			return
+		}
+		seen[name] = true
+		out = append(out, "agent-"+name)
+	}
+	if s.cfg != nil {
+		for _, n := range s.cfg.AgentNames() {
+			add(n)
+		}
+	}
+	for _, p := range globAll(filepath.Join(dir, ".claude", "agents", "*.md")) {
+		add(strings.TrimSuffix(filepath.Base(p), ".md"))
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		for _, p := range globAll(filepath.Join(home, ".claude", "agents", "*.md")) {
+			add(strings.TrimSuffix(filepath.Base(p), ".md"))
+		}
 	}
 	return out
 }
