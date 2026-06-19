@@ -327,6 +327,14 @@ func limitsFromQuota(snaps map[string]rpc.AssistantUsageQuotaSnapshot) (agent.Ev
 			used = 100
 		}
 		w := agent.LimitWindow{Label: quotaLabel(key), Pct: used}
+		// Surface the absolute consumed/cap when the SDK reports them (it does
+		// for metered quotas like premium_interactions; unlimited ones carry
+		// max=-1 and are skipped above). This is what lets the UI show
+		// "15.5k / 30k" rather than only a percentage.
+		if q.EntitlementRequests > 0 {
+			w.Used = q.UsedRequests
+			w.Max = q.EntitlementRequests
+		}
 		if q.ResetDate != nil {
 			w.Resets = "resets " + q.ResetDate.Local().Format("Jan 2, 3:04pm")
 		}
