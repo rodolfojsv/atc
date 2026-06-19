@@ -167,6 +167,8 @@ type session struct {
 	watching    bool  // the session-long watcher goroutine is running
 	questioning bool  // a question box is being surfaced/answered (one handler at a time)
 	offset      int64 // byte offset into the transcript already emitted (monotonic)
+
+	lastUsageScrape time.Time // throttles the automatic /usage refresh
 }
 
 func (s *session) ID() string { return s.id }
@@ -238,9 +240,13 @@ func (s *session) Send(ctx context.Context, prompt string) error {
 	}
 	// /usage and /cost paint an ephemeral overlay that never reaches the
 	// JSONL transcript, so the watcher can't see it. Scrape the pane out of
-	// band, surface the text, and capture a limits snapshot.
+	// band, surface the text, and capture a limits snapshot. Reset the
+	// auto-refresh throttle so it doesn't immediately scrape again.
 	if isUsageCommand(prompt) {
-		go s.scrapeUsage(name)
+		s.mu.Lock()
+		s.lastUsageScrape = time.Now()
+		s.mu.Unlock()
+		go s.scrapeUsage(name, true)
 	}
 	return nil
 }
@@ -260,11 +266,25 @@ func isUsageCommand(prompt string) bool {
 // the pane. It's a TUI-version knob, like the other capture tunables.
 const usageSettle = 900 * time.Millisecond
 
-// scrapeUsage reads the /usage overlay from the pane, surfaces it as a message
-// (restoring the text readout the headless backend used to emit), parses a
-// best-effort limits snapshot, then dismisses the overlay so the prompt is
-// usable again.
-func (s *session) scrapeUsage(name string) {
+// usageRefreshInterval throttles the automatic /usage scrape. Claude has no
+// per-turn account-quota event (unlike Copilot), so the watcher injects /usage
+// at most this often on turn-end to keep the account-usage badge fresh without
+// flashing the overlay on every turn.
+const usageRefreshInterval = 10 * time.Minute
+
+// scrapeUsage reads the /usage overlay from the pane, parses a best-effort
+// limits snapshot, then dismisses the overlay so the prompt is usable again.
+// announce posts the raw overlay text as a message (what a manual /usage wants);
+// the throttled auto-refresh passes false so it only updates the badge.
+func (s *session) scrapeUsage(name string, announce bool) {
+	// A manual /usage arrived as a prompt, so the supervisor marked the session
+	// working — but it runs no turn and writes no transcript, so the watcher
+	// won't emit idle on its own. Return the session to "done" on every exit
+	// path, or it hangs in "working" forever. (The auto-refresh fires from idle,
+	// so it's already done and passes announce=false.)
+	if announce {
+		defer s.emit(agent.Event{Type: agent.EventIdle})
+	}
 	time.Sleep(usageSettle)
 	if s.isClosed() {
 		return
@@ -282,11 +302,37 @@ func (s *session) scrapeUsage(name string) {
 		_ = s.tm.SendKeys(ctx, name, "Escape")
 		return
 	}
-	s.emit(agent.Event{Type: agent.EventMessage, Text: "```\n" + text + "\n```"})
+	if announce {
+		s.emit(agent.Event{Type: agent.EventMessage, Text: "```\n" + text + "\n```"})
+	}
 	windows := parseUsageLimits(text)
 	s.emit(agent.Event{Type: agent.EventLimits, LimitText: text, LimitWindows: windows})
-	tracef("usage scraped id=%s windows=%d", s.id, len(windows))
+	tracef("usage scraped id=%s windows=%d announce=%v", s.id, len(windows), announce)
 	_ = s.tm.SendKeys(ctx, name, "Escape")
+}
+
+// maybeScrapeUsage injects /usage on turn-end to refresh the account-usage
+// badge, throttled to usageRefreshInterval. It runs only when the turn is quiet
+// (the watcher calls it right after idle), so the brief overlay it paints
+// doesn't collide with an in-flight turn. Silent: it never posts the readout as
+// a message.
+func (s *session) maybeScrapeUsage(name string) {
+	s.mu.Lock()
+	if s.closed || time.Since(s.lastUsageScrape) < usageRefreshInterval {
+		s.mu.Unlock()
+		return
+	}
+	s.lastUsageScrape = time.Now()
+	s.mu.Unlock()
+
+	ctx := context.Background()
+	if err := s.tm.SendText(ctx, name, "/usage"); err != nil {
+		return
+	}
+	if err := s.tm.SendEnter(ctx, name); err != nil {
+		return
+	}
+	s.scrapeUsage(name, false)
 }
 
 var (
@@ -343,31 +389,60 @@ func stripBox(s string) string {
 	return s
 }
 
-// currentLimitRe matches a real rate-limit line, e.g.
+// The /usage dialog renders each limit window across three lines, e.g.
 //
-//	Current week (all models): 36% used · resets Jun 20, 2:59pm (America/Chicago)
+//	Current week (all models)
+//	██████████████████                                 36% used
+//	Resets Jun 20, 3pm (America/Chicago)
 //
-// Only these "Current …: N% used" lines are limits. The "What's contributing to
-// your limits usage?" section below them is full of unrelated percentages
-// ("80% of your usage came from subagent-heavy sessions") — taking the max over
-// the whole overlay is what surfaced a bogus 74%. Window name is group 1, the
-// percent group 2, and the reset hint group 3.
-var currentLimitRe = regexp.MustCompile(`(?i)current\s+(.+?):\s*(\d{1,3})\s*%\s*used\b\s*(?:·\s*)?(resets[^\n]*)?`)
+// so we anchor on the "N% used" bar line and read the label from just above and
+// the reset hint from just below. Anchoring on "% used" (not bare "%") is what
+// keeps the "What's contributing to your limits usage?" section out — its
+// percentages read "61% of your usage…", never "… % used".
+var (
+	usagePctRe   = regexp.MustCompile(`(\d{1,3})\s*%\s+used\b`)
+	usageLabelRe = regexp.MustCompile(`(?i)^\s*current\s+(.+?)\s*$`)
+	usageResetRe = regexp.MustCompile(`(?i)resets\b.*`)
+)
 
 // parseUsageLimits returns every "Current …" limit window in the scraped
 // /usage text, in display order (session, weekly, per-model). If a full
 // scrollback capture contains more than one /usage block, the latest reading
 // of each window wins. Empty when no limit line is found.
 func parseUsageLimits(text string) []agent.LimitWindow {
+	lines := strings.Split(text, "\n")
 	var out []agent.LimitWindow
 	seen := map[string]int{} // label -> index in out, so a later block overwrites
-	for _, m := range currentLimitRe.FindAllStringSubmatch(text, -1) {
+	for i, ln := range lines {
+		pm := usagePctRe.FindStringSubmatch(ln)
+		if pm == nil {
+			continue
+		}
+		// Label: nearest "Current …" line at or just above the bar.
+		label := ""
+		for j := i; j >= 0 && j >= i-3; j-- {
+			if lm := usageLabelRe.FindStringSubmatch(lines[j]); lm != nil {
+				label = strings.TrimSpace(lm[1])
+				break
+			}
+		}
+		if label == "" {
+			continue // a "% used" bar with no Current header isn't a window
+		}
+		// Resets hint: nearest "Resets …" line at or just below the bar.
+		resets := ""
+		for j := i; j < len(lines) && j <= i+3; j++ {
+			if rm := usageResetRe.FindString(lines[j]); rm != "" {
+				resets = strings.TrimSpace(rm)
+				break
+			}
+		}
 		var pct float64
-		fmt.Sscanf(m[2], "%f", &pct)
+		fmt.Sscanf(pm[1], "%f", &pct)
 		w := agent.LimitWindow{
-			Label:  strings.TrimSpace(m[1]),
+			Label:  label,
 			Pct:    pct,
-			Resets: strings.TrimSpace(m[3]),
+			Resets: resets,
 		}
 		if i, ok := seen[w.Label]; ok {
 			out[i] = w
@@ -661,6 +736,9 @@ func (s *session) watch() {
 			tracef("watch idle id=%s", s.id)
 			s.emit(agent.Event{Type: agent.EventIdle})
 			idleEmitted = true
+			// Turn just went quiet — a safe moment to refresh the account-usage
+			// badge (throttled), since no overlay would collide with a turn.
+			go s.maybeScrapeUsage(name)
 		}
 	}
 }

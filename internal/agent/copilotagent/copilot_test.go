@@ -82,8 +82,8 @@ func TestLimitsFromQuota(t *testing.T) {
 	}
 	// Unlimited entitlement dropped; remaining two sorted by label.
 	want := []agent.LimitWindow{
+		{Label: "AIC", Pct: 75},
 		{Label: "chat", Pct: 10},
-		{Label: "premium interactions", Pct: 75},
 	}
 	if len(e.LimitWindows) != len(want) {
 		t.Fatalf("want %d windows, got %d: %+v", len(want), len(e.LimitWindows), e.LimitWindows)
