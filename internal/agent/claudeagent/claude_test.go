@@ -18,15 +18,26 @@ import (
 // came from…") are not limits — reading the max over the whole overlay is what
 // produced a bogus 74%.
 func TestParseUsageLimits(t *testing.T) {
+	// The /usage dialog lays each window across three lines: a "Current …"
+	// header, a "… N% used" bar, then a "Resets …" hint (captured live from
+	// Claude Code). The "What's contributing…" percentages must not count.
 	overlay := strings.Join([]string{
 		"You are currently using your subscription to power your Claude Code usage",
 		"",
-		"Current session: 0% used · resets Jun 17, 7:49pm (America/Chicago)",
-		"Current week (all models): 36% used · resets Jun 20, 2:59pm (America/Chicago)",
-		"Current week (Sonnet only): 0% used · resets Jun 20, 3pm (America/Chicago)",
+		"  Current session",
+		"  ███████                                          0% used",
+		"  Resets Jun 17, 7:49pm (America/Chicago)",
 		"",
-		"What's contributing to your limits usage?",
-		"Last 7d · 9952 requests · 125 sessions",
+		"  Current week (all models)",
+		"  ██████████████████                               36% used",
+		"  Resets Jun 20, 2:59pm (America/Chicago)",
+		"",
+		"  Current week (Sonnet only)",
+		"  ▌                                                1% used",
+		"  Resets Jun 20, 3pm (America/Chicago)",
+		"",
+		"  What's contributing to your limits usage?",
+		"  Last 7d · 9952 requests · 125 sessions",
 		"  80% of your usage came from subagent-heavy sessions",
 		"  67% of your usage was at >150k context",
 	}, "\n")
@@ -37,7 +48,7 @@ func TestParseUsageLimits(t *testing.T) {
 	want := []struct {
 		label string
 		pct   float64
-	}{{"session", 0}, {"week (all models)", 36}, {"week (Sonnet only)", 0}}
+	}{{"session", 0}, {"week (all models)", 36}, {"week (Sonnet only)", 1}}
 	for i, w := range want {
 		if windows[i].Label != w.label || windows[i].Pct != w.pct {
 			t.Errorf("window %d = %q %v%%, want %q %v%%", i, windows[i].Label, windows[i].Pct, w.label, w.pct)

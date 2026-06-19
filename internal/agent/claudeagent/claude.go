@@ -385,31 +385,60 @@ func stripBox(s string) string {
 	return s
 }
 
-// currentLimitRe matches a real rate-limit line, e.g.
+// The /usage dialog renders each limit window across three lines, e.g.
 //
-//	Current week (all models): 36% used · resets Jun 20, 2:59pm (America/Chicago)
+//	Current week (all models)
+//	██████████████████                                 36% used
+//	Resets Jun 20, 3pm (America/Chicago)
 //
-// Only these "Current …: N% used" lines are limits. The "What's contributing to
-// your limits usage?" section below them is full of unrelated percentages
-// ("80% of your usage came from subagent-heavy sessions") — taking the max over
-// the whole overlay is what surfaced a bogus 74%. Window name is group 1, the
-// percent group 2, and the reset hint group 3.
-var currentLimitRe = regexp.MustCompile(`(?i)current\s+(.+?):\s*(\d{1,3})\s*%\s*used\b\s*(?:·\s*)?(resets[^\n]*)?`)
+// so we anchor on the "N% used" bar line and read the label from just above and
+// the reset hint from just below. Anchoring on "% used" (not bare "%") is what
+// keeps the "What's contributing to your limits usage?" section out — its
+// percentages read "61% of your usage…", never "… % used".
+var (
+	usagePctRe   = regexp.MustCompile(`(\d{1,3})\s*%\s+used\b`)
+	usageLabelRe = regexp.MustCompile(`(?i)^\s*current\s+(.+?)\s*$`)
+	usageResetRe = regexp.MustCompile(`(?i)resets\b.*`)
+)
 
 // parseUsageLimits returns every "Current …" limit window in the scraped
 // /usage text, in display order (session, weekly, per-model). If a full
 // scrollback capture contains more than one /usage block, the latest reading
 // of each window wins. Empty when no limit line is found.
 func parseUsageLimits(text string) []agent.LimitWindow {
+	lines := strings.Split(text, "\n")
 	var out []agent.LimitWindow
 	seen := map[string]int{} // label -> index in out, so a later block overwrites
-	for _, m := range currentLimitRe.FindAllStringSubmatch(text, -1) {
+	for i, ln := range lines {
+		pm := usagePctRe.FindStringSubmatch(ln)
+		if pm == nil {
+			continue
+		}
+		// Label: nearest "Current …" line at or just above the bar.
+		label := ""
+		for j := i; j >= 0 && j >= i-3; j-- {
+			if lm := usageLabelRe.FindStringSubmatch(lines[j]); lm != nil {
+				label = strings.TrimSpace(lm[1])
+				break
+			}
+		}
+		if label == "" {
+			continue // a "% used" bar with no Current header isn't a window
+		}
+		// Resets hint: nearest "Resets …" line at or just below the bar.
+		resets := ""
+		for j := i; j < len(lines) && j <= i+3; j++ {
+			if rm := usageResetRe.FindString(lines[j]); rm != "" {
+				resets = strings.TrimSpace(rm)
+				break
+			}
+		}
 		var pct float64
-		fmt.Sscanf(m[2], "%f", &pct)
+		fmt.Sscanf(pm[1], "%f", &pct)
 		w := agent.LimitWindow{
-			Label:  strings.TrimSpace(m[1]),
+			Label:  label,
 			Pct:    pct,
-			Resets: strings.TrimSpace(m[3]),
+			Resets: resets,
 		}
 		if i, ok := seen[w.Label]; ok {
 			out[i] = w
