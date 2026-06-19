@@ -295,10 +295,6 @@ func (s *session) scrapeUsage(name string, announce bool) {
 		tracef("usage capturefail id=%s err=%v", s.id, err)
 		return
 	}
-	// Diagnostic: dump the raw pane so we can see what /usage actually renders
-	// in this Claude Code version (the overlay layout is version-specific and
-	// the parser below must match it).
-	tracef("usage rawpane id=%s announce=%v\n<<<PANE\n%s\nPANE>>>", s.id, announce, pane)
 	text := extractUsageOverlay(pane)
 	if text == "" {
 		tracef("usage no-overlay id=%s", s.id)
