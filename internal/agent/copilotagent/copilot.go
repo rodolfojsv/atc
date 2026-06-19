@@ -405,9 +405,35 @@ func traceContent(data rpc.SessionEventData) string {
 		return d.ToolName
 	case *rpc.ToolExecutionCompleteData:
 		return fmt.Sprintf("success=%v", d.Success)
+	case *rpc.AssistantUsageData:
+		nano := "<nil>"
+		if d.CopilotUsage != nil {
+			nano = fmt.Sprintf("%v", d.CopilotUsage.TotalNanoAiu)
+		}
+		return fmt.Sprintf("model=%q in=%s out=%s cost=%s nanoAiu=%s quotas=%d",
+			d.Model, ptrStr(d.InputTokens), ptrStr(d.OutputTokens), fptrStr(d.Cost), nano, len(d.QuotaSnapshots))
+	case *rpc.SessionUsageInfoData:
+		return fmt.Sprintf("current=%d limit=%d", d.CurrentTokens, d.TokenLimit)
 	default:
 		return fmt.Sprintf("%T", data)
 	}
+}
+
+// ptrStr / fptrStr render optional numeric SDK fields, distinguishing a
+// genuinely-absent value (<nil>) from a present zero — the whole question
+// when usage looks empty.
+func ptrStr(p *int64) string {
+	if p == nil {
+		return "<nil>"
+	}
+	return fmt.Sprintf("%d", *p)
+}
+
+func fptrStr(p *float64) string {
+	if p == nil {
+		return "<nil>"
+	}
+	return fmt.Sprintf("%v", *p)
 }
 
 // translateData maps SDK event payloads onto normalized events.
