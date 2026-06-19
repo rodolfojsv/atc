@@ -167,6 +167,8 @@ type session struct {
 	watching    bool  // the session-long watcher goroutine is running
 	questioning bool  // a question box is being surfaced/answered (one handler at a time)
 	offset      int64 // byte offset into the transcript already emitted (monotonic)
+
+	lastUsageScrape time.Time // throttles the automatic /usage refresh
 }
 
 func (s *session) ID() string { return s.id }
@@ -238,9 +240,13 @@ func (s *session) Send(ctx context.Context, prompt string) error {
 	}
 	// /usage and /cost paint an ephemeral overlay that never reaches the
 	// JSONL transcript, so the watcher can't see it. Scrape the pane out of
-	// band, surface the text, and capture a limits snapshot.
+	// band, surface the text, and capture a limits snapshot. Reset the
+	// auto-refresh throttle so it doesn't immediately scrape again.
 	if isUsageCommand(prompt) {
-		go s.scrapeUsage(name)
+		s.mu.Lock()
+		s.lastUsageScrape = time.Now()
+		s.mu.Unlock()
+		go s.scrapeUsage(name, true)
 	}
 	return nil
 }
@@ -260,11 +266,17 @@ func isUsageCommand(prompt string) bool {
 // the pane. It's a TUI-version knob, like the other capture tunables.
 const usageSettle = 900 * time.Millisecond
 
-// scrapeUsage reads the /usage overlay from the pane, surfaces it as a message
-// (restoring the text readout the headless backend used to emit), parses a
-// best-effort limits snapshot, then dismisses the overlay so the prompt is
-// usable again.
-func (s *session) scrapeUsage(name string) {
+// usageRefreshInterval throttles the automatic /usage scrape. Claude has no
+// per-turn account-quota event (unlike Copilot), so the watcher injects /usage
+// at most this often on turn-end to keep the account-usage badge fresh without
+// flashing the overlay on every turn.
+const usageRefreshInterval = 10 * time.Minute
+
+// scrapeUsage reads the /usage overlay from the pane, parses a best-effort
+// limits snapshot, then dismisses the overlay so the prompt is usable again.
+// announce posts the raw overlay text as a message (what a manual /usage wants);
+// the throttled auto-refresh passes false so it only updates the badge.
+func (s *session) scrapeUsage(name string, announce bool) {
 	time.Sleep(usageSettle)
 	if s.isClosed() {
 		return
@@ -282,11 +294,37 @@ func (s *session) scrapeUsage(name string) {
 		_ = s.tm.SendKeys(ctx, name, "Escape")
 		return
 	}
-	s.emit(agent.Event{Type: agent.EventMessage, Text: "```\n" + text + "\n```"})
+	if announce {
+		s.emit(agent.Event{Type: agent.EventMessage, Text: "```\n" + text + "\n```"})
+	}
 	windows := parseUsageLimits(text)
 	s.emit(agent.Event{Type: agent.EventLimits, LimitText: text, LimitWindows: windows})
-	tracef("usage scraped id=%s windows=%d", s.id, len(windows))
+	tracef("usage scraped id=%s windows=%d announce=%v", s.id, len(windows), announce)
 	_ = s.tm.SendKeys(ctx, name, "Escape")
+}
+
+// maybeScrapeUsage injects /usage on turn-end to refresh the account-usage
+// badge, throttled to usageRefreshInterval. It runs only when the turn is quiet
+// (the watcher calls it right after idle), so the brief overlay it paints
+// doesn't collide with an in-flight turn. Silent: it never posts the readout as
+// a message.
+func (s *session) maybeScrapeUsage(name string) {
+	s.mu.Lock()
+	if s.closed || time.Since(s.lastUsageScrape) < usageRefreshInterval {
+		s.mu.Unlock()
+		return
+	}
+	s.lastUsageScrape = time.Now()
+	s.mu.Unlock()
+
+	ctx := context.Background()
+	if err := s.tm.SendText(ctx, name, "/usage"); err != nil {
+		return
+	}
+	if err := s.tm.SendEnter(ctx, name); err != nil {
+		return
+	}
+	s.scrapeUsage(name, false)
 }
 
 var (
@@ -661,6 +699,9 @@ func (s *session) watch() {
 			tracef("watch idle id=%s", s.id)
 			s.emit(agent.Event{Type: agent.EventIdle})
 			idleEmitted = true
+			// Turn just went quiet — a safe moment to refresh the account-usage
+			// badge (throttled), since no overlay would collide with a turn.
+			go s.maybeScrapeUsage(name)
 		}
 	}
 }
