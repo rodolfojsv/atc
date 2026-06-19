@@ -1563,8 +1563,13 @@ function syncCompletion(ctx) {
   } else if (at) {
     const token = at[1];
     const data = ctx.getData();
-    const files = fuzzyFilter((data && data.files) || [], token.slice(1), 6);
-    if (files.length) comp = { kind: '@', token, items: files.map(f => ({ insert: f, label: f })), sel: 0, ctx };
+    // "@" resolves to a working-dir file OR an inline subagent mention
+    // (agent-<name>); both are post-"@" text the accept step re-prefixes.
+    const cands = ((data && data.files) || []).concat((data && data.agents) || []);
+    // Generous cap so several same-named files all appear; the popup
+    // scrolls (CSS max-height) and arrow-nav keeps the selection in view.
+    const hits = fuzzyFilter(cands, token.slice(1), 50);
+    if (hits.length) comp = { kind: '@', token, items: hits.map(f => ({ insert: f, label: f })), sel: 0, ctx };
   }
   if (!comp) { hidePopup(ctx.popupEl); return; }
   renderComp();
@@ -1580,13 +1585,20 @@ function renderComp() {
     return `<div class="crow${i === comp.sel ? ' sel' : ''}" onmousedown="event.preventDefault();comp.sel=${i};acceptCompletion()">${body}</div>`;
   }).join('');
   el.classList.remove('hidden');
+  // Keep the highlighted row visible as arrow-nav walks a long list.
+  const sel = el.querySelector('.crow.sel');
+  if (sel) sel.scrollIntoView({ block: 'nearest' });
 }
 function acceptCompletion() {
   if (!comp || !comp.items.length) return;
   const it = comp.items[comp.sel];
   const t = comp.ctx.inputEl, popup = comp.ctx.popupEl;
   const before = t.value.slice(0, t.value.length - comp.token.length);
-  t.value = before + it.insert + ' ';
+  // Re-add the "@" for file/agent mentions: the leading "@" is what makes
+  // the agent eagerly load a file or hand off to a subagent. ("/" inserts
+  // carry their own slash already.)
+  const insert = comp.kind === '@' ? '@' + it.insert : it.insert;
+  t.value = before + insert + ' ';
   comp = null; hidePopup(popup);
   if (t.id === 'prompt') autosize(t);
   t.focus(); t.setSelectionRange(t.value.length, t.value.length);

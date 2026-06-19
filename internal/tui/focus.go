@@ -88,7 +88,7 @@ func (m *Model) syncFocusLayout() {
 	m.input.SetHeight(lines)
 	h := m.height - 6 - lines
 	if m.comp.active {
-		h -= len(m.comp.items)
+		h -= m.completionLines()
 	}
 	if h < 3 {
 		h = 3
@@ -293,7 +293,7 @@ func (m *Model) runSlashCommand(sess *supervisor.Session, text string) (tea.Mode
 		for i, c := range slashCommands {
 			names[i] = c.name
 		}
-		m.flash = strings.Join(names, " · ") + " — @ mentions a file"
+		m.flash = strings.Join(names, " · ") + " — @ mentions a file or agent"
 		return m, nil
 	}
 	// Claude sessions expand their repo's .claude/commands themselves —
