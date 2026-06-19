@@ -160,6 +160,13 @@
   #ask .q { font-weight: 600; margin-bottom: .5em; color: #cdddff; font-size: .9em; }
   #ask .btns { display: flex; gap: .5em; flex-wrap: wrap; }
   #ask .btns button { border-color: var(--accent); color: #cdddff; }
+  /* rich layout: when options carry descriptions, stack them full-width with the
+     label above its description so the context Claude wrote is readable */
+  #ask .btns.rich { flex-direction: column; align-items: stretch; }
+  #ask .btns.rich button { display: flex; flex-direction: column; align-items: flex-start;
+    gap: .15em; text-align: left; padding: .5em .7em; width: 100%; }
+  #ask .btns.rich .ol { font-weight: 600; }
+  #ask .btns.rich .od { color: var(--dim); font-size: .82em; font-weight: 400; white-space: normal; }
   #ask .hint { color: var(--dim); font-size: .8em; margin-top: .4em; }
 
   /* composer (focus + new) */
@@ -1250,10 +1257,15 @@ async function pollFocus() {
   const ask = $('ask');
   if (s.question) {
     ask.classList.remove('hidden');
-    const opts = (s.question.options || []).map((o, i) =>
-      `<button onclick="answerQuestion(${i})">${esc(o)}</button>`).join('');
+    const details = s.question.optionDetails || [];
+    const hasDetails = details.some(d => d);
+    const opts = (s.question.options || []).map((o, i) => {
+      const d = details[i];
+      return `<button onclick="answerQuestion(${i})"><span class="ol">${esc(o)}</span>` +
+        (d ? `<span class="od">${esc(d)}</span>` : '') + `</button>`;
+    }).join('');
     ask.innerHTML = `<div class="q">❓ ${esc(s.question.prompt)}</div>` +
-      (opts ? `<div class="btns">${opts}</div>` : '') +
+      (opts ? `<div class="btns${hasDetails ? ' rich' : ''}">${opts}</div>` : '') +
       `<div class="hint">${s.question.allowFreeform !== false ? 'Tap an option or type your answer below.' : 'Tap an option above.'}</div>`;
     window._askOptions = s.question.options || [];
   } else {

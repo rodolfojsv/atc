@@ -51,7 +51,8 @@ const promptSettle = 5 * time.Second
 // --- Detection ------------------------------------------------------------
 
 type promptOption struct {
-	label string
+	label  string
+	detail string // the option's description (the indented line(s) below it), if any
 }
 
 type promptInfo struct {
@@ -60,13 +61,45 @@ type promptInfo struct {
 	options []promptOption
 }
 
+// pickerChromeMarkers are strings that only Claude's interactive select boxes
+// (permission prompts, AskUserQuestion pickers, the session-start menu) render —
+// the navigation hint line and the tab-state glyphs. Requiring one of these to
+// classify a box as a question is what stops ordinary assistant prose that
+// happens to contain "❯ 1. …" lines (e.g. a TUI example pasted into a reply)
+// from being mistaken for a live picker.
+var pickerChromeMarkers = []string{"Enter to select", "to navigate", "Esc to cancel", "☐", "☒", "✔"}
+
+// submitMarkers identify the picker's final "Review your answers" tab. The
+// multi-question form (one question per tab) ends on a "Ready to submit your
+// answers?" confirmation; we answer it automatically rather than surfacing a
+// bogus extra question, since every real question has already been answered to
+// reach it.
+var submitMarkers = []string{"Submit answers"}
+
+// metaOptionMarkers are the escape-hatch choices Claude Code appends to every
+// AskUserQuestion picker. They are not real answers: "Type something" declines
+// the structured question and drops to a free-text reply, and "Chat about this"
+// bails out to open chat. We hide them from the options surfaced to the user
+// (atc already offers a freeform reply box) and instead route a typed answer
+// through "Type something" itself.
+var metaOptionMarkers = []string{"Type something", "Chat about this"}
+var typeSomethingMarkers = []string{"Type something"}
+
 // detectPrompt parses a captured pane into a prompt, if one is showing. It
-// requires at least two numbered options plus either a selection cursor glyph
-// or permission-style wording, so ordinary numbered prose in an answer is not
-// mistaken for an interactive box.
+// requires at least two numbered options plus, for a question, the picker's
+// chrome (a real select box, not numbered prose) — or, for an approval,
+// permission-style wording.
+//
+// Claude's multi-question AskUserQuestion renders as a *tabbed* form: one
+// question visible per pane, the rest behind tabs, each option carrying a
+// wrapping description line below it (which has no number, so the option scan
+// skips it). Pressing Enter selects the highlighted option and auto-advances to
+// the next tab, so a single promptInfo per capture — the visible question — is
+// all a caller needs; the watcher re-fires for each tab as the form advances.
 func detectPrompt(pane string) (promptInfo, bool) {
 	lines := strings.Split(pane, "\n")
 	var options []promptOption
+	var optLines []int // line index of each option, parallel to options
 	firstOpt := -1
 	cursorOnOption := false
 	for i, ln := range lines {
@@ -78,15 +111,30 @@ func detectPrompt(pane string) (promptInfo, bool) {
 				cursorOnOption = true
 			}
 			options = append(options, promptOption{label: strings.TrimSpace(m[3])})
+			optLines = append(optLines, i)
 		}
 	}
 	if len(options) < 2 || firstOpt < 0 {
 		return promptInfo{}, false
 	}
 
+	// Each option's description is the indented line(s) between it and the next
+	// option (Claude renders one under each choice). Scraped here so the UI can
+	// show the context Claude wrote, not just the bare label.
+	for k := range options {
+		end := len(lines)
+		if k+1 < len(optLines) {
+			end = optLines[k+1]
+		}
+		options[k].detail = detailBelow(lines, optLines[k]+1, end)
+	}
+
+	// The question text is the first non-empty line above the options, skipping
+	// the blank gap the picker leaves between them. Box glyphs (from a framed
+	// variant) are stripped so the title isn't polluted with border pieces.
 	title := ""
 	for i := firstOpt - 1; i >= 0; i-- {
-		if t := strings.TrimSpace(lines[i]); t != "" {
+		if t := strings.TrimSpace(stripBoxGlyphs(lines[i])); t != "" {
 			title = t
 			break
 		}
@@ -99,9 +147,10 @@ func detectPrompt(pane string) (promptInfo, bool) {
 		}
 	}
 
-	// Gate against false positives from numbered prose: a real select box has
-	// the cursor on an option line, or uses permission wording.
-	if !cursorOnOption && !isPermission {
+	// Gate against false positives from numbered prose: an approval is matched by
+	// its wording; any other box must carry both a selection cursor and the
+	// picker's own chrome to count.
+	if !isPermission && !(cursorOnOption && containsAny(pane, pickerChromeMarkers)) {
 		return promptInfo{}, false
 	}
 
@@ -110,6 +159,60 @@ func detectPrompt(pane string) (promptInfo, bool) {
 		kind = "permission"
 	}
 	return promptInfo{kind: kind, title: title, options: options}, true
+}
+
+// answerOptions are the labels (and their descriptions) surfaced to the user:
+// the picker's options minus Claude Code's escape-hatch meta-options ("Type
+// something" / "Chat about this"), which decline rather than answer. The two
+// slices are parallel.
+func (p promptInfo) answerOptions() (labels, details []string) {
+	for _, o := range p.options {
+		if containsAny(o.label, metaOptionMarkers) {
+			continue
+		}
+		labels = append(labels, o.label)
+		details = append(details, o.detail)
+	}
+	return labels, details
+}
+
+// isSubmitConfirm reports whether the box is the multi-question form's final
+// "Ready to submit your answers?" tab, which we answer automatically.
+func (p promptInfo) isSubmitConfirm() bool {
+	for _, o := range p.options {
+		if containsAny(o.label, submitMarkers) {
+			return true
+		}
+	}
+	return false
+}
+
+// detailBelow joins the description lines that sit under an option — the
+// contiguous indented run from start up to end (the next option, or the box
+// bottom). A blank line, a horizontal rule (which strips to empty), or the
+// picker's chrome ends the run, so the hint bar and separators never leak in.
+func detailBelow(lines []string, start, end int) string {
+	var parts []string
+	for i := start; i < end && i < len(lines); i++ {
+		t := strings.TrimSpace(stripBoxGlyphs(lines[i]))
+		if t == "" || containsAny(lines[i], pickerChromeMarkers) {
+			break
+		}
+		parts = append(parts, t)
+	}
+	return strings.Join(parts, " ")
+}
+
+// stripBoxGlyphs removes the picker's frame characters so a scraped title isn't
+// polluted with border pieces from `tmux capture-pane`.
+func stripBoxGlyphs(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '│', '┃', '╭', '╮', '╰', '╯', '─', '━', '┌', '┐', '└', '┘', '├', '┤':
+			return -1
+		}
+		return r
+	}, s)
 }
 
 // --- Answering ------------------------------------------------------------
@@ -140,13 +243,37 @@ func (s *session) handleQuestion(ctx context.Context, p promptInfo) {
 		s.mu.Unlock()
 	}()
 
-	q := agent.Question{Prompt: p.title, AllowFreeform: true}
-	for _, o := range p.options {
-		q.Options = append(q.Options, o.label)
+	name := s.tmuxName()
+
+	// The multi-question form's final tab is a "Ready to submit your answers?"
+	// confirmation. Every real question was already answered to reach it, so
+	// submit it automatically instead of surfacing a bogus extra question.
+	if p.isSubmitConfirm() {
+		tracef("question submit id=%s", s.id)
+		s.selectMatch(ctx, p, submitMarkers, 0)
+		s.waitPromptCleared(ctx)
+		return
 	}
+
+	// Surface the one question visible on this tab — minus Claude Code's
+	// escape-hatch meta-options, which decline rather than answer. Selecting a
+	// real answer makes the picker auto-advance to the next tab; the watcher
+	// re-fires and we frame that next question on its own — so multi-question
+	// asks walk one at a time, each with its own title and options.
+	labels, details := p.answerOptions()
+	// Prefer the full descriptions from the transcript (the pane truncates long
+	// ones); keep the scraped detail as a fallback when no match is found.
+	if tm := s.latestQuestionDetails(); len(tm) > 0 {
+		for i := range labels {
+			if d := matchDetail(tm, labels[i]); d != "" {
+				details[i] = d
+			}
+		}
+	}
+	q := agent.Question{Prompt: p.title, Options: labels, OptionDetails: details, AllowFreeform: true}
+	tracef("question id=%s title=%q opts=%d", s.id, p.title, len(q.Options))
 	answer, ok := s.spec.OnQuestion(q)
 
-	name := s.tmuxName()
 	if !ok {
 		_ = s.tm.SendKeys(ctx, name, "Escape")
 		s.waitPromptCleared(ctx)
@@ -160,8 +287,58 @@ func (s *session) handleQuestion(ctx context.Context, p promptInfo) {
 			cur = fresh
 		}
 	}
-	s.answerDialogDirect(ctx, cur, answer)
-	s.waitPromptCleared(ctx)
+	if i := optionIndexFor(answer, cur.options); i >= 0 {
+		// A real option (matched against the full on-screen list, so the index
+		// lines up even though we hid the meta-options from the user).
+		s.selectIndex(ctx, i)
+	} else if ti := indexMatching(cur.options, typeSomethingMarkers); ti >= 0 {
+		// A freeform answer: take the picker's "Type something" hatch, which
+		// opens a free-text reply, then type the answer into it.
+		s.selectIndex(ctx, ti)
+		s.typeFreeform(ctx, answer)
+	} else {
+		_ = s.tm.SendText(ctx, name, answer)
+		_ = s.tm.SendEnter(ctx, name)
+	}
+	s.waitQuestionAdvanced(ctx, cur.title)
+}
+
+// typeFreeform types a free-text answer after the picker's "Type something"
+// option has opened the reply input, giving the box a moment to switch into
+// text-entry mode first.
+func (s *session) typeFreeform(ctx context.Context, answer string) {
+	name := s.tmuxName()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if pane, err := s.tm.Capture(ctx, name, tmux.CaptureOpts{}); err == nil {
+			if _, ok := detectPrompt(pane); !ok {
+				break // the select box is gone; the text input is ready
+			}
+		}
+		time.Sleep(pollInterval)
+	}
+	_ = s.tm.SendText(ctx, name, answer)
+	_ = s.tm.SendEnter(ctx, name)
+}
+
+// waitQuestionAdvanced blocks until the box clears or the visible question
+// changes from prev. Selecting an option advances the tabbed form to the next
+// question without clearing the box, so we can't wait for a full clear; watching
+// the title change lets the next tab surface promptly instead of stalling out
+// the settle timeout on every question.
+func (s *session) waitQuestionAdvanced(ctx context.Context, prev string) {
+	deadline := time.Now().Add(promptSettle)
+	for time.Now().Before(deadline) {
+		pane, err := s.tm.Capture(ctx, s.tmuxName(), tmux.CaptureOpts{})
+		if err != nil {
+			return
+		}
+		p, ok := detectPrompt(pane)
+		if !ok || p.title != prev {
+			return
+		}
+		time.Sleep(pollInterval)
+	}
 }
 
 func (s *session) answerPermission(ctx context.Context, p promptInfo) {

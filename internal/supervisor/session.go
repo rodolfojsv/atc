@@ -105,6 +105,7 @@ type PermissionView struct {
 type QuestionView struct {
 	Prompt        string
 	Options       []string
+	OptionDetails []string // per-option descriptions, parallel to Options
 	AllowFreeform bool
 }
 
@@ -262,7 +263,8 @@ func (s *Session) View() SessionView {
 	if s.question != nil {
 		v.Question = &QuestionView{
 			Prompt: s.question.Prompt, AllowFreeform: s.question.AllowFreeform,
-			Options: append([]string(nil), s.question.Options...),
+			Options:       append([]string(nil), s.question.Options...),
+			OptionDetails: append([]string(nil), s.question.OptionDetails...),
 		}
 	}
 	v.Model = s.usage.Model
