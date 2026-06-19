@@ -165,6 +165,8 @@ func (s *session) invokeCommand(ctx context.Context, name, input string) error {
 	}
 	switch r := res.(type) {
 	case *rpc.SlashCommandAgentPromptResult:
+		// Becomes a real agent turn, which emits its own idle when it
+		// finishes — don't emit one here too.
 		return s.sendPrompt(ctx, r.Prompt)
 	case *rpc.SlashCommandTextResult:
 		s.emitMessage(r.Text)
@@ -179,6 +181,10 @@ func (s *session) invokeCommand(ctx context.Context, name, input string) error {
 		}
 		s.emitMessage("/" + r.Command + " needs a subcommand: " + strings.Join(names, ", "))
 	}
+	// These results resolve synchronously without a turn lifecycle, so the
+	// runtime never sends a turn-end event. Emit idle ourselves; otherwise
+	// the supervisor leaves the session stuck "working" (e.g. after /mcp).
+	s.emitIdle()
 	return nil
 }
 
@@ -187,6 +193,15 @@ func (s *session) emitMessage(text string) {
 		return
 	}
 	s.emit(agent.Event{Type: agent.EventMessage, Text: text})
+}
+
+// emitIdle marks the end of a turn that resolved without the runtime's own
+// turn-end event (a synchronous slash command), so the supervisor can move
+// the session out of "working".
+func (s *session) emitIdle() {
+	if s.emit != nil {
+		s.emit(agent.Event{Type: agent.EventIdle})
+	}
 }
 
 // ListCommands returns the session's invocable slash commands and skills
