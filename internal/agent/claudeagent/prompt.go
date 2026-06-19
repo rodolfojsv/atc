@@ -115,11 +115,52 @@ func detectPrompt(pane string) (promptInfo, bool) {
 // --- Answering ------------------------------------------------------------
 
 // handlePrompt resolves a detected permission box via OnPermission and submits
-// the answer, then waits for the box to clear. Only permission boxes reach
-// here; questions are left to render as transcript text and be answered in chat
-// (see watch), so they don't get re-asked through an interactive picker.
+// the answer, then waits for the box to clear. Questions take the separate
+// handleQuestion path (the watcher fires it once per box, off the poll loop).
 func (s *session) handlePrompt(ctx context.Context, p promptInfo) {
 	s.answerPermission(ctx, p)
+	s.waitPromptCleared(ctx)
+}
+
+// handleQuestion surfaces an AskUserQuestion box through OnQuestion — which
+// frames it for the user and marks the session "waiting" — blocks until they
+// reply, then drives that reply into the on-screen picker and waits for it to
+// clear. It runs on its own goroutine (the watcher keeps tailing meanwhile) and
+// the caller sets the questioning guard so only one runs per box; this clears
+// it when the box is gone. A cancelled question (session closing) sends Escape.
+//
+// The reply itself arrives via a normal chat message: while a question is
+// pending the supervisor routes the user's next message to answerQuestion
+// (feeding OnQuestion's channel) instead of starting a new turn, so the answer
+// returned here is what to select.
+func (s *session) handleQuestion(ctx context.Context, p promptInfo) {
+	defer func() {
+		s.mu.Lock()
+		s.questioning = false
+		s.mu.Unlock()
+	}()
+
+	q := agent.Question{Prompt: p.title, AllowFreeform: true}
+	for _, o := range p.options {
+		q.Options = append(q.Options, o.label)
+	}
+	answer, ok := s.spec.OnQuestion(q)
+
+	name := s.tmuxName()
+	if !ok {
+		_ = s.tm.SendKeys(ctx, name, "Escape")
+		s.waitPromptCleared(ctx)
+		return
+	}
+	// Re-capture: the user may have taken a while, so drive the answer into the
+	// box as it stands now rather than the snapshot we detected it from.
+	cur := p
+	if pane, err := s.tm.Capture(ctx, name, tmux.CaptureOpts{}); err == nil {
+		if fresh, ok := detectPrompt(pane); ok {
+			cur = fresh
+		}
+	}
+	s.answerDialogDirect(ctx, cur, answer)
 	s.waitPromptCleared(ctx)
 }
 
