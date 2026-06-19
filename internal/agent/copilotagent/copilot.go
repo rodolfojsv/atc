@@ -44,11 +44,13 @@ func (b *Backend) Name() string { return "copilot" }
 func (b *Backend) Stop() error { return b.client.Stop() }
 
 func (b *Backend) NewSession(ctx context.Context, spec agent.SessionSpec) (agent.Session, error) {
+	servers, mcpErr := loadMCPServers()
 	sdk, err := b.client.CreateSession(ctx, &copilot.SessionConfig{
 		Model:               spec.Model,
 		WorkingDirectory:    spec.WorkingDir,
 		ClientName:          "atc",
 		Streaming:           copilot.Bool(true),
+		MCPServers:          servers,
 		OnPermissionRequest: permissionHandler(spec.OnPermission),
 		OnUserInputRequest:  userInputHandler(spec.OnQuestion),
 	})
@@ -56,15 +58,18 @@ func (b *Backend) NewSession(ctx context.Context, spec agent.SessionSpec) (agent
 		return nil, err
 	}
 	sdk.On(eventTranslator(sdk.SessionID, spec.OnEvent))
+	reportMCPLoad(spec.OnEvent, servers, mcpErr)
 	return &session{sdk: sdk, readOnly: spec.ReadOnly, emit: spec.OnEvent}, nil
 }
 
 func (b *Backend) ResumeSession(ctx context.Context, spec agent.SessionSpec) (agent.Session, error) {
+	servers, _ := loadMCPServers()
 	sdk, err := b.client.ResumeSession(ctx, spec.SessionID, &copilot.ResumeSessionConfig{
 		ClientName:          "atc",
 		WorkingDirectory:    spec.WorkingDir,
 		Model:               spec.Model,
 		Streaming:           copilot.Bool(true),
+		MCPServers:          servers,
 		OnPermissionRequest: permissionHandler(spec.OnPermission),
 		OnUserInputRequest:  userInputHandler(spec.OnQuestion),
 	})
