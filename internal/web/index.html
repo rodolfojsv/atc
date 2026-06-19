@@ -833,7 +833,10 @@ function renderLimits(s) {
 // openLimits shows every usage window (session, weekly, per-model) in a panel.
 // With no reading yet it just kicks off the first /usage scrape.
 function openLimits() {
-  const L = curSession && curSession.limits;
+  // Prefer the open session's reading; on the board there is none, so fall back
+  // to any session's snapshot (account usage is global anyway).
+  let L = curSession && curSession.limits;
+  if (!L) for (const g of (lastGroups || [])) { const s = (g.sessions || []).find(x => x.limits); if (s) { L = s.limits; break; } }
   if (!L || !L.windows || !L.windows.length) { refreshLimits(); return; }
   const rows = L.windows.map(w =>
     `<div class="limrow"><span class="lw">${esc(w.label)}</span>` +
@@ -969,6 +972,11 @@ function toggleCollapse(i) {
 }
 function renderBoard(list) {
   if (holdActive) return; // don't disturb an in-progress hold
+  // Account usage is global, so show the badge on the board too — renderLimits
+  // otherwise only runs in the focus view. Any session carries the same
+  // snapshot; if none has a reading yet, hide it rather than nag on the board.
+  const lim = list.find(s => s.limits);
+  if (lim) renderLimits(lim); else $('limBadge').classList.add('hidden');
   const rows = $('rows');
   if (!list.length) {
     rows.innerHTML = `<div class="empty">No sessions yet.<br><button class="primary" onclick="toggleNew()">+ New session</button></div>`;

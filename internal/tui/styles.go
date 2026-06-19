@@ -88,6 +88,27 @@ func humanCost(u supervisor.Usage) string {
 	return "—"
 }
 
+// limitSummary renders the most-constrained account-usage window for a footer
+// line, preferring absolute used/max (e.g. "15.5k/30.0k premium interactions")
+// over a bare percentage when the cap is known. Returns "" when there is no
+// reading yet. Shared by the board footer and the focus header.
+func limitSummary(lm supervisor.Limits) string {
+	if lm.AsOf.IsZero() || len(lm.Windows) == 0 {
+		return ""
+	}
+	bind := lm.Windows[0]
+	for _, w := range lm.Windows[1:] {
+		if w.Pct > bind.Pct {
+			bind = w
+		}
+	}
+	amount := fmt.Sprintf("%.0f%%", bind.Pct)
+	if bind.Max > 0 {
+		amount = humanTokens(bind.Used) + "/" + humanTokens(bind.Max)
+	}
+	return amount + " " + bind.Label
+}
+
 // humanAIC formats accumulated nano-AIU as AI Credits. There is no
 // fixed tokens→AIC rate (it depends on model multiplier and billing
 // batches), so this shows what the runtime actually billed.

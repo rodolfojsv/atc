@@ -615,7 +615,11 @@ func (m *Model) viewBoard() string {
 		footerBuf.WriteString(styleFlash.Render("  "+m.flash) + "\n")
 	}
 	today, month := m.sup.Spend()
-	footer := styleDim.Render("  spend today " + spendLabel(today) + " · month " + spendLabel(month))
+	footerText := "  spend today " + spendLabel(today) + " · month " + spendLabel(month)
+	if sum := limitSummary(m.sup.Limits()); sum != "" {
+		footerText += " · " + sum
+	}
+	footer := styleDim.Render(footerText)
 	if sess := m.selected(); sess != nil {
 		if model := sess.View().Model; model != "" {
 			footer = rightAlign(m.width, footer, styleDim.Render("model: "+model))
