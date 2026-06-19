@@ -84,6 +84,50 @@ func TestTranscriptRendering(t *testing.T) {
 	}
 }
 
+func TestBoardMotion(t *testing.T) {
+	const n = 10 // a 10-row board, cursor 0..9
+	// feed runs a key sequence from cursor 0 and returns the final cursor.
+	feed := func(keys ...string) int {
+		cursor, count, gPending := 0, 0, false
+		for _, k := range keys {
+			cursor, count, gPending, _ = boardMotion(cursor, n, count, gPending, k)
+		}
+		return cursor
+	}
+
+	cases := []struct {
+		name string
+		keys []string
+		want int
+	}{
+		{"single j", []string{"j"}, 1},
+		{"single k clamps at top", []string{"k"}, 0},
+		{"count then j", []string{"1", "0", "j"}, 9}, // 10j past the end clamps
+		{"smaller count j", []string{"3", "j"}, 3},
+		{"G to bottom", []string{"G"}, 9},
+		{"count G to row", []string{"5", "G"}, 4}, // 1-based row 5
+		{"gg to top", []string{"G", "g", "g"}, 0}, // jump down then gg back up
+		{"count gg to row", []string{"3", "g", "g"}, 2},
+		{"down then count up", []string{"G", "2", "k"}, 7},
+		{"lone zero is not a count", []string{"0", "j"}, 1}, // "0" ignored, j moves 1
+		{"arrows honor count", []string{"4", "down"}, 4},
+	}
+	for _, c := range cases {
+		if got := feed(c.keys...); got != c.want {
+			t.Errorf("%s: cursor = %d, want %d", c.name, got, c.want)
+		}
+	}
+
+	// A non-motion key clears a pending count and reports not-handled.
+	if _, count, _, handled := boardMotion(0, n, 5, false, "n"); handled || count != 0 {
+		t.Errorf("non-motion key: handled=%v count=%d, want false/0", handled, count)
+	}
+	// gg requires two presses: a lone g is handled but doesn't move.
+	if cur, _, gp, handled := boardMotion(4, n, 0, false, "g"); cur != 4 || !gp || !handled {
+		t.Errorf("lone g: cursor=%d gPending=%v handled=%v, want 4/true/true", cur, gp, handled)
+	}
+}
+
 func TestHumanAIC(t *testing.T) {
 	for in, want := range map[float64]string{
 		0:       "—",

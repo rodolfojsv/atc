@@ -49,7 +49,7 @@ func TestParseUsageLimits(t *testing.T) {
 }
 
 func TestMessageEventsStringContent(t *testing.T) {
-	events := messageEvents(json.RawMessage(`"plain answer"`))
+	events := messageEvents(json.RawMessage(`"plain answer"`), false)
 	if len(events) != 1 || events[0].Type != agent.EventMessage || events[0].Text != "plain answer" {
 		t.Fatalf("unexpected: %+v", events)
 	}
@@ -61,7 +61,7 @@ func TestMessageEventsBlocks(t *testing.T) {
 		{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"go test ./..."}},
 		{"type":"text","text":"Done."}
 	]`)
-	events := messageEvents(raw)
+	events := messageEvents(raw, false)
 	if len(events) != 3 {
 		t.Fatalf("want 3 events, got %+v", events)
 	}
@@ -79,8 +79,8 @@ func TestTranscriptPathEncoding(t *testing.T) {
 	}
 }
 
-// eventsFromLine drives both History (includeUser=true) and live tailing
-// (includeUser=false). The live path must skip the user's own prompt so it
+// eventsFromLine drives both History (replay=true) and live tailing
+// (replay=false). The live path must skip the user's own prompt so it
 // isn't echoed back into the transcript the user just typed into.
 func TestEventsFromLineUserVisibility(t *testing.T) {
 	userLine := []byte(`{"type":"user","message":{"role":"user","content":"hello there"}}`)
@@ -94,15 +94,19 @@ func TestEventsFromLineUserVisibility(t *testing.T) {
 	}
 }
 
-// AskUserQuestion must render as a readable question rather than a tool line.
+// AskUserQuestion renders as a readable question on replay (no live chips
+// there), but is suppressed live where OnQuestion surfaces it as chips — so it
+// isn't shown twice. Either way it must never render as a bare tool line.
 func TestFormatAskUserQuestion(t *testing.T) {
 	raw := json.RawMessage(`[{"type":"tool_use","name":"AskUserQuestion","input":{
 		"questions":[{"header":"Indentation","question":"Tabs or spaces?","options":[
 			{"label":"Tabs","description":"tab chars"},
 			{"label":"Spaces","description":"space chars"}]}]}}]`)
-	events := messageEvents(raw)
+
+	// Replay: rendered as text.
+	events := messageEvents(raw, true)
 	if len(events) != 1 || events[0].Type != agent.EventMessage {
-		t.Fatalf("expected one message event, got %+v", events)
+		t.Fatalf("replay: expected one message event, got %+v", events)
 	}
 	text := events[0].Text
 	for _, want := range []string{"Indentation", "Tabs or spaces?", "Tabs", "Spaces", "Reply with your choice"} {
@@ -114,6 +118,11 @@ func TestFormatAskUserQuestion(t *testing.T) {
 		if e.Type == agent.EventToolStart {
 			t.Errorf("AskUserQuestion should not render as a tool line")
 		}
+	}
+
+	// Live: suppressed (chips carry it), so no events at all.
+	if live := messageEvents(raw, false); len(live) != 0 {
+		t.Errorf("live tail should suppress the question text, got %+v", live)
 	}
 }
 

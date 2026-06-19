@@ -162,10 +162,11 @@ type session struct {
 	spec     agent.SessionSpec
 	tm       *tmux.Client
 
-	started  bool  // claude has been launched at least once for this id (resume vs new)
-	closed   bool  // Close was called; the watcher should stop
-	watching bool  // the session-long watcher goroutine is running
-	offset   int64 // byte offset into the transcript already emitted (monotonic)
+	started     bool  // claude has been launched at least once for this id (resume vs new)
+	closed      bool  // Close was called; the watcher should stop
+	watching    bool  // the session-long watcher goroutine is running
+	questioning bool  // a question box is being surfaced/answered (one handler at a time)
+	offset      int64 // byte offset into the transcript already emitted (monotonic)
 }
 
 func (s *session) ID() string { return s.id }
@@ -609,22 +610,41 @@ func (s *session) watch() {
 
 		pane, err := s.tm.Capture(ctx, name, tmux.CaptureOpts{})
 		if err == nil {
-			// A permission box means claude is blocked on us — route it through
-			// OnPermission and block until the user decides.
-			//
-			// Questions (AskUserQuestion) are deliberately NOT intercepted: the
-			// interactive picker re-detected the same box every poll and asked
-			// again and again, stripping the surrounding context. Instead we let
-			// the question render as ordinary transcript text (Claude writes it
-			// to the JSONL) and the user answers with a normal chat message —
-			// the headless behavior. Send drives an on-screen select box if one
-			// is actually focused when they reply.
-			if p, ok := detectPrompt(pane); ok && p.kind == "permission" {
-				tracef("watch permission id=%s title=%q", s.id, p.title)
-				s.handlePrompt(ctx, p)
-				lastActivity = time.Now()
-				idleEmitted = false
-				continue
+			if p, ok := detectPrompt(pane); ok {
+				// Either kind means claude is blocked on us, so never let the
+				// idle timer below fire a false turn-end ("done") while a box is
+				// on screen.
+				switch p.kind {
+				case "permission":
+					// Route through OnPermission and block until the user decides.
+					tracef("watch permission id=%s title=%q", s.id, p.title)
+					s.handlePrompt(ctx, p)
+					lastActivity = time.Now()
+					idleEmitted = false
+					continue
+				default: // "question" (AskUserQuestion)
+					// Surface the question exactly once per box via OnQuestion
+					// (frames it + sets the session "waiting"), then drive the
+					// reply into the picker — all on a background goroutine so the
+					// watcher keeps tailing. The questioning guard means we never
+					// re-fire the same box every poll (the bug that made one ask
+					// become an endless loop of chip prompts); we just keep
+					// suppressing idle until the box clears.
+					s.mu.Lock()
+					already := s.questioning
+					if !already && s.spec.OnQuestion != nil {
+						s.questioning = true
+					}
+					s.mu.Unlock()
+					if !already && s.spec.OnQuestion != nil {
+						tracef("watch question id=%s title=%q", s.id, p.title)
+						go s.handleQuestion(context.Background(), p)
+					}
+					if s.spec.OnQuestion != nil {
+						// Blocked on the user: hold off idle/done entirely.
+						continue
+					}
+				}
 			}
 		}
 
@@ -802,17 +822,19 @@ type transcriptLine struct {
 	} `json:"message"`
 }
 
-// eventsFromLine converts one transcript line to events. includeUser controls
-// whether the user's own prompts are emitted (true for History replay, false
-// for live tailing where the prompt was just typed by the user).
-func eventsFromLine(raw []byte, includeUser bool) []agent.Event {
+// eventsFromLine converts one transcript line to events. replay is true for
+// History replay and false for live tailing. It governs two things that the
+// live UI renders out of band: the user's own prompts (just typed, so not
+// re-emitted live) and an AskUserQuestion box (surfaced as interactive chips
+// via OnQuestion live, but only as text on replay where no chips exist).
+func eventsFromLine(raw []byte, replay bool) []agent.Event {
 	var line transcriptLine
 	if json.Unmarshal(raw, &line) != nil || line.IsMeta || line.Message == nil {
 		return nil
 	}
 	switch line.Type {
 	case "user":
-		if !includeUser {
+		if !replay {
 			return nil
 		}
 		var out []agent.Event
@@ -834,7 +856,7 @@ func eventsFromLine(raw []byte, includeUser bool) []agent.Event {
 		}
 		return out
 	case "assistant":
-		out := messageEvents(line.Message.Content)
+		out := messageEvents(line.Message.Content, replay)
 		if u := line.Message.Usage; u != nil && (u.InputTokens > 0 || u.OutputTokens > 0) {
 			out = append(out, agent.Event{
 				Type:         agent.EventUsage,
@@ -862,8 +884,11 @@ type usageBlock struct {
 }
 
 // messageEvents converts an assistant message's content blocks into transcript
-// events. Content is either a plain string or a block array.
-func messageEvents(content json.RawMessage) []agent.Event {
+// events. Content is either a plain string or a block array. replay keeps an
+// AskUserQuestion box rendered as text on History replay; live, the watcher
+// surfaces it as interactive chips through OnQuestion, so emitting the text too
+// would double up.
+func messageEvents(content json.RawMessage, replay bool) []agent.Event {
 	var out []agent.Event
 	var text string
 	if json.Unmarshal(content, &text) == nil {
@@ -883,11 +908,14 @@ func messageEvents(content json.RawMessage) []agent.Event {
 				out = append(out, agent.Event{Type: agent.EventMessage, Text: b.Text})
 			}
 		case "tool_use":
-			// AskUserQuestion has no answer channel here; render it so the user
-			// can reply in their next prompt.
+			// AskUserQuestion is surfaced live as interactive chips via
+			// OnQuestion, so render it as text only on replay (no chips there);
+			// emitting it live too would duplicate the question.
 			if b.Name == "AskUserQuestion" {
-				if q := formatAskUserQuestion(b.Input); q != "" {
-					out = append(out, agent.Event{Type: agent.EventMessage, Text: q})
+				if replay {
+					if q := formatAskUserQuestion(b.Input); q != "" {
+						out = append(out, agent.Event{Type: agent.EventMessage, Text: q})
+					}
 				}
 				continue
 			}
