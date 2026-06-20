@@ -1607,8 +1607,10 @@ function renderComp() {
   const el = comp.ctx.popupEl;
   if (!comp.items.length) { hidePopup(el); return; }
   el.innerHTML = comp.items.map((it, i) => {
-    const body = comp.kind === '/' && it.desc
-      ? esc(it.label) + ' <span class="cdesc">— ' + esc(it.desc) + '</span>'
+    // Cap description length so long skill blurbs don't blow out the popup width.
+    const desc = it.desc && it.desc.length > 60 ? it.desc.slice(0, 59).trimEnd() + '…' : it.desc;
+    const body = comp.kind === '/' && desc
+      ? esc(it.label) + ' <span class="cdesc">— ' + esc(desc) + '</span>'
       : esc(it.label);
     return `<div class="crow${i === comp.sel ? ' sel' : ''}" onmousedown="event.preventDefault();comp.sel=${i};acceptCompletion()">${body}</div>`;
   }).join('');
