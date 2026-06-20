@@ -401,6 +401,10 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	// scratch directory (~/.atc/scratch) for tasks that aren't tied to a
 	// codebase. It isn't a git repo, so worktree mode doesn't apply.
 	repo, scratch := req.Repo, false
+	if repo == "" {
+		jsonError(w, http.StatusBadRequest, "repo is required")
+		return
+	}
 	if repo == "__scratch__" {
 		dir, err := scratchDir()
 		if err != nil {
@@ -408,6 +412,12 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		repo, scratch = dir, true
+	} else if !s.cfg.HasRepo(repo) {
+		// A token-holder may only start sessions in the operator's configured
+		// repos (or scratch) — never an arbitrary path on the host. The UI
+		// offers only these, so this rejects forged/out-of-band requests.
+		jsonError(w, http.StatusForbidden, "repo is not in the configured repos list")
+		return
 	}
 	sess, err := s.sup.NewSession(supervisor.NewSessionOptions{
 		Name: req.Name, NameHint: req.NameHint, Repo: repo, Backend: req.Backend,

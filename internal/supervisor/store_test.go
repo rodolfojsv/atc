@@ -66,6 +66,40 @@ func TestReadSessionFile(t *testing.T) {
 	}
 }
 
+// TestReadSessionFileSymlinkEscape guards the symlink-confinement fix: a
+// symlink that lives inside the session dir but points outside it must not be
+// readable through the file-preview endpoint. filepath.Clean alone wouldn't
+// resolve the link, so the "../" check would pass and leak the target.
+func TestReadSessionFileSymlinkEscape(t *testing.T) {
+	if _, err := os.Lstat("/"); err != nil { // sanity; symlinks need a real FS
+		t.Skip("no filesystem")
+	}
+	dir := t.TempDir()
+	outside := t.TempDir()
+	secret := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(secret, []byte("top secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A symlink planted inside the session dir pointing at the outside file.
+	link := filepath.Join(dir, "leak.txt")
+	if err := os.Symlink(secret, link); err != nil {
+		t.Skipf("symlinks unsupported here: %v", err)
+	}
+	// And a symlinked *subdirectory* escaping the session dir entirely.
+	linkDir := filepath.Join(dir, "escape")
+	if err := os.Symlink(outside, linkDir); err != nil {
+		t.Skipf("symlinks unsupported here: %v", err)
+	}
+
+	s := New(testConfig(t), nil)
+	sess := &Session{Name: "x", Dir: dir, status: StatusDone}
+	for _, bad := range []string{"leak.txt", "escape/secret.txt", link, filepath.Join(linkDir, "secret.txt")} {
+		if _, data, err := s.ReadSessionFile(sess, bad); err == nil {
+			t.Errorf("symlink escape %q should be refused, got %q", bad, data)
+		}
+	}
+}
+
 func TestAutoName(t *testing.T) {
 	for _, c := range []struct{ prompt, repo, want string }{
 		{"Fix the login flow please", "/home/user/atc", "Fix the login flow please"},     // spaces kept

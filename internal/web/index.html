@@ -312,8 +312,7 @@
         <h3>New session</h3>
         <div>
           <label class="fld" for="fRepo">Repository</label>
-          <select id="fRepo" onchange="onRepoChange()"></select>
-          <input id="fRepoCustom" class="hidden" placeholder="/path/to/repo" autocapitalize="off" spellcheck="false" style="margin-top:.5em">
+          <select id="fRepo"></select>
         </div>
         <div class="grid2">
           <div>
@@ -1127,15 +1126,9 @@ function showBoard() {
 function toggleNew() { $('newSheet').classList.toggle('hidden'); resetCompletion(); }
 
 function baseName(p) { const s = String(p).replace(/[\\/]+$/, ''); const i = Math.max(s.lastIndexOf('/'), s.lastIndexOf('\\')); return i >= 0 ? s.slice(i + 1) : s; }
-function onRepoChange() {
-  const custom = $('fRepo').value === '__custom__';
-  $('fRepoCustom').classList.toggle('hidden', !custom);
-  if (custom) $('fRepoCustom').focus();
-}
 
 async function createSession() {
-  let repo = $('fRepo').value;
-  if (repo === '__custom__') repo = $('fRepoCustom').value.trim();
+  const repo = $('fRepo').value;
   if (!repo) { alert('Pick a repository.'); return; }
   const text = $('fPrompt').value;
   const atts = formAttachments.slice();
@@ -1641,7 +1634,7 @@ function acceptCompletion() {
 // The new-session form has no session, so its "/" and "@" lists come
 // from a session-less endpoint keyed by the chosen repo + backend.
 let formCompData = null, formCompKey = null, formCompFetching = false;
-function formRepo() { let r = $('fRepo').value; if (r === '__custom__') r = ($('fRepoCustom').value || '').trim(); return r; }
+function formRepo() { return $('fRepo').value; }
 function ensureFormCompData() {
   const repo = formRepo(); if (!repo) return;
   const backend = $('fBackend').value, key = backend + '\n' + repo;
@@ -1740,8 +1733,7 @@ async function boot() {
     $('login').classList.add('hidden'); $('app').classList.remove('hidden');
     const repoOpts = (meta.repos || []).map(r =>
       `<option value="${esc(r)}" ${r === meta.defaultRepo ? 'selected' : ''}>${esc(baseName(r))}</option>`).join('');
-    $('fRepo').innerHTML = repoOpts + `<option value="__scratch__">— No repo (scratch) —</option><option value="__custom__">Custom path…</option>`;
-    onRepoChange();
+    $('fRepo').innerHTML = repoOpts + `<option value="__scratch__">— No repo (scratch) —</option>`;
     $('fBackend').innerHTML = (meta.backends || []).map(b => `<option ${b === meta.defaultBackend ? 'selected' : ''}>${esc(b)}</option>`).join('');
     // Agent picker: only shown when custom agents are configured. "(none)"
     // leaves the backend default agent in charge.
