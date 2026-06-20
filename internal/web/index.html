@@ -167,6 +167,9 @@
     gap: .15em; text-align: left; padding: .5em .7em; width: 100%; }
   #ask .btns.rich .ol { font-weight: 600; }
   #ask .btns.rich .od { color: var(--dim); font-size: .82em; font-weight: 400; white-space: normal; }
+  /* a toggled multi-select option reads as "checked" until the set is sent */
+  #ask .btns button.qopt.sel { background: var(--accent-dim); border-color: var(--accent); color: #fff; }
+  #ask .btns button.qopt.sel .ol::before { content: "✓ "; }
   #ask .hint { color: var(--dim); font-size: .8em; margin-top: .4em; }
 
   /* composer (focus + new) */
@@ -1259,18 +1262,31 @@ async function pollFocus() {
     ask.classList.remove('hidden');
     const details = s.question.optionDetails || [];
     const hasDetails = details.some(d => d);
+    const multi = s.question.multiSelect === true;
     const opts = (s.question.options || []).map((o, i) => {
       const d = details[i];
-      return `<button onclick="answerQuestion(${i})"><span class="ol">${esc(o)}</span>` +
-        (d ? `<span class="od">${esc(d)}</span>` : '') + `</button>`;
+      const inner = `<span class="ol">${esc(o)}</span>` + (d ? `<span class="od">${esc(d)}</span>` : '');
+      // In multi-select, a tap toggles the row; a separate button submits the set.
+      return multi
+        ? `<button class="qopt" data-i="${i}" onclick="toggleAskOpt(${i})">${inner}</button>`
+        : `<button onclick="answerQuestion(${i})">${inner}</button>`;
     }).join('');
+    const submit = multi ? `<div class="btns"><button class="primary" onclick="answerMulti()">Send selected</button></div>` : '';
+    const hint = multi
+      ? 'Pick one or more, then “Send selected” (or type your answer below).'
+      : (s.question.allowFreeform !== false ? 'Tap an option or type your answer below.' : 'Tap an option above.');
     ask.innerHTML = `<div class="q">❓ ${esc(s.question.prompt)}</div>` +
       (opts ? `<div class="btns${hasDetails ? ' rich' : ''}">${opts}</div>` : '') +
-      `<div class="hint">${s.question.allowFreeform !== false ? 'Tap an option or type your answer below.' : 'Tap an option above.'}</div>`;
+      submit +
+      `<div class="hint">${hint}</div>`;
     window._askOptions = s.question.options || [];
+    window._askMulti = multi;
+    window._askSelected = multi ? new Set() : null;
   } else {
     ask.classList.add('hidden');
     window._askOptions = null;
+    window._askMulti = false;
+    window._askSelected = null;
   }
 
   const perm = $('perm');
@@ -1347,6 +1363,25 @@ function answerQuestion(i) {
   if (i < 0 || i >= opts.length) return;
   $('ask').classList.add('hidden');
   sendMessage(opts[i], []);
+}
+
+// Multi-select questions: toggleAskOpt flips a row in/out of the chosen set;
+// answerMulti sends the chosen labels (newline-joined) as one answer, which the
+// Claude backend toggles into the checkbox picker.
+function toggleAskOpt(i) {
+  const sel = window._askSelected;
+  if (!sel) return;
+  if (sel.has(i)) sel.delete(i); else sel.add(i);
+  const btn = document.querySelector(`#ask .qopt[data-i="${i}"]`);
+  if (btn) btn.classList.toggle('sel', sel.has(i));
+}
+function answerMulti() {
+  const opts = window._askOptions || [];
+  const sel = window._askSelected;
+  if (!sel || sel.size === 0) return;
+  const chosen = [...sel].sort((a, b) => a - b).map(i => opts[i]);
+  $('ask').classList.add('hidden');
+  sendMessage(chosen.join('\n'), []);
 }
 
 async function respond(d) {

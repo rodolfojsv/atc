@@ -550,7 +550,7 @@ func userInputHandler(onQuestion agent.QuestionFunc) copilot.UserInputHandler {
 		allowFreeform := req.AllowFreeform == nil || *req.AllowFreeform
 		ans, ok := onQuestion(agent.Question{
 			Prompt: req.Question, Options: req.Choices, AllowFreeform: allowFreeform,
-		})
+		}, nil)
 		if !ok {
 			return copilot.UserInputResponse{}, errors.New("question cancelled in atc")
 		}

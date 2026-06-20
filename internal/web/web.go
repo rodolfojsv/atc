@@ -208,6 +208,7 @@ type questionJSON struct {
 	Options       []string `json:"options,omitempty"`
 	OptionDetails []string `json:"optionDetails,omitempty"`
 	AllowFreeform bool     `json:"allowFreeform"`
+	MultiSelect   bool     `json:"multiSelect,omitempty"`
 }
 
 type entryJSON struct {
@@ -245,7 +246,7 @@ func (s *Server) toSessionJSON(v supervisor.SessionView) sessionJSON {
 		out.PendingCount = v.PendingCount
 	}
 	if v.Question != nil {
-		out.Question = &questionJSON{Prompt: v.Question.Prompt, Options: v.Question.Options, OptionDetails: v.Question.OptionDetails, AllowFreeform: v.Question.AllowFreeform}
+		out.Question = &questionJSON{Prompt: v.Question.Prompt, Options: v.Question.Options, OptionDetails: v.Question.OptionDetails, AllowFreeform: v.Question.AllowFreeform, MultiSelect: v.Question.MultiSelect}
 	}
 	// Account usage is global, not per-session: every session reports the same
 	// most-recent snapshot, so the badge stays put when switching chats.

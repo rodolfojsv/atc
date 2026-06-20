@@ -107,6 +107,7 @@ type QuestionView struct {
 	Options       []string
 	OptionDetails []string // per-option descriptions, parallel to Options
 	AllowFreeform bool
+	MultiSelect   bool // the user may pick several options
 }
 
 const (
@@ -263,6 +264,7 @@ func (s *Session) View() SessionView {
 	if s.question != nil {
 		v.Question = &QuestionView{
 			Prompt: s.question.Prompt, AllowFreeform: s.question.AllowFreeform,
+			MultiSelect:   s.question.MultiSelect,
 			Options:       append([]string(nil), s.question.Options...),
 			OptionDetails: append([]string(nil), s.question.OptionDetails...),
 		}
