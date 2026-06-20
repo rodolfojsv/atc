@@ -146,6 +146,21 @@ func (b *Backend) ResumeSession(_ context.Context, spec agent.SessionSpec) (agen
 	return &session{id: spec.SessionID, claudeID: spec.SessionID, spec: spec, tm: tm, started: true}, nil
 }
 
+// Reattach implements agent.ResumeReady. On atc restart the claude TUI is
+// still alive in its tmux session and may be mid-turn. We start the
+// session-long watcher (so the in-progress turn streams and the eventual
+// turn-end fires EventIdle) and report the live working state from the
+// pane, so the supervisor restores working/done correctly instead of
+// assuming the turn finished while atc was down.
+func (s *session) Reattach(ctx context.Context) bool {
+	s.startWatch()
+	pane, err := s.tm.Capture(ctx, s.tmuxName(), tmux.CaptureOpts{})
+	if err != nil {
+		return false
+	}
+	return isWorking(pane)
+}
+
 // requirements verifies both CLIs are present and returns a tmux client.
 func requirements() (*tmux.Client, error) {
 	if _, err := exec.LookPath("claude"); err != nil {
@@ -162,11 +177,12 @@ type session struct {
 	spec     agent.SessionSpec
 	tm       *tmux.Client
 
-	started     bool  // claude has been launched at least once for this id (resume vs new)
-	closed      bool  // Close was called; the watcher should stop
-	watching    bool  // the session-long watcher goroutine is running
-	questioning bool  // a question box is being surfaced/answered (one handler at a time)
-	offset      int64 // byte offset into the transcript already emitted (monotonic)
+	started        bool          // claude has been launched at least once for this id (resume vs new)
+	closed         bool          // Close was called; the watcher should stop
+	watching       bool          // the session-long watcher goroutine is running
+	questioning    bool          // a question box is being surfaced/answered (one handler at a time)
+	questionCancel chan struct{} // closed to withdraw the in-flight question when its picker vanishes
+	offset         int64         // byte offset into the transcript already emitted (monotonic)
 
 	lastUsageScrape time.Time // throttles the automatic /usage refresh
 }
@@ -745,18 +761,38 @@ func (s *session) watch() {
 					// suppressing idle until the box clears.
 					s.mu.Lock()
 					already := s.questioning
+					var cancel chan struct{}
 					if !already && s.spec.OnQuestion != nil {
 						s.questioning = true
+						cancel = make(chan struct{})
+						s.questionCancel = cancel
 					}
 					s.mu.Unlock()
 					if !already && s.spec.OnQuestion != nil {
-						tracef("watch question id=%s title=%q", s.id, p.title)
-						go s.handleQuestion(context.Background(), p)
+						tracef("watch question id=%s title=%q multi=%t", s.id, p.title, p.multiSelect)
+						go s.handleQuestion(context.Background(), p, cancel)
 					}
 					if s.spec.OnQuestion != nil {
 						// Blocked on the user: hold off idle/done entirely.
 						continue
 					}
+				}
+			} else if err == nil {
+				// No box on screen. If a question handler is still waiting on the
+				// user, the picker vanished (they cleared it by hand in tmux, or
+				// claude withdrew it) — withdraw the question so the user's input
+				// stops being routed as an answer and starts a fresh turn again.
+				s.mu.Lock()
+				cancel := s.questionCancel
+				if s.questioning && cancel != nil {
+					s.questionCancel = nil
+				} else {
+					cancel = nil
+				}
+				s.mu.Unlock()
+				if cancel != nil {
+					tracef("watch question-vanished id=%s", s.id)
+					close(cancel)
 				}
 			}
 		}

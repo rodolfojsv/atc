@@ -585,7 +585,6 @@ func (s *Supervisor) resume(sess *Session, sv savedSession) {
 	sess.mu.Lock()
 	sess.ag = ag
 	sess.id = ag.ID()
-	sess.status = StatusDone
 	sess.everWorked = true
 	// Restore the usage snapshot atc persisted; the runtimes' own logs
 	// don't reliably keep usage events (often marked ephemeral), so
@@ -609,6 +608,16 @@ func (s *Supervisor) resume(sess *Session, sv savedSession) {
 	} else {
 		sess.appendEntry(EntrySystem, "resumed from previous run (no earlier transcript available)")
 	}
+	// Restore the live status. Backends that survive an atc restart (the
+	// Claude tmux backend) can report whether the session is still mid-turn
+	// and begin streaming it, so a session left thinking shows working —
+	// and flips to done when the turn actually ends — instead of being
+	// assumed done the moment it's reloaded.
+	status := StatusDone
+	if rr, ok := ag.(agent.ResumeReady); ok && rr.Reattach(context.Background()) {
+		status = StatusWorking
+	}
+	sess.setStatus(status)
 	s.persist()
 	s.poke()
 }
@@ -872,18 +881,28 @@ func (s *Supervisor) Prompt(sess *Session, text string) error {
 // backends that can take an answer (Copilot) call this; Claude headless
 // renders the question instead.
 func (s *Supervisor) questionFunc(sess *Session) agent.QuestionFunc {
-	return func(q agent.Question) (string, bool) {
+	return func(q agent.Question, cancel <-chan struct{}) (string, bool) {
 		ch := sess.askQuestion(q)
 		sess.appendEntry(EntrySystem, formatQuestion(q))
 		sess.setStatus(StatusWaiting)
 		s.log.Log(logx.Info, "session.question", map[string]any{
-			"session": sess.Name, "options": len(q.Options), "freeform": q.AllowFreeform,
+			"session": sess.Name, "options": len(q.Options), "freeform": q.AllowFreeform, "multi": q.MultiSelect,
 		})
 		s.publish(bus.WaitingOnPermission, sess, map[string]any{"kind": "question", "summary": agent.Truncate(q.Prompt, 120)})
 		s.poke()
-		ans, ok := <-ch
-		s.poke()
-		return ans, ok
+		select {
+		case ans, ok := <-ch:
+			s.poke()
+			return ans, ok
+		case <-cancel:
+			// The agent withdrew the question (its on-screen picker vanished —
+			// e.g. the user cleared it by hand in tmux), so stop routing the
+			// user's input as an answer and let the next message start a normal
+			// turn again.
+			sess.cancelQuestion()
+			s.poke()
+			return "", false
+		}
 	}
 }
 
@@ -897,7 +916,11 @@ func formatQuestion(q agent.Question) string {
 	}
 	b.WriteString("\n→ reply with your answer")
 	if len(q.Options) > 0 {
-		b.WriteString(" (the option text, or its number)")
+		if q.MultiSelect {
+			b.WriteString(" (one or more options, comma- or line-separated, by text or number)")
+		} else {
+			b.WriteString(" (the option text, or its number)")
+		}
 	}
 	return b.String()
 }
