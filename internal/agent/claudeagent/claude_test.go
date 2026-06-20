@@ -108,6 +108,27 @@ func TestEventsFromLineUserVisibility(t *testing.T) {
 // AskUserQuestion renders as a readable question on replay (no live chips
 // there), but is suppressed live where OnQuestion surfaces it as chips — so it
 // isn't shown twice. Either way it must never render as a bare tool line.
+// questionSig must distinguish a changed/advanced picker (different title or
+// options) from an identical one re-rendered after an answer, so the watcher
+// suppresses re-surfacing the same box but still surfaces a genuinely new ask.
+func TestQuestionSig(t *testing.T) {
+	base := promptInfo{title: "Pick a font", options: []promptOption{{label: "Serif"}, {label: "Sans"}}}
+	same := promptInfo{title: "Pick a font", options: []promptOption{{label: "Serif"}, {label: "Sans"}}}
+	if questionSig(base) != questionSig(same) {
+		t.Errorf("identical boxes should share a signature")
+	}
+	diffTitle := promptInfo{title: "Pick a color", options: base.options}
+	if questionSig(base) == questionSig(diffTitle) {
+		t.Errorf("different title should change the signature")
+	}
+	// An extra option (the opts 4->5 drift seen in the re-fire loop) must change
+	// the signature so the new variant isn't mistaken for the suppressed box.
+	moreOpts := promptInfo{title: base.title, options: append(append([]promptOption{}, base.options...), promptOption{label: "Mono"})}
+	if questionSig(base) == questionSig(moreOpts) {
+		t.Errorf("added option should change the signature")
+	}
+}
+
 func TestFormatAskUserQuestion(t *testing.T) {
 	raw := json.RawMessage(`[{"type":"tool_use","name":"AskUserQuestion","input":{
 		"questions":[{"header":"Indentation","question":"Tabs or spaces?","options":[

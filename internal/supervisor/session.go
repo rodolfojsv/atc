@@ -143,22 +143,24 @@ type Session struct {
 	BaseBranch string
 	BaseCommit string
 
-	id          string
-	status      Status
-	intent      string // short activity description from intent events
-	errMsg      string
-	transcript  []Entry
-	streamBuf   string // in-flight assistant message (deltas)
-	shownStream string // text from the in-flight message already committed to the transcript (flushed from streamBuf by an interleaved entry), so finishMessage won't re-append it
-	usage       Usage
-	pending     []*Permission // FIFO queue; index 0 is surfaced in the UI
-	question    *agent.Question
-	questionCh  chan string // the next user message resolves a pending question
-	autoApprove bool        // user flipped this session to allow-all at runtime
-	everWorked  bool
-	lastEvent   time.Time // last backend event; exposes stalls
-	history     []string  // prompts sent, for arrow-up recall
-	approvals   []approvalRule
+	id           string
+	status       Status
+	intent       string // short activity description from intent events
+	errMsg       string
+	transcript   []Entry
+	streamBuf    string // in-flight assistant message (deltas)
+	shownStream  string // text from the in-flight message already committed to the transcript (flushed from streamBuf by an interleaved entry), so finishMessage won't re-append it
+	usage        Usage
+	pending      []*Permission // FIFO queue; index 0 is surfaced in the UI
+	question     *agent.Question
+	questionCh   chan string // the next user message resolves a pending question
+	lastAnswer   string      // text that just resolved a question, to swallow an immediate duplicate
+	lastAnswerAt time.Time   // when lastAnswer was recorded (the swallow only applies briefly)
+	autoApprove  bool        // user flipped this session to allow-all at runtime
+	everWorked   bool
+	lastEvent    time.Time // last backend event; exposes stalls
+	history      []string  // prompts sent, for arrow-up recall
+	approvals    []approvalRule
 
 	// Organization metadata (user-set; affects board layout only):
 	// pinned floats a session to the top, category groups it.
@@ -362,12 +364,37 @@ func (s *Session) answerQuestion(answer string) bool {
 		answer = resolveChoice(answer, s.question.Options)
 	}
 	s.question, s.questionCh = nil, nil
+	// Remember the resolved answer so an immediate re-submit of the same text
+	// (the question chip lingered in the UI and got clicked again) is swallowed
+	// rather than fired off as a stray new prompt.
+	s.lastAnswer, s.lastAnswerAt = answer, time.Now()
 	s.mu.Unlock()
 	if ch != nil {
 		ch <- answer
 		return true
 	}
 	return false
+}
+
+// duplicateAnswerWindow bounds how long after resolving a question an identical
+// re-submission is treated as a stray duplicate of the answer (and dropped)
+// rather than a fresh prompt.
+const duplicateAnswerWindow = 8 * time.Second
+
+// isDuplicateAnswer reports whether text repeats the answer that just resolved a
+// question, within the swallow window — and consumes the record so only the
+// first duplicate is dropped (a deliberate identical resend later still sends).
+func (s *Session) isDuplicateAnswer(text string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.lastAnswer == "" || text != s.lastAnswer {
+		return false
+	}
+	if time.Since(s.lastAnswerAt) > duplicateAnswerWindow {
+		return false
+	}
+	s.lastAnswer = "" // one-shot: swallow a single echo, not an intentional resend
+	return true
 }
 
 func resolveChoice(answer string, options []string) string {
