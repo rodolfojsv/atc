@@ -271,9 +271,16 @@ func stripBoxGlyphs(s string) string {
 // --- Answering ------------------------------------------------------------
 
 // handlePrompt resolves a detected permission box via OnPermission and submits
-// the answer, then waits for the box to clear. Questions take the separate
-// handleQuestion path (the watcher fires it once per box, off the poll loop).
+// the answer, then waits for the box to clear. It runs on its own goroutine (the
+// watcher keeps tailing meanwhile); the watcher sets the answering guard so only
+// one runs per box, and this clears it when the box is gone — mirroring
+// handleQuestion. Questions take the separate handleQuestion path.
 func (s *session) handlePrompt(ctx context.Context, p promptInfo) {
+	defer func() {
+		s.mu.Lock()
+		s.answering = false
+		s.mu.Unlock()
+	}()
 	s.answerPermission(ctx, p)
 	s.waitPromptCleared(ctx)
 }
@@ -309,7 +316,7 @@ func (s *session) handleQuestion(ctx context.Context, p promptInfo, cancel chan 
 	// submit it automatically instead of surfacing a bogus extra question.
 	if p.isSubmitConfirm() {
 		tracef("question submit id=%s", s.id)
-		s.selectMatch(ctx, p, submitMarkers, 0)
+		s.withPane(func() { s.selectMatch(ctx, p, submitMarkers, 0) })
 		s.waitPromptCleared(ctx)
 		return
 	}
@@ -339,7 +346,7 @@ func (s *session) handleQuestion(ctx context.Context, p promptInfo, cancel chan 
 		// pressing Escape would interrupt the now-live turn.
 		if pane, err := s.tm.Capture(ctx, name, tmux.CaptureOpts{}); err == nil {
 			if _, up := detectPrompt(pane); up {
-				_ = s.tm.SendKeys(ctx, name, "Escape")
+				s.withPane(func() { _ = s.tm.SendKeys(ctx, name, "Escape") })
 				s.waitPromptCleared(ctx)
 			}
 		}
@@ -353,38 +360,42 @@ func (s *session) handleQuestion(ctx context.Context, p promptInfo, cancel chan 
 			cur = fresh
 		}
 	}
-	if cur.multiSelect {
-		// Checkbox frame: toggle every chosen row with Space, then submit once
-		// with Enter. A freeform reply that matches no option falls back to the
-		// "Type something" hatch like the single-select path.
-		if idxs := optionIndicesFor(answer, cur.options); len(idxs) > 0 {
-			s.selectMulti(ctx, idxs)
+	// Drive the whole selection as one atomic pane sequence so navigation keys,
+	// toggles and any freeform text can't interleave with another goroutine's.
+	s.withPane(func() {
+		if cur.multiSelect {
+			// Checkbox frame: toggle every chosen row with Space, then submit once
+			// with Enter. A freeform reply that matches no option falls back to the
+			// "Type something" hatch like the single-select path.
+			if idxs := optionIndicesFor(answer, cur.options); len(idxs) > 0 {
+				s.selectMulti(ctx, idxs)
+			} else if ti := indexMatching(cur.options, typeSomethingMarkers); ti >= 0 {
+				s.selectIndex(ctx, ti)
+				s.typeFreeform(ctx, answer)
+			} else {
+				_ = s.tm.SendText(ctx, name, answer)
+				_ = s.tm.SendEnter(ctx, name)
+			}
+		} else if i := optionIndexFor(answer, cur.options); i >= 0 {
+			// A real option (matched against the full on-screen list, so the index
+			// lines up even though we hid the meta-options from the user).
+			s.selectIndex(ctx, i)
 		} else if ti := indexMatching(cur.options, typeSomethingMarkers); ti >= 0 {
+			// A freeform answer: take the picker's "Type something" hatch, which
+			// opens a free-text reply, then type the answer into it.
 			s.selectIndex(ctx, ti)
 			s.typeFreeform(ctx, answer)
 		} else {
 			_ = s.tm.SendText(ctx, name, answer)
 			_ = s.tm.SendEnter(ctx, name)
 		}
-	} else if i := optionIndexFor(answer, cur.options); i >= 0 {
-		// A real option (matched against the full on-screen list, so the index
-		// lines up even though we hid the meta-options from the user).
-		s.selectIndex(ctx, i)
-	} else if ti := indexMatching(cur.options, typeSomethingMarkers); ti >= 0 {
-		// A freeform answer: take the picker's "Type something" hatch, which
-		// opens a free-text reply, then type the answer into it.
-		s.selectIndex(ctx, ti)
-		s.typeFreeform(ctx, answer)
-	} else {
-		_ = s.tm.SendText(ctx, name, answer)
-		_ = s.tm.SendEnter(ctx, name)
-	}
+	})
 	s.waitQuestionAdvanced(ctx, cur.title)
 }
 
 // typeFreeform types a free-text answer after the picker's "Type something"
 // option has opened the reply input, giving the box a moment to switch into
-// text-entry mode first.
+// text-entry mode first. Caller must hold the pane lock (run in withPane).
 func (s *session) typeFreeform(ctx context.Context, answer string) {
 	name := s.tmuxName()
 	deadline := time.Now().Add(2 * time.Second)
@@ -432,36 +443,40 @@ func (s *session) answerPermission(ctx context.Context, p promptInfo) {
 	if s.spec.OnPermission != nil {
 		decision, feedback = s.spec.OnPermission(req)
 	}
-	switch decision {
-	case agent.ApproveOnce:
-		s.selectMatch(ctx, p, yesMarkers, 0)
-	case agent.ApproveSession:
-		if i := indexMatching(p.options, alwaysMarkers); i >= 0 {
-			s.selectIndex(ctx, i)
-		} else {
+	// Drive the choice as one atomic pane sequence (OnPermission above may have
+	// blocked on the user for a while, so it stays outside the lock).
+	s.withPane(func() {
+		switch decision {
+		case agent.ApproveOnce:
 			s.selectMatch(ctx, p, yesMarkers, 0)
-		}
-	case agent.Cancel:
-		_ = s.tm.SendKeys(ctx, name, "Escape")
-	default: // Deny
-		if feedback != "" {
-			if i := indexMatching(p.options, denyTalkMarker); i >= 0 {
+		case agent.ApproveSession:
+			if i := indexMatching(p.options, alwaysMarkers); i >= 0 {
 				s.selectIndex(ctx, i)
-				_ = s.tm.SendText(ctx, name, feedback)
-				_ = s.tm.SendEnter(ctx, name)
-				return
+			} else {
+				s.selectMatch(ctx, p, yesMarkers, 0)
+			}
+		case agent.Cancel:
+			_ = s.tm.SendKeys(ctx, name, "Escape")
+		default: // Deny
+			if feedback != "" {
+				if i := indexMatching(p.options, denyTalkMarker); i >= 0 {
+					s.selectIndex(ctx, i)
+					_ = s.tm.SendText(ctx, name, feedback)
+					_ = s.tm.SendEnter(ctx, name)
+					return
+				}
+			}
+			if i := indexMatching(p.options, noMarkers); i >= 0 {
+				s.selectIndex(ctx, i)
+			} else {
+				_ = s.tm.SendKeys(ctx, name, "Escape")
 			}
 		}
-		if i := indexMatching(p.options, noMarkers); i >= 0 {
-			s.selectIndex(ctx, i)
-		} else {
-			_ = s.tm.SendKeys(ctx, name, "Escape")
-		}
-	}
+	})
 }
 
 // selectMatch selects the first option matching any marker, or the fallback
-// slice index if none match.
+// slice index if none match. Caller must hold the pane lock (run in withPane).
 func (s *session) selectMatch(ctx context.Context, p promptInfo, markers []string, fallback int) {
 	i := indexMatching(p.options, markers)
 	if i < 0 {
@@ -475,7 +490,8 @@ func (s *session) selectMatch(ctx context.Context, p promptInfo, markers []strin
 // on the TUI binding digit shortcuts. The starting row is read from the live
 // pane rather than assumed to be the top: dialogs like the resume prompt
 // default their cursor to a non-first option, so navigating relative to where
-// the cursor actually is keeps the selection correct.
+// the cursor actually is keeps the selection correct. Caller must hold the pane
+// lock (run in withPane) so the cursor read and the navigation stay atomic.
 func (s *session) selectIndex(ctx context.Context, target int) {
 	name := s.tmuxName()
 	cur := 0
@@ -499,6 +515,7 @@ func (s *session) selectIndex(ctx context.Context, target int) {
 // Space, then submits the whole set with one Enter. Rows are visited in the
 // given order, navigating relative to the live cursor like selectIndex; toggles
 // assume every box starts unchecked (Claude renders a fresh picker that way).
+// Caller must hold the pane lock (run in withPane).
 func (s *session) selectMulti(ctx context.Context, targets []int) {
 	if len(targets) == 0 {
 		return
@@ -546,13 +563,15 @@ func cursorOptionIndex(pane string) int {
 // OnQuestion). A bare option number or matching option text selects that row;
 // anything else is typed as a freeform answer.
 func (s *session) answerDialogDirect(ctx context.Context, p promptInfo, answer string) {
-	if i := optionIndexFor(answer, p.options); i >= 0 {
-		s.selectIndex(ctx, i)
-		return
-	}
-	name := s.tmuxName()
-	_ = s.tm.SendText(ctx, name, answer)
-	_ = s.tm.SendEnter(ctx, name)
+	s.withPane(func() {
+		if i := optionIndexFor(answer, p.options); i >= 0 {
+			s.selectIndex(ctx, i)
+			return
+		}
+		name := s.tmuxName()
+		_ = s.tm.SendText(ctx, name, answer)
+		_ = s.tm.SendEnter(ctx, name)
+	})
 }
 
 // optionIndexFor maps a freeform answer to an option index: a bare 1-based
