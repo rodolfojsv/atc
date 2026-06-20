@@ -242,6 +242,24 @@ func (c *Config) HasAgent(name string) bool {
 	return ok
 }
 
+// HasRepo reports whether path is one of the configured Repos, compared by
+// cleaned absolute path so trailing slashes or relative spellings still match.
+// The web layer uses this to confine session creation to known repositories —
+// a token-holder can't point an agent at an arbitrary directory on the host.
+func (c *Config) HasRepo(path string) bool {
+	want, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	want = filepath.Clean(want)
+	for _, r := range c.Repos {
+		if got, err := filepath.Abs(r); err == nil && filepath.Clean(got) == want {
+			return true
+		}
+	}
+	return false
+}
+
 // AgentNames returns the configured custom-agent names in sorted order,
 // for stable picker ordering in the forms.
 func (c *Config) AgentNames() []string {

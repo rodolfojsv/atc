@@ -1291,18 +1291,41 @@ const maxFileReadBytes = 2 << 20
 // confinedToAny reports whether target (already absolute and cleaned) sits
 // within at least one of roots — i.e. it doesn't escape via "..". Empty roots
 // are ignored.
+//
+// Symlinks are resolved on both sides first: filepath.Clean does not follow
+// links, so without this a symlink planted inside a root (pointing at, say,
+// ~/.ssh/id_rsa) would pass the "../" check yet read a file outside it. We
+// resolve the deepest existing ancestor of target — the leaf itself may not
+// exist yet for callers that stat afterward — and compare real paths.
 func confinedToAny(target string, roots []string) bool {
+	real := resolveSymlinks(target)
 	for _, root := range roots {
 		if root == "" {
 			continue
 		}
-		r, err := filepath.Rel(root, target)
+		realRoot := resolveSymlinks(root)
+		r, err := filepath.Rel(realRoot, real)
 		if err != nil || r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) {
 			continue
 		}
 		return true
 	}
 	return false
+}
+
+// resolveSymlinks returns path with symlinks resolved. When path itself does
+// not exist yet, it resolves the longest existing leading portion and re-joins
+// the remainder, so a not-yet-created leaf still gets its real parent dir.
+func resolveSymlinks(path string) string {
+	if real, err := filepath.EvalSymlinks(path); err == nil {
+		return real
+	}
+	dir, last := filepath.Split(path)
+	dir = filepath.Clean(dir)
+	if dir == path || dir == "." || dir == string(filepath.Separator) {
+		return path
+	}
+	return filepath.Join(resolveSymlinks(dir), last)
 }
 
 func (s *Supervisor) ReadSessionFile(sess *Session, rel string) (string, []byte, error) {
@@ -1379,7 +1402,7 @@ func (s *Supervisor) ReadAttachment(sess *Session, rel string) (string, []byte, 
 		target = filepath.Join(base, target)
 	}
 	target = filepath.Clean(target)
-	if r, err := filepath.Rel(root, target); err != nil || r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) {
+	if !confinedToAny(target, []string{root}) {
 		return "", nil, errors.New("path is outside the attachments directory")
 	}
 	fi, err := os.Stat(target)

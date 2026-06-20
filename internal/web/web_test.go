@@ -161,6 +161,29 @@ func TestCreateValidation(t *testing.T) {
 	}
 }
 
+// TestCreateRepoConfinement verifies a token-holder can only start a session
+// in a configured repo (or scratch) — an arbitrary host path is rejected, so
+// a forged request can't point an agent outside the operator's repos.
+func TestCreateRepoConfinement(t *testing.T) {
+	_, ts := testServer(t) // cfg.Repos = {"/tmp/repo-a"}
+	post := func(body string) int {
+		req, _ := http.NewRequest("POST", ts.URL+"/api/sessions", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer secret")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if got := post(`{"repo":"/etc"}`); got != http.StatusForbidden {
+		t.Fatalf("arbitrary path: status %d, want 403", got)
+	}
+	if got := post(`{"repo":"/tmp/repo-a/../repo-b"}`); got != http.StatusForbidden {
+		t.Fatalf("traversal outside configured repo: status %d, want 403", got)
+	}
+}
+
 func TestClientID(t *testing.T) {
 	mk := func(v string, set bool) *http.Request {
 		r := httptest.NewRequest("POST", "/api/sessions", nil)
