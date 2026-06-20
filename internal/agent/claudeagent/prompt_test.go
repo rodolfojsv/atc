@@ -356,3 +356,58 @@ func TestIndexMatchingCaseInsensitive(t *testing.T) {
 		t.Errorf("no-match should be -1, got %d", i)
 	}
 }
+
+// Claude Code 2.1.x renders an AskUserQuestion whose options carry `preview`
+// content side-by-side: the focused option's preview in a box to the right, and
+// the selected row marked by ANSI colour (bold + bright) instead of a ❯ glyph.
+// A plain capture strips the colour, so the row looks cursor-less and the box was
+// never detected — the session wedged in "working" with the picker waiting.
+// normalizePromptPane (fed an escape-preserving capture) must recover both the
+// cursor and clean labels. Escapes mirror a real `capture-pane -e`.
+func TestDetectPreviewLayoutQuestion(t *testing.T) {
+	const e = "\x1b"
+	escPane := strings.Join([]string{
+		e + "[38;5;246m──────────────────────────────────────" + e + "[39m",
+		" ☐ Marco y Sello",
+		"¿Cómo quieres resolver Marco y Sello para que el texto se lea en Noche Tinto?",
+		e + "[38;5;246m 1." + e + "[1m" + e + "[38;5;153m Controles propios por " + e + "[0m        " + e + "[38;5;246m┌────────────────────┐" + e + "[39m",
+		"   acomodo                        " + e + "[38;5;246m│ Muestrario:        │" + e + "[39m",
+		e + "[38;5;246m 2." + e + "[39m Que el papel siga el tema    " + e + "[38;5;246m│" + e + "[39m   [ base | bloque ]  " + e + "[38;5;246m│" + e + "[39m",
+		e + "[38;5;246m 3." + e + "[39m Tinta oscura fija en el       " + e + "[38;5;246m│" + e + "[39m   #2b303a oscuro     " + e + "[38;5;246m│" + e + "[39m",
+		"   papel                          " + e + "[38;5;246m└────────────────────┘" + e + "[39m",
+		"Enter to select · ↑/↓ to navigate · n to add notes · Esc to cancel",
+	}, "\n")
+
+	pane := normalizePromptPane(escPane)
+	p, ok := detectPrompt(pane)
+	if !ok {
+		t.Fatal("preview-layout picker (colour-highlighted, no ❯) must be detected")
+	}
+	if p.kind != "question" {
+		t.Fatalf("kind = %q, want question", p.kind)
+	}
+	if p.multiSelect {
+		t.Error("single-select picker must not be flagged multiSelect")
+	}
+	if p.title != "¿Cómo quieres resolver Marco y Sello para que el texto se lea en Noche Tinto?" {
+		t.Errorf("title = %q", p.title)
+	}
+	if len(p.options) != 3 {
+		t.Fatalf("want 3 options, got %d: %+v", len(p.options), p.options)
+	}
+	// Labels must be clean — the preview panel (box borders, panel text) scraped off.
+	want := []string{"Controles propios por", "Que el papel siga el tema", "Tinta oscura fija en el"}
+	for i, w := range want {
+		if p.options[i].label != w {
+			t.Errorf("option[%d].label = %q, want %q", i, p.options[i].label, w)
+		}
+		if strings.ContainsAny(p.options[i].label, "│┌┐└┘") {
+			t.Errorf("option[%d].label leaked preview-panel chars: %q", i, p.options[i].label)
+		}
+	}
+	// The colour-highlighted first row must be reported as the live cursor so
+	// selection navigates relative to the right starting position.
+	if c := cursorOptionIndex(pane); c != 0 {
+		t.Errorf("cursorOptionIndex = %d, want 0 (highlighted row)", c)
+	}
+}

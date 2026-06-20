@@ -48,6 +48,96 @@ var (
 // so we don't re-fire the same prompt on the next poll.
 const promptSettle = 5 * time.Second
 
+// --- Capture normalisation -------------------------------------------------
+
+// Claude Code 2.1.x renders an AskUserQuestion whose options carry `preview`
+// content in a side-by-side layout: a vertical option list on the left, the
+// focused option's preview in a box drawn to the right, and — crucially — the
+// selected row marked by ANSI colour (bold/bright) instead of a ❯ glyph. A plain
+// `capture-pane` strips the colour, so the row looks cursor-less and detectPrompt
+// (which gates a question on a visible cursor) never recognises the box, leaving
+// the session wedged in "working" with the picker silently waiting.
+//
+// normalizePromptPane takes an escape-preserving capture (-e) and rebuilds it as
+// plain text the existing detectors understand: it scrapes off the right-hand
+// preview panel so it can't pollute labels, and synthesises a ❯ on the
+// colour-highlighted option row so detectPrompt/cursorOptionIndex see the cursor
+// they look for. Ordinary ❯-glyph pickers and permission boxes pass through
+// unchanged.
+
+// csiRe matches an ANSI CSI escape (the SGR colour/style codes capture-pane -e
+// emits); stripped to recover the plain text the detectors parse.
+var csiRe = regexp.MustCompile("\x1b\\[[0-9;:?]*[ -/]*[@-~]")
+
+// sgrParamsRe captures the parameter list of an SGR escape (…m). A standalone 1
+// (bold) or 7 (reverse) is how the preview-layout picker marks its selected row;
+// a colour such as "38;5;153" never contains a bare 1 or 7, so it can't trip it.
+var sgrParamsRe = regexp.MustCompile("\x1b\\[([0-9;]*)m")
+
+// optNumPrefixRe matches an option row's leading "  1." so a synthetic cursor can
+// be inserted just before the number.
+var optNumPrefixRe = regexp.MustCompile(`^(\s*)([0-9]+[.)])`)
+
+// panelBorderRunes are the vertical/corner box-drawing characters that frame the
+// preview panel Claude draws to the right of an option. (Horizontal runs are
+// excluded: a panel row always starts with a corner, and a full-width separator
+// rule must not be mistaken for a panel.)
+var panelBorderRunes = map[rune]bool{
+	'│': true, '┃': true, '║': true,
+	'┌': true, '┐': true, '└': true, '┘': true,
+	'├': true, '┤': true, '╭': true, '╮': true, '╰': true, '╯': true,
+}
+
+// lineHasSelectSGR reports whether an escaped line turns on bold or reverse video
+// — the preview-layout picker's highlight for the selected option.
+func lineHasSelectSGR(escLine string) bool {
+	for _, m := range sgrParamsRe.FindAllStringSubmatch(escLine, -1) {
+		for _, p := range strings.Split(m[1], ";") {
+			if p == "1" || p == "7" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// stripSidePanel drops the preview panel from a plain line: everything from the
+// first panel border that follows real text rightward. A border at the left
+// margin (only whitespace before it) is a box frame, not a side panel, so it is
+// left for stripBoxGlyphs to handle.
+func stripSidePanel(plain string) string {
+	seenText := false
+	for i, r := range plain {
+		switch {
+		case panelBorderRunes[r]:
+			if seenText {
+				return strings.TrimRight(plain[:i], " ")
+			}
+		case r != ' ':
+			seenText = true
+		}
+	}
+	return plain
+}
+
+// normalizePromptPane converts an escape-preserving capture into plain text with
+// the preview panel removed and a synthetic ❯ injected on any colour-highlighted
+// option row (see the block comment above).
+func normalizePromptPane(escPane string) string {
+	lines := strings.Split(escPane, "\n")
+	out := make([]string, len(lines))
+	for i, esc := range lines {
+		plain := stripSidePanel(csiRe.ReplaceAllString(esc, ""))
+		if lineHasSelectSGR(esc) {
+			if m := promptOptionRe.FindStringSubmatch(plain); m != nil && m[1] == "" {
+				plain = optNumPrefixRe.ReplaceAllString(plain, "$1❯ $2")
+			}
+		}
+		out[i] = plain
+	}
+	return strings.Join(out, "\n")
+}
+
 // --- Detection ------------------------------------------------------------
 
 type promptOption struct {
@@ -268,6 +358,18 @@ func stripBoxGlyphs(s string) string {
 	}, s)
 }
 
+// capturePrompt reads the pane with ANSI escapes preserved and normalises it for
+// prompt detection — see normalizePromptPane. Every site that feeds detectPrompt
+// or cursorOptionIndex goes through here so colour-highlighted preview pickers are
+// recognised and navigated like ordinary ones.
+func (s *session) capturePrompt(ctx context.Context, name string) (string, error) {
+	pane, err := s.tm.Capture(ctx, name, tmux.CaptureOpts{Escapes: true})
+	if err != nil {
+		return "", err
+	}
+	return normalizePromptPane(pane), nil
+}
+
 // --- Answering ------------------------------------------------------------
 
 // handlePrompt resolves a detected permission box via OnPermission and submits
@@ -344,7 +446,7 @@ func (s *session) handleQuestion(ctx context.Context, p promptInfo, cancel chan 
 		// Withdrawn or aborted. Only dismiss a box that's still up; if it
 		// already vanished (the user cleared it by hand, or Claude moved on)
 		// pressing Escape would interrupt the now-live turn.
-		if pane, err := s.tm.Capture(ctx, name, tmux.CaptureOpts{}); err == nil {
+		if pane, err := s.capturePrompt(ctx, name); err == nil {
 			if _, up := detectPrompt(pane); up {
 				s.withPane(func() { _ = s.tm.SendKeys(ctx, name, "Escape") })
 				s.waitPromptCleared(ctx)
@@ -355,7 +457,7 @@ func (s *session) handleQuestion(ctx context.Context, p promptInfo, cancel chan 
 	// Re-capture: the user may have taken a while, so drive the answer into the
 	// box as it stands now rather than the snapshot we detected it from.
 	cur := p
-	if pane, err := s.tm.Capture(ctx, name, tmux.CaptureOpts{}); err == nil {
+	if pane, err := s.capturePrompt(ctx, name); err == nil {
 		if fresh, ok := detectPrompt(pane); ok {
 			cur = fresh
 		}
@@ -400,7 +502,7 @@ func (s *session) typeFreeform(ctx context.Context, answer string) {
 	name := s.tmuxName()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if pane, err := s.tm.Capture(ctx, name, tmux.CaptureOpts{}); err == nil {
+		if pane, err := s.capturePrompt(ctx, name); err == nil {
 			if _, ok := detectPrompt(pane); !ok {
 				break // the select box is gone; the text input is ready
 			}
@@ -419,7 +521,7 @@ func (s *session) typeFreeform(ctx context.Context, answer string) {
 func (s *session) waitQuestionAdvanced(ctx context.Context, prev string) {
 	deadline := time.Now().Add(promptSettle)
 	for time.Now().Before(deadline) {
-		pane, err := s.tm.Capture(ctx, s.tmuxName(), tmux.CaptureOpts{})
+		pane, err := s.capturePrompt(ctx, s.tmuxName())
 		if err != nil {
 			return
 		}
@@ -495,7 +597,7 @@ func (s *session) selectMatch(ctx context.Context, p promptInfo, markers []strin
 func (s *session) selectIndex(ctx context.Context, target int) {
 	name := s.tmuxName()
 	cur := 0
-	if pane, err := s.tm.Capture(ctx, name, tmux.CaptureOpts{}); err == nil {
+	if pane, err := s.capturePrompt(ctx, name); err == nil {
 		if c := cursorOptionIndex(pane); c >= 0 {
 			cur = c
 		}
@@ -522,7 +624,7 @@ func (s *session) selectMulti(ctx context.Context, targets []int) {
 	}
 	name := s.tmuxName()
 	cur := 0
-	if pane, err := s.tm.Capture(ctx, name, tmux.CaptureOpts{}); err == nil {
+	if pane, err := s.capturePrompt(ctx, name); err == nil {
 		if c := cursorOptionIndex(pane); c >= 0 {
 			cur = c
 		}
@@ -610,7 +712,7 @@ func optionIndicesFor(answer string, options []promptOption) []int {
 func (s *session) waitPromptCleared(ctx context.Context) {
 	deadline := time.Now().Add(promptSettle)
 	for time.Now().Before(deadline) {
-		pane, err := s.tm.Capture(ctx, s.tmuxName(), tmux.CaptureOpts{})
+		pane, err := s.capturePrompt(ctx, s.tmuxName())
 		if err != nil {
 			return
 		}
