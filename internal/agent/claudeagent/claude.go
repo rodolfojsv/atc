@@ -176,6 +176,16 @@ func requirements() (*tmux.Client, error) {
 type session struct {
 	mu sync.Mutex
 
+	// paneMu serializes everything that types into the tmux pane: the Send
+	// path, the watcher's permission/question answers, the background /usage
+	// scrape, model switch, and abort. Those drivers run on several
+	// goroutines at once, and without this lock their keystrokes interleave
+	// into one pane and corrupt each other (a half-typed prompt, a stray
+	// Escape into a live turn). It is held only around the actual key sends —
+	// never across a wait for the user — so it can't stall the UI. Lock
+	// order: paneMu may be taken before s.mu, never the reverse.
+	paneMu sync.Mutex
+
 	id       string // atc session id (uuid); also seeds claude --session-id and the tmux name
 	claudeID string // id of the on-disk jsonl transcript; usually == id, re-discovered if needed
 	spec     agent.SessionSpec
@@ -185,6 +195,7 @@ type session struct {
 	closed         bool          // Close was called; the watcher should stop
 	watching       bool          // the session-long watcher goroutine is running
 	questioning    bool          // a question box is being surfaced/answered (one handler at a time)
+	answering      bool          // a permission box is being answered (one handler at a time)
 	questionCancel chan struct{} // closed to withdraw the in-flight question when its picker vanishes
 	offset         int64         // byte offset into the transcript already emitted (monotonic)
 	wake           chan struct{} // nudges the watcher back to fast polling when a turn starts (buffered 1)
@@ -235,6 +246,18 @@ func (s *session) nudge() {
 	}
 }
 
+// withPane runs fn while holding the pane-input lock, serializing it against
+// every other goroutine that drives keystrokes into this session's tmux pane.
+// Wrap a whole logical input sequence (e.g. type-prompt-then-Enter, or
+// capture-cursor-then-navigate-then-confirm) in one call so it lands atomically;
+// the leaf drivers (selectIndex, selectMulti, typeFreeform) assume the caller
+// already holds it and so must only ever run inside a withPane block.
+func (s *session) withPane(fn func()) {
+	s.paneMu.Lock()
+	defer s.paneMu.Unlock()
+	fn()
+}
+
 // Send submits a prompt. The session-long watcher (started here on first use)
 // streams the response from the transcript.
 //
@@ -273,19 +296,26 @@ func (s *session) Send(ctx context.Context, prompt string) error {
 	s.nudge()
 	tracef("Send id=%s claudeID=%s promptLen=%d onEvent=%t path=%q",
 		s.id, s.claudeID, len(prompt), s.spec.OnEvent != nil, s.transcriptPath())
-	if err := s.tm.SendText(ctx, name, prompt); err != nil {
-		return err
-	}
+	// One atomic input sequence: type the prompt, wait until the pane reflects
+	// it, then submit — with no other goroutine's keystrokes interleaving.
 	// Wait until the input actually reflects what we typed before submitting.
 	// A still-settling TUI (e.g. a fresh session right after a slow MCP-laden
 	// boot) can lag behind a multi-line paste; pressing Enter on a fixed timer
 	// then submits only the fragment it had rendered — which is how an
 	// attachment prompt lost its text and kept just the image path.
-	if !s.confirmInput(ctx, name, prompt) {
-		tracef("Send id=%s WARNING: input did not reflect prompt before submit", s.id)
-	}
-	if err := s.tm.SendEnter(ctx, name); err != nil {
-		return err
+	var sendErr error
+	s.withPane(func() {
+		if err := s.tm.SendText(ctx, name, prompt); err != nil {
+			sendErr = err
+			return
+		}
+		if !s.confirmInput(ctx, name, prompt) {
+			tracef("Send id=%s WARNING: input did not reflect prompt before submit", s.id)
+		}
+		sendErr = s.tm.SendEnter(ctx, name)
+	})
+	if sendErr != nil {
+		return sendErr
 	}
 	// /usage and /cost paint an ephemeral overlay that never reaches the
 	// JSONL transcript, so the watcher can't see it. Scrape the pane out of
@@ -348,7 +378,7 @@ func (s *session) scrapeUsage(name string, announce bool) {
 	if text == "" {
 		tracef("usage no-overlay id=%s", s.id)
 		// Still try to dismiss in case an overlay is up but unrecognized.
-		_ = s.tm.SendKeys(ctx, name, "Escape")
+		s.withPane(func() { _ = s.tm.SendKeys(ctx, name, "Escape") })
 		return
 	}
 	if announce {
@@ -357,7 +387,7 @@ func (s *session) scrapeUsage(name string, announce bool) {
 	windows := parseUsageLimits(text)
 	s.emit(agent.Event{Type: agent.EventLimits, LimitText: text, LimitWindows: windows})
 	tracef("usage scraped id=%s windows=%d announce=%v", s.id, len(windows), announce)
-	_ = s.tm.SendKeys(ctx, name, "Escape")
+	s.withPane(func() { _ = s.tm.SendKeys(ctx, name, "Escape") })
 }
 
 // maybeScrapeUsage injects /usage on turn-end to refresh the account-usage
@@ -375,10 +405,15 @@ func (s *session) maybeScrapeUsage(name string) {
 	s.mu.Unlock()
 
 	ctx := context.Background()
-	if err := s.tm.SendText(ctx, name, "/usage"); err != nil {
-		return
-	}
-	if err := s.tm.SendEnter(ctx, name); err != nil {
+	var sendErr error
+	s.withPane(func() {
+		if err := s.tm.SendText(ctx, name, "/usage"); err != nil {
+			sendErr = err
+			return
+		}
+		sendErr = s.tm.SendEnter(ctx, name)
+	})
+	if sendErr != nil {
 		return
 	}
 	s.scrapeUsage(name, false)
@@ -592,11 +627,16 @@ func (s *session) ensureLaunched(ctx context.Context) error {
 			tracef("ensureLaunched id=%s relaunch-claude (pane was shell)", s.id)
 			// Relaunch claude --resume into the same pane.
 			line := shellJoin(append([]string{"claude"}, s.claudeArgs(true)...))
-			if err := s.tm.SendText(ctx, name, "unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN; exec "+line); err != nil {
-				return err
-			}
-			if err := s.tm.SendEnter(ctx, name); err != nil {
-				return err
+			var sendErr error
+			s.withPane(func() {
+				if err := s.tm.SendText(ctx, name, "unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN; exec "+line); err != nil {
+					sendErr = err
+					return
+				}
+				sendErr = s.tm.SendEnter(ctx, name)
+			})
+			if sendErr != nil {
+				return sendErr
 			}
 			s.waitReady(ctx)
 			tracef("ensureLaunched id=%s relaunch ready", s.id)
@@ -647,7 +687,7 @@ func (s *session) waitReady(ctx context.Context) {
 			// The first-run trust dialog blocks input; auto-accept it (the
 			// "Yes" option is preselected, so Enter confirms) and keep waiting.
 			if isTrustPrompt(pane) {
-				_ = s.tm.SendEnter(ctx, name)
+				s.withPane(func() { _ = s.tm.SendEnter(ctx, name) })
 				time.Sleep(time.Second)
 				continue
 			}
@@ -932,9 +972,25 @@ func (s *session) watch() {
 				// on screen.
 				switch p.kind {
 				case "permission":
-					// Route through OnPermission and block until the user decides.
-					tracef("watch permission id=%s title=%q", s.id, p.title)
-					s.handlePrompt(ctx, p)
+					// Surface the permission box through OnPermission on its own
+					// goroutine — like the question path — so the watcher keeps
+					// tailing the transcript and watching for a dead claude while
+					// the user decides, instead of freezing on the blocking
+					// OnPermission call. The answering guard launches exactly one
+					// handler per box: the box stays on screen until answered, so
+					// without it every poll would fire another OnPermission and
+					// enqueue a duplicate permission. Always hold off idle while a
+					// box is up — claude is blocked on us.
+					s.mu.Lock()
+					already := s.answering
+					if !already {
+						s.answering = true
+					}
+					s.mu.Unlock()
+					if !already {
+						tracef("watch permission id=%s title=%q", s.id, p.title)
+						go s.handlePrompt(context.Background(), p)
+					}
 					lastActivity = time.Now()
 					idleEmitted = false
 					continue
@@ -1075,28 +1131,37 @@ func (s *session) drainTranscript() []agent.Event {
 // at launch.
 func (s *session) SetModel(ctx context.Context, model string) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.spec.Model = model
-	has, err := s.tm.HasSession(ctx, s.tmuxName())
+	s.mu.Unlock()
+	name := s.tmuxName()
+	has, err := s.tm.HasSession(ctx, name)
 	if err != nil || !has {
 		return nil // applied via claudeArgs on next launch
 	}
-	if err := s.tm.SendText(ctx, s.tmuxName(), "/model "+model); err != nil {
-		return err
-	}
-	return s.tm.SendEnter(ctx, s.tmuxName())
+	// Drive the pane outside s.mu (lock order is paneMu→s.mu) and as one
+	// atomic sequence so the /model command can't interleave with a prompt.
+	var sendErr error
+	s.withPane(func() {
+		if err := s.tm.SendText(ctx, name, "/model "+model); err != nil {
+			sendErr = err
+			return
+		}
+		sendErr = s.tm.SendEnter(ctx, name)
+	})
+	return sendErr
 }
 
 // Abort interrupts the current turn by sending Escape — the interactive TUI's
 // stop key — leaving the conversation intact for the next prompt.
 func (s *session) Abort(ctx context.Context) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	has, err := s.tm.HasSession(ctx, s.tmuxName())
+	name := s.tmuxName()
+	has, err := s.tm.HasSession(ctx, name)
 	if err != nil || !has {
 		return nil
 	}
-	return s.tm.SendKeys(ctx, s.tmuxName(), "Escape")
+	var sendErr error
+	s.withPane(func() { sendErr = s.tm.SendKeys(ctx, name, "Escape") })
+	return sendErr
 }
 
 // Close stops watchers and tears down the tmux session. The on-disk transcript
