@@ -280,7 +280,7 @@ func (s *session) Send(ctx context.Context, prompt string) error {
 	// into a dialog that isn't a text field drops the input and Enter takes the
 	// default. Do this before the watcher starts so we don't race its own
 	// detect/answer path.
-	if pane, err := s.tm.Capture(ctx, name, tmux.CaptureOpts{}); err == nil {
+	if pane, err := s.capturePrompt(ctx, name); err == nil {
 		if p, ok := detectPrompt(pane); ok {
 			tracef("Send dialog-answer id=%s kind=%s sel=%q", s.id, p.kind, prompt)
 			s.answerDialogDirect(ctx, p, prompt)
@@ -964,7 +964,7 @@ func (s *session) watch() {
 			return
 		}
 
-		pane, err := s.tm.Capture(ctx, name, tmux.CaptureOpts{})
+		pane, err := s.capturePrompt(ctx, name)
 		if err == nil {
 			if p, ok := detectPrompt(pane); ok {
 				// Either kind means claude is blocked on us, so never let the
