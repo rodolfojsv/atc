@@ -1020,6 +1020,19 @@ func (s *session) watch() {
 						s.mu.Unlock()
 						if !already {
 							surfacedSig = sig
+							// The prose preceding a question is a text block in the
+							// same assistant transcript line as the AskUserQuestion
+							// tool_use, so by the time the picker is on the pane that
+							// line exists. Drain it now — synchronously, in the watcher
+							// goroutine so it can't race the loop's own offset — so the
+							// prose is emitted before handleQuestion appends the
+							// question entry. Otherwise it lands on the next poll's
+							// drain, i.e. after the user has already answered.
+							if evs := s.drainTranscript(); len(evs) > 0 {
+								for _, e := range evs {
+									s.emit(e)
+								}
+							}
 							tracef("watch question id=%s title=%q multi=%t", s.id, p.title, p.multiSelect)
 							go s.handleQuestion(context.Background(), p, cancel)
 						}
