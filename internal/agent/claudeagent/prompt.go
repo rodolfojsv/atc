@@ -56,10 +56,26 @@ type promptOption struct {
 }
 
 type promptInfo struct {
-	kind    string // "permission" | "question"
-	title   string
-	options []promptOption
+	kind        string // "permission" | "question"
+	title       string
+	options     []promptOption
+	multiSelect bool // a checkbox picker (toggle each choice with Space, submit with Enter)
 }
+
+// A multi-select AskUserQuestion is a checkbox frame: toggle each choice with
+// Space, submit the set with Enter — versus single-select, where Enter picks the
+// highlighted row. Two signals classify it, both chosen to avoid a false
+// positive from the multi-*question* tab bar (which also draws ☐/✔ for its
+// unanswered/submit tabs, but never on a numbered option line):
+//   - a checkbox glyph leading an actual option label ("1. ☐ Serif"), detected
+//     per-option so the tab bar can't trip it;
+//   - the "Space to …" toggle hint, which the single-select frame never shows.
+//
+// optionCheckboxGlyphs are the box states that mark such an option;
+// checkboxGlyphs additionally covers ✔/✓ for stripping a box off a label.
+var multiSelectHintMarkers = []string{"Space to", "space to", "SPACE to"}
+var optionCheckboxGlyphs = []string{"☐", "☒", "◻", "◼", "▢", "[ ]", "[x]", "[X]"}
+var checkboxGlyphs = append([]string{"✔", "✓"}, optionCheckboxGlyphs...)
 
 // pickerChromeMarkers are strings that only Claude's interactive select boxes
 // (permission prompts, AskUserQuestion pickers, the session-start menu) render —
@@ -102,6 +118,7 @@ func detectPrompt(pane string) (promptInfo, bool) {
 	var optLines []int // line index of each option, parallel to options
 	firstOpt := -1
 	cursorOnOption := false
+	optHadCheckbox := false // an option line carried a ☐/☒ box (multi-select)
 	for i, ln := range lines {
 		if m := promptOptionRe.FindStringSubmatch(ln); m != nil {
 			if firstOpt < 0 {
@@ -110,7 +127,14 @@ func detectPrompt(pane string) (promptInfo, bool) {
 			if m[1] != "" {
 				cursorOnOption = true
 			}
-			options = append(options, promptOption{label: strings.TrimSpace(m[3])})
+			raw := strings.TrimSpace(m[3])
+			for _, g := range optionCheckboxGlyphs {
+				if strings.HasPrefix(raw, g) {
+					optHadCheckbox = true
+					break
+				}
+			}
+			options = append(options, promptOption{label: stripCheckbox(raw)})
 			optLines = append(optLines, i)
 		}
 	}
@@ -158,7 +182,24 @@ func detectPrompt(pane string) (promptInfo, bool) {
 	if isPermission {
 		kind = "permission"
 	}
-	return promptInfo{kind: kind, title: title, options: options}, true
+	// A multi-select question is a checkbox frame; permissions are always
+	// single-select, so only a question can carry the multi flag. Signalled by a
+	// box glyph on an option line, or the Space-toggle hint.
+	multi := !isPermission && (optHadCheckbox || containsAny(pane, multiSelectHintMarkers))
+	return promptInfo{kind: kind, title: title, options: options, multiSelect: multi}, true
+}
+
+// stripCheckbox removes a leading checkbox glyph (and the space after it) from
+// a scraped option label, so a multi-select row like "1. ☐ Serif" yields the
+// bare "Serif" rather than a label polluted with the box state.
+func stripCheckbox(label string) string {
+	s := strings.TrimSpace(label)
+	for _, g := range checkboxGlyphs {
+		if strings.HasPrefix(s, g) {
+			return strings.TrimSpace(s[len(g):])
+		}
+	}
+	return s
 }
 
 // answerOptions are the labels (and their descriptions) surfaced to the user:
@@ -230,16 +271,22 @@ func (s *session) handlePrompt(ctx context.Context, p promptInfo) {
 // reply, then drives that reply into the on-screen picker and waits for it to
 // clear. It runs on its own goroutine (the watcher keeps tailing meanwhile) and
 // the caller sets the questioning guard so only one runs per box; this clears
-// it when the box is gone. A cancelled question (session closing) sends Escape.
+// it when the box is gone.
+//
+// cancel is closed by the watcher when the picker vanishes off-screen while we
+// were still waiting on the user (they cleared it by hand in tmux, or Claude
+// withdrew it). OnQuestion then returns ok=false; we don't press Escape unless a
+// box is actually still up, since Escape into a live turn would interrupt it.
 //
 // The reply itself arrives via a normal chat message: while a question is
 // pending the supervisor routes the user's next message to answerQuestion
 // (feeding OnQuestion's channel) instead of starting a new turn, so the answer
 // returned here is what to select.
-func (s *session) handleQuestion(ctx context.Context, p promptInfo) {
+func (s *session) handleQuestion(ctx context.Context, p promptInfo, cancel chan struct{}) {
 	defer func() {
 		s.mu.Lock()
 		s.questioning = false
+		s.questionCancel = nil
 		s.mu.Unlock()
 	}()
 
@@ -270,13 +317,20 @@ func (s *session) handleQuestion(ctx context.Context, p promptInfo) {
 			}
 		}
 	}
-	q := agent.Question{Prompt: p.title, Options: labels, OptionDetails: details, AllowFreeform: true}
-	tracef("question id=%s title=%q opts=%d", s.id, p.title, len(q.Options))
-	answer, ok := s.spec.OnQuestion(q)
+	q := agent.Question{Prompt: p.title, Options: labels, OptionDetails: details, AllowFreeform: true, MultiSelect: p.multiSelect}
+	tracef("question id=%s title=%q opts=%d multi=%t", s.id, p.title, len(q.Options), p.multiSelect)
+	answer, ok := s.spec.OnQuestion(q, cancel)
 
 	if !ok {
-		_ = s.tm.SendKeys(ctx, name, "Escape")
-		s.waitPromptCleared(ctx)
+		// Withdrawn or aborted. Only dismiss a box that's still up; if it
+		// already vanished (the user cleared it by hand, or Claude moved on)
+		// pressing Escape would interrupt the now-live turn.
+		if pane, err := s.tm.Capture(ctx, name, tmux.CaptureOpts{}); err == nil {
+			if _, up := detectPrompt(pane); up {
+				_ = s.tm.SendKeys(ctx, name, "Escape")
+				s.waitPromptCleared(ctx)
+			}
+		}
 		return
 	}
 	// Re-capture: the user may have taken a while, so drive the answer into the
@@ -287,7 +341,20 @@ func (s *session) handleQuestion(ctx context.Context, p promptInfo) {
 			cur = fresh
 		}
 	}
-	if i := optionIndexFor(answer, cur.options); i >= 0 {
+	if cur.multiSelect {
+		// Checkbox frame: toggle every chosen row with Space, then submit once
+		// with Enter. A freeform reply that matches no option falls back to the
+		// "Type something" hatch like the single-select path.
+		if idxs := optionIndicesFor(answer, cur.options); len(idxs) > 0 {
+			s.selectMulti(ctx, idxs)
+		} else if ti := indexMatching(cur.options, typeSomethingMarkers); ti >= 0 {
+			s.selectIndex(ctx, ti)
+			s.typeFreeform(ctx, answer)
+		} else {
+			_ = s.tm.SendText(ctx, name, answer)
+			_ = s.tm.SendEnter(ctx, name)
+		}
+	} else if i := optionIndexFor(answer, cur.options); i >= 0 {
 		// A real option (matched against the full on-screen list, so the index
 		// lines up even though we hid the meta-options from the user).
 		s.selectIndex(ctx, i)
@@ -416,6 +483,35 @@ func (s *session) selectIndex(ctx context.Context, target int) {
 	_ = s.tm.SendEnter(ctx, name)
 }
 
+// selectMulti toggles each target row of a multi-select checkbox picker with
+// Space, then submits the whole set with one Enter. Rows are visited in the
+// given order, navigating relative to the live cursor like selectIndex; toggles
+// assume every box starts unchecked (Claude renders a fresh picker that way).
+func (s *session) selectMulti(ctx context.Context, targets []int) {
+	if len(targets) == 0 {
+		return
+	}
+	name := s.tmuxName()
+	cur := 0
+	if pane, err := s.tm.Capture(ctx, name, tmux.CaptureOpts{}); err == nil {
+		if c := cursorOptionIndex(pane); c >= 0 {
+			cur = c
+		}
+	}
+	for _, t := range targets {
+		for cur < t {
+			_ = s.tm.SendKeys(ctx, name, "Down")
+			cur++
+		}
+		for cur > t {
+			_ = s.tm.SendKeys(ctx, name, "Up")
+			cur--
+		}
+		_ = s.tm.SendKeys(ctx, name, "Space")
+	}
+	_ = s.tm.SendEnter(ctx, name)
+}
+
 // cursorOptionIndex returns the 0-based position of the currently highlighted
 // option in the menu on screen (the option line carrying the selection cursor
 // glyph), or -1 if no cursor is visible.
@@ -456,6 +552,26 @@ func optionIndexFor(answer string, options []promptOption) int {
 		return n - 1
 	}
 	return indexMatching(options, []string{a})
+}
+
+// optionIndicesFor maps a multi-select answer to the option indices it names.
+// The whole answer is tried as one option first (so a single chosen label that
+// contains a comma still resolves); failing that it is split on newlines and
+// commas — the web picker joins chosen labels with newlines, a typed reply may
+// use either — and each piece resolved on its own. Duplicates drop, order kept.
+func optionIndicesFor(answer string, options []promptOption) []int {
+	if i := optionIndexFor(answer, options); i >= 0 {
+		return []int{i}
+	}
+	seen := map[int]bool{}
+	var out []int
+	for _, part := range strings.FieldsFunc(answer, func(r rune) bool { return r == '\n' || r == ',' }) {
+		if i := optionIndexFor(part, options); i >= 0 && !seen[i] {
+			seen[i] = true
+			out = append(out, i)
+		}
+	}
+	return out
 }
 
 // waitPromptCleared polls until the box is gone (or a deadline), so the watch

@@ -45,12 +45,15 @@ type Question struct {
 	Options       []string // suggested choices (may be empty)
 	OptionDetails []string // per-option descriptions, parallel to Options (entries may be ""); nil if none
 	AllowFreeform bool     // whether a free-text answer is allowed
+	MultiSelect   bool     // the user may pick several options; the answer is the chosen set
 }
 
-// QuestionFunc blocks until the user answers. ok=false means the answer
-// was cancelled (e.g. the session was aborted); the backend should treat
-// it as no answer.
-type QuestionFunc func(q Question) (answer string, ok bool)
+// QuestionFunc blocks until the user answers, the agent withdraws the
+// question (cancel is closed — e.g. the on-screen picker vanished because
+// the user cleared it by hand), or the session is aborted. ok=false means
+// no answer; the backend should treat it as cancelled. cancel may be nil
+// for backends that never withdraw a question.
+type QuestionFunc func(q Question, cancel <-chan struct{}) (answer string, ok bool)
 
 type EventType int
 
@@ -214,6 +217,18 @@ type Backend interface {
 	// ResumeSession reattaches to spec.SessionID.
 	ResumeSession(ctx context.Context, spec SessionSpec) (Session, error)
 	Stop() error
+}
+
+// ResumeReady is an optional Session capability used on atc restart.
+// Backends that keep a live session across restarts (e.g. the Claude
+// tmux backend) implement it so the supervisor restores working/done
+// from the real session state instead of assuming a finished turn.
+type ResumeReady interface {
+	// Reattach probes the live session, starts streaming any
+	// in-progress turn via OnEvent, and reports whether a turn is
+	// running right now. A working session keeps streaming until it
+	// goes quiet, at which point it emits EventIdle as usual.
+	Reattach(ctx context.Context) (working bool)
 }
 
 // ToolSummary turns a tool invocation into a short human line like

@@ -264,6 +264,86 @@ func TestDetectProseIsNotAPrompt(t *testing.T) {
 	}
 }
 
+// A multiSelect AskUserQuestion renders as a checkbox frame: each option line
+// carries a box glyph and the hint mentions Space to toggle. Detection must flag
+// it multiSelect and still strip the box off the labels.
+func TestDetectMultiSelectQuestion(t *testing.T) {
+	pane := strings.Join([]string{
+		"¿Qué grupos quieres curar primero?",
+		"",
+		"❯ 1. ☒ Serif elegantes",
+		"     Cormorant, Playfair.",
+		"  2. ☐ Scripts / caligráficas",
+		"  3. ☐ Sans limpias",
+		"  4. Type something",
+		"",
+		"Space to select · Enter to confirm · Esc to cancel",
+	}, "\n")
+
+	p, ok := detectPrompt(pane)
+	if !ok {
+		t.Fatal("expected the multi-select question to be detected")
+	}
+	if !p.multiSelect {
+		t.Error("multiSelect should be true for a checkbox frame")
+	}
+	if p.options[0].label != "Serif elegantes" || p.options[1].label != "Scripts / caligráficas" {
+		t.Errorf("box glyph not stripped from labels: %+v", p.options)
+	}
+}
+
+// The multi-*question* tabbed form (single-select per tab) draws ☐/✔ in its tab
+// bar but never on a numbered option line — it must NOT be flagged multiSelect.
+func TestTabbedQuestionIsNotMultiSelect(t *testing.T) {
+	pane := strings.Join([]string{
+		"←  ☐ Color  ☐ Size  ✔ Submit  →",
+		"",
+		"What is your favorite color?",
+		"",
+		"❯ 1. Red",
+		"  2. Blue",
+		"",
+		"Enter to select · Tab/Arrow keys to navigate · Esc to cancel",
+	}, "\n")
+	p, ok := detectPrompt(pane)
+	if !ok {
+		t.Fatal("expected detection")
+	}
+	if p.multiSelect {
+		t.Error("tab-bar ☐/✔ must not be read as a multi-select picker")
+	}
+}
+
+// optionIndicesFor resolves a multi-select answer into the chosen rows: the
+// whole string first (a single label, comma and all), then split on newlines or
+// commas, de-duplicated and order-preserved.
+func TestOptionIndicesFor(t *testing.T) {
+	opts := []promptOption{{label: "Serif elegantes"}, {label: "Scripts / caligráficas"}, {label: "Sans limpias"}}
+	cases := []struct {
+		answer string
+		want   []int
+	}{
+		{"Serif elegantes\nSans limpias", []int{0, 2}},
+		{"1, 3", []int{0, 2}},
+		{"Scripts / caligráficas", []int{1}}, // whole-string match wins despite the comma
+		{"2\n2\nSans limpias", []int{1, 2}},  // duplicates dropped
+		{"nothing here", nil},
+	}
+	for _, c := range cases {
+		got := optionIndicesFor(c.answer, opts)
+		if len(got) != len(c.want) {
+			t.Errorf("optionIndicesFor(%q) = %v, want %v", c.answer, got, c.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Errorf("optionIndicesFor(%q) = %v, want %v", c.answer, got, c.want)
+				break
+			}
+		}
+	}
+}
+
 func TestIndexMatchingCaseInsensitive(t *testing.T) {
 	opts := []promptOption{{label: "Yes"}, {label: "No, and tell Claude what to do differently"}}
 	if i := indexMatching(opts, yesMarkers); i != 0 {

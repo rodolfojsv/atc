@@ -22,7 +22,7 @@ func TestQuestionAnsweredByNextPrompt(t *testing.T) {
 
 	answer := make(chan string, 1)
 	go func() {
-		ans, ok := qf(agent.Question{Prompt: "Tabs or spaces?", Options: []string{"Tabs", "Spaces"}})
+		ans, ok := qf(agent.Question{Prompt: "Tabs or spaces?", Options: []string{"Tabs", "Spaces"}}, nil)
 		if !ok {
 			t.Errorf("question reported cancelled")
 		}
@@ -68,7 +68,7 @@ func TestQuestionCancelledByAbort(t *testing.T) {
 
 	done := make(chan bool, 1)
 	go func() {
-		_, ok := qf(agent.Question{Prompt: "Proceed?"})
+		_, ok := qf(agent.Question{Prompt: "Proceed?"}, nil)
 		done <- ok
 	}()
 	deadline := time.After(2 * time.Second)
@@ -87,6 +87,44 @@ func TestQuestionCancelledByAbort(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("abort did not unblock the question")
+	}
+}
+
+// When the agent withdraws a question (its on-screen picker vanished — e.g. the
+// user cleared it by hand in tmux), closing the cancel channel must unblock the
+// handler with ok=false and clear the pending state, so the next message starts
+// a normal turn instead of being eaten as an answer.
+func TestQuestionWithdrawnByAgent(t *testing.T) {
+	s := New(testConfig(t), bus.New())
+	ag := &fakeAgent{}
+	sess := &Session{Name: "x", Dir: t.TempDir(), Preset: "default", status: StatusWorking, ag: ag}
+	qf := s.questionFunc(sess)
+
+	cancel := make(chan struct{})
+	done := make(chan bool, 1)
+	go func() {
+		_, ok := qf(agent.Question{Prompt: "Pick some?", Options: []string{"A", "B"}, MultiSelect: true}, cancel)
+		done <- ok
+	}()
+	deadline := time.After(2 * time.Second)
+	for !sess.HasQuestion() {
+		select {
+		case <-deadline:
+			t.Fatal("question never pending")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	close(cancel) // the picker vanished
+	select {
+	case ok := <-done:
+		if ok {
+			t.Fatal("expected cancelled (ok=false) when withdrawn")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("withdraw did not unblock the question")
+	}
+	if sess.HasQuestion() {
+		t.Fatal("question still pending after withdraw")
 	}
 }
 
