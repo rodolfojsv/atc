@@ -857,6 +857,12 @@ func (s *Supervisor) Prompt(sess *Session, text string) error {
 		s.poke()
 		return nil
 	}
+	// A question just resolved but the UI chip lingered and the same answer was
+	// submitted again: drop the echo instead of firing it as a stray new prompt.
+	if sess.isDuplicateAnswer(text) {
+		strace("Prompt->swallow-duplicate-answer sess=%q (echo of just-answered question, dropped)", sess.Name)
+		return nil
+	}
 	ag := sess.agentSession()
 	if ag == nil {
 		strace("Prompt->ag-nil sess=%q (session is still starting)", sess.Name)

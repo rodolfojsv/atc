@@ -15,9 +15,12 @@
 //     own JSONL transcript (~/.claude/projects/<dir>/<id>.jsonl) — the same
 //     file History() replays — so we reuse the proven parser instead of
 //     scraping the TUI for content.
-//   - `tmux capture-pane` is used only to detect turn-end (when claude stops
-//     "working" and is idle), and `pane_current_command` to detect a claude
-//     that died inside a still-living tmux session (layer-2 recovery).
+//   - Turn state (working/idle) is pushed by injected Claude Code lifecycle
+//     hooks (UserPromptSubmit/Stop via --settings) into a per-session state
+//     file the watcher reads — no polling. `tmux capture-pane` is used only
+//     while a turn is live, to read and drive the interactive permission /
+//     question pickers, and `pane_current_command` to detect a claude that
+//     died inside a still-living tmux session (layer-2 recovery).
 //
 // Permission model: presets map onto Claude Code's --permission-mode at launch
 // ("read-only" → plan, "allow-all" → bypassPermissions, otherwise acceptEdits),
@@ -79,7 +82,9 @@ const (
 	paneHeight   = 50
 	historyLimit = "50000" // tmux scrollback lines
 
-	pollInterval = 300 * time.Millisecond  // how often we tail jsonl + capture pane
+	pollInterval = 300 * time.Millisecond  // active cadence: tail jsonl + capture pane while a turn runs
+	idlePollMax  = 2 * time.Second         // backed-off cadence once a turn has gone quiet (saves tmux execs)
+	idleRampStep = 300 * time.Millisecond  // how much each idle poll lengthens the interval toward idlePollMax
 	quiescence   = 1500 * time.Millisecond // idle = no new transcript for this long while not "working"
 	idDiscovery  = 8 * time.Second         // how long to wait for the session jsonl to appear
 	readyTimeout = 30 * time.Second        // how long to wait for the TUI to accept input after launch
@@ -134,8 +139,7 @@ func (b *Backend) NewSession(_ context.Context, spec agent.SessionSpec) (agent.S
 	if err != nil {
 		return nil, err
 	}
-	id := uuid.NewString()
-	return &session{id: id, claudeID: id, spec: spec, tm: tm}, nil
+	return newSession(spec, tm, false), nil
 }
 
 func (b *Backend) ResumeSession(_ context.Context, spec agent.SessionSpec) (agent.Session, error) {
@@ -143,7 +147,7 @@ func (b *Backend) ResumeSession(_ context.Context, spec agent.SessionSpec) (agen
 	if err != nil {
 		return nil, err
 	}
-	return &session{id: spec.SessionID, claudeID: spec.SessionID, spec: spec, tm: tm, started: true}, nil
+	return newSession(spec, tm, true), nil
 }
 
 // Reattach implements agent.ResumeReady. On atc restart the claude TUI is
@@ -183,8 +187,18 @@ type session struct {
 	questioning    bool          // a question box is being surfaced/answered (one handler at a time)
 	questionCancel chan struct{} // closed to withdraw the in-flight question when its picker vanishes
 	offset         int64         // byte offset into the transcript already emitted (monotonic)
+	wake           chan struct{} // nudges the watcher back to fast polling when a turn starts (buffered 1)
 
 	lastUsageScrape time.Time // throttles the automatic /usage refresh
+}
+
+// newSession builds a session with its channels initialized.
+func newSession(spec agent.SessionSpec, tm *tmux.Client, started bool) *session {
+	id := spec.SessionID
+	if id == "" {
+		id = uuid.NewString()
+	}
+	return &session{id: id, claudeID: id, spec: spec, tm: tm, started: started, wake: make(chan struct{}, 1)}
 }
 
 func (s *session) ID() string { return s.id }
@@ -205,6 +219,20 @@ func (s *session) isClosed() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.closed
+}
+
+// nudge snaps the watcher back to fast polling at the start of a turn so a
+// backed-off idle interval doesn't delay the first streamed output. Non-blocking
+// (the wake channel is buffered 1); a missed signal just means the next poll
+// catches the new transcript line and resets the cadence itself.
+func (s *session) nudge() {
+	if s.wake == nil {
+		return
+	}
+	select {
+	case s.wake <- struct{}{}:
+	default:
+	}
 }
 
 // Send submits a prompt. The session-long watcher (started here on first use)
@@ -234,10 +262,15 @@ func (s *session) Send(ctx context.Context, prompt string) error {
 			tracef("Send dialog-answer id=%s kind=%s sel=%q", s.id, p.kind, prompt)
 			s.answerDialogDirect(ctx, p, prompt)
 			s.startWatch()
+			s.nudge()
 			return nil
 		}
 	}
 	s.startWatch()
+	// Prime "working" so the watcher treats the turn as live immediately, before
+	// the UserPromptSubmit hook lands (it will overwrite with the same value).
+	s.writeState("working")
+	s.nudge()
 	tracef("Send id=%s claudeID=%s promptLen=%d onEvent=%t path=%q",
 		s.id, s.claudeID, len(prompt), s.spec.OnEvent != nil, s.transcriptPath())
 	if err := s.tm.SendText(ctx, name, prompt); err != nil {
@@ -531,6 +564,13 @@ func (s *session) startWatch() {
 	s.offset = transcriptSize(s.transcriptPath())
 	off := s.offset
 	s.mu.Unlock()
+	// Drop any state file left by a previous run so the watcher starts unlatched
+	// and uses the legacy heuristic until a fresh Stop hook proves itself — a
+	// stale "idle" here would otherwise emit a false turn-end over a reattached
+	// in-flight turn. Guarded by s.watching, so this clears only at session start.
+	if p := s.statePath(); p != "" {
+		_ = os.Remove(p)
+	}
 	tracef("watch start id=%s off=%d path=%q", s.id, off, s.transcriptPath())
 	go s.watch()
 }
@@ -640,6 +680,11 @@ func (s *session) claudeArgs(resume bool) []string {
 	default:
 		args = append(args, "--permission-mode", "acceptEdits")
 	}
+	// Stamp turn state via injected lifecycle hooks so the watcher reads a file
+	// instead of polling capture-pane (see the hook-driven state section).
+	if js := s.hookSettingsJSON(); js != "" {
+		args = append(args, "--settings", js)
+	}
 	// Inject atc-config agents inline so they need not live in the repo's
 	// .claude/agents, then activate the tagged one as the primary persona.
 	if js := agentsJSON(s.spec.Agents); js != "" {
@@ -681,6 +726,95 @@ func agentsJSON(defs []agent.AgentDef) string {
 	return string(b)
 }
 
+// --- Hook-driven state -----------------------------------------------------
+//
+// Rather than scrape `capture-pane` every poll to guess whether a turn is
+// running, we inject two Claude Code lifecycle hooks (via --settings) that
+// stamp the turn state into a per-session file the moment it changes:
+//   - UserPromptSubmit -> "working" (a turn just started)
+//   - Stop             -> "idle"    (the turn finished; Stop fires only on full
+//                          turn completion, never for a pending permission box
+//                          or AskUserQuestion — verified against the hooks docs)
+// The watcher reads that file (a cheap stat+read, no subprocess) and only does
+// the expensive pane work while a turn is actually in flight. An idle board
+// therefore spawns no tmux processes at all. capture-pane is still used, but
+// only while "working", to read and drive the interactive permission/question
+// pickers (the hook says *when* a box is up, not its rendered options).
+
+// statePath is the per-session file the hooks stamp the turn state into.
+func (s *session) statePath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".atc", "state", s.id+".state")
+}
+
+// writeState records the turn state directly (used to prime "working" the
+// instant we submit a prompt, closing the gap before UserPromptSubmit fires).
+func (s *session) writeState(v string) {
+	p := s.statePath()
+	if p == "" {
+		return
+	}
+	_ = os.MkdirAll(filepath.Dir(p), 0o755)
+	_ = os.WriteFile(p, []byte(v), 0o644)
+}
+
+// readHookState returns the stamped turn state and whether the file exists yet.
+func (s *session) readHookState() (string, bool) {
+	p := s.statePath()
+	if p == "" {
+		return "", false
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return "", false
+	}
+	return strings.TrimSpace(string(b)), true
+}
+
+// hookSettingsJSON builds the --settings payload that stamps turn state into the
+// session's state file. The commands are plain POSIX shell redirects (the tmux
+// backend always runs under a Unix shell); they merge additively with whatever
+// hooks the user's own settings define. Returns "" if the state path is
+// unavailable, so launch falls back cleanly to the legacy heuristic.
+func (s *session) hookSettingsJSON() string {
+	p := s.statePath()
+	if p == "" {
+		return ""
+	}
+	_ = os.MkdirAll(filepath.Dir(p), 0o755)
+	type cmd struct {
+		Type    string `json:"type"`
+		Command string `json:"command"`
+	}
+	type matcher struct {
+		Hooks []cmd `json:"hooks"`
+	}
+	write := func(state string) []matcher {
+		// %s-format so a single-quote in the (uuid-derived) path can't break out.
+		return []matcher{{Hooks: []cmd{{Type: "command", Command: fmt.Sprintf("printf %%s %s > %s", state, shellQuote(p))}}}}
+	}
+	settings := map[string]any{
+		"hooks": map[string]any{
+			"UserPromptSubmit": write("working"),
+			"Stop":             write("idle"),
+		},
+	}
+	b, err := json.Marshal(settings)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+// shellQuote wraps s in single quotes for a POSIX shell, escaping any embedded
+// single quote. Used so the hook redirect target is a safe shell token.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
 // discoverClaudeID waits for the session's own jsonl (named by --session-id)
 // to appear so the first tail/replay reads from the right file. claudeID is
 // seeded to s.id in the constructor and is never reassigned to another file:
@@ -709,12 +843,27 @@ func (s *session) discoverClaudeID() {
 func (s *session) watch() {
 	name := s.tmuxName()
 	lastActivity := time.Now()
-	idleEmitted := true // armed only after the first activity, so no idle before turn 1
+	idleEmitted := true  // armed only after the first activity, so no idle before turn 1
+	hooksActive := false // latches once the Stop hook proves it's firing for this session
+	surfacedSig := ""    // signature of the question box already surfaced; suppresses re-surfacing the same box
+	interval := pollInterval
 	for {
 		if s.isClosed() {
 			return
 		}
-		time.Sleep(pollInterval)
+		// Adaptive cadence: poll fast while a turn is live, then ramp toward
+		// idlePollMax once it's gone quiet. Each live session otherwise spawns
+		// ~2 tmux processes every poll forever; backing off when idle cuts the
+		// steady-state exec rate ~5x. A Send (or other turn start) closes over
+		// the wake channel to snap us back to fast polling without waiting out
+		// a long idle interval.
+		select {
+		case <-time.After(interval):
+		case <-s.wake:
+			interval = pollInterval
+			lastActivity = time.Now()
+			idleEmitted = false
+		}
 		ctx := context.Background()
 
 		// Emit any new transcript lines (assistant text, tool calls, usage).
@@ -724,6 +873,44 @@ func (s *session) watch() {
 			}
 			lastActivity = time.Now()
 			idleEmitted = false
+			interval = pollInterval
+		}
+
+		// Hook-driven turn state. hooksActive latches once we observe an "idle"
+		// stamped by the Stop hook (only a hook writes "idle"; Send and
+		// UserPromptSubmit write "working"). Until it latches — the first turn, an
+		// older claude that ignores --settings hooks, or a freshly resumed session
+		// — we fall through to the legacy capture-pane heuristic so nothing
+		// regresses.
+		hookState, hookPresent := s.readHookState()
+		if hookPresent && hookState == "idle" {
+			hooksActive = true
+		}
+		if hooksActive && hookState != "working" {
+			// Hooks report no turn in flight. Skip the death check and pane scrape
+			// entirely — an idle board spawns zero tmux processes — and emit
+			// EventIdle once on the working->idle edge. A new Send re-primes
+			// "working" and wakes us, so responsiveness is unaffected.
+			if !idleEmitted {
+				tracef("watch idle(hook) id=%s", s.id)
+				s.emit(agent.Event{Type: agent.EventIdle})
+				idleEmitted = true
+				go s.maybeScrapeUsage(name)
+			}
+			if interval < idlePollMax {
+				interval += idleRampStep
+				if interval > idlePollMax {
+					interval = idlePollMax
+				}
+			}
+			continue
+		}
+		if hooksActive {
+			// state == "working": a turn is live (this also covers a pending
+			// permission box or AskUserQuestion — Stop doesn't fire for those, so
+			// the state stays "working" and the pane scrape below catches them).
+			idleEmitted = false
+			interval = pollInterval
 		}
 
 		// If claude died inside the session, surface it and stop; the next
@@ -755,22 +942,31 @@ func (s *session) watch() {
 					// Surface the question exactly once per box via OnQuestion
 					// (frames it + sets the session "waiting"), then drive the
 					// reply into the picker — all on a background goroutine so the
-					// watcher keeps tailing. The questioning guard means we never
-					// re-fire the same box every poll (the bug that made one ask
-					// become an endless loop of chip prompts); we just keep
-					// suppressing idle until the box clears.
-					s.mu.Lock()
-					already := s.questioning
-					var cancel chan struct{}
-					if !already && s.spec.OnQuestion != nil {
-						s.questioning = true
-						cancel = make(chan struct{})
-						s.questionCancel = cancel
-					}
-					s.mu.Unlock()
-					if !already && s.spec.OnQuestion != nil {
-						tracef("watch question id=%s title=%q multi=%t", s.id, p.title, p.multiSelect)
-						go s.handleQuestion(context.Background(), p, cancel)
+					// watcher keeps tailing. Two guards keep one ask from becoming a
+					// flood of repeated chip prompts: the questioning flag suppresses
+					// re-firing while the handler is in flight, and surfacedSig
+					// suppresses re-firing the *same* box after it's been answered —
+					// a freeform reply that leaves the identical question on screen
+					// (Claude re-renders the same tab) would otherwise bounce back on
+					// every answer. surfacedSig is cleared only when the box actually
+					// clears (the no-box branch below), so a genuinely new ask — or
+					// the same one after it's gone away once — still surfaces.
+					sig := questionSig(p)
+					if s.spec.OnQuestion != nil && sig != surfacedSig {
+						s.mu.Lock()
+						already := s.questioning
+						var cancel chan struct{}
+						if !already {
+							s.questioning = true
+							cancel = make(chan struct{})
+							s.questionCancel = cancel
+						}
+						s.mu.Unlock()
+						if !already {
+							surfacedSig = sig
+							tracef("watch question id=%s title=%q multi=%t", s.id, p.title, p.multiSelect)
+							go s.handleQuestion(context.Background(), p, cancel)
+						}
 					}
 					if s.spec.OnQuestion != nil {
 						// Blocked on the user: hold off idle/done entirely.
@@ -778,10 +974,13 @@ func (s *session) watch() {
 					}
 				}
 			} else if err == nil {
-				// No box on screen. If a question handler is still waiting on the
+				// No box on screen: the picker cleared, so re-arm surfacing — the
+				// same question may legitimately ask again later (and a new one
+				// always differs). If a question handler is still waiting on the
 				// user, the picker vanished (they cleared it by hand in tmux, or
 				// claude withdrew it) — withdraw the question so the user's input
 				// stops being routed as an answer and starts a fresh turn again.
+				surfacedSig = ""
 				s.mu.Lock()
 				cancel := s.questionCancel
 				if s.questioning && cancel != nil {
@@ -797,22 +996,35 @@ func (s *session) watch() {
 			}
 		}
 
-		// Still working: keep the idle timer pushed forward.
+		// Still working: keep the idle timer pushed forward and poll fast.
 		if err == nil && isWorking(pane) {
 			lastActivity = time.Now()
 			idleEmitted = false
+			interval = pollInterval
 			continue
 		}
 
 		// Quiet and not working: emit one EventIdle per quiet period. The
 		// watcher keeps running, so any late tail re-arms and is still emitted.
-		if !idleEmitted && time.Since(lastActivity) > quiescence {
+		// Skipped once hooks are proven — the Stop hook is the authoritative,
+		// exact turn-end signal then, so the heuristic must not double-fire.
+		if !hooksActive && !idleEmitted && time.Since(lastActivity) > quiescence {
 			tracef("watch idle id=%s", s.id)
 			s.emit(agent.Event{Type: agent.EventIdle})
 			idleEmitted = true
 			// Turn just went quiet — a safe moment to refresh the account-usage
 			// badge (throttled), since no overlay would collide with a turn.
 			go s.maybeScrapeUsage(name)
+		}
+
+		// Once the turn is quiet, lengthen the interval one step per poll toward
+		// idlePollMax. New output (drainTranscript), a Send wake, or detected
+		// work all snap it straight back to pollInterval above.
+		if idleEmitted && interval < idlePollMax {
+			interval += idleRampStep
+			if interval > idlePollMax {
+				interval = idlePollMax
+			}
 		}
 	}
 }
@@ -894,6 +1106,9 @@ func (s *session) Close() error {
 	s.closed = true
 	s.watching = false
 	s.mu.Unlock()
+	if p := s.statePath(); p != "" {
+		_ = os.Remove(p)
+	}
 	return s.tm.KillSession(context.Background(), s.tmuxName())
 }
 

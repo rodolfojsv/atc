@@ -189,6 +189,18 @@ func detectPrompt(pane string) (promptInfo, bool) {
 	return promptInfo{kind: kind, title: title, options: options, multiSelect: multi}, true
 }
 
+// questionSig is a stable identity for a question box — its title plus the
+// labels of every option — used to tell whether a freshly captured picker is
+// the same box already surfaced (suppress) or a different/advanced one (surface).
+func questionSig(p promptInfo) string {
+	parts := make([]string, 0, len(p.options)+1)
+	parts = append(parts, p.title)
+	for _, o := range p.options {
+		parts = append(parts, o.label)
+	}
+	return strings.Join(parts, "\x1f")
+}
+
 // stripCheckbox removes a leading checkbox glyph (and the space after it) from
 // a scraped option label, so a multi-select row like "1. ☐ Serif" yields the
 // bare "Serif" rather than a label polluted with the box state.

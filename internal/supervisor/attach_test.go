@@ -59,6 +59,47 @@ func TestQuestionAnsweredByNextPrompt(t *testing.T) {
 	}
 }
 
+// After a question resolves, an immediate re-submit of the identical answer
+// (the UI chip lingered and got clicked again) must be swallowed, not fired off
+// to the backend as a stray new prompt. A different message still goes through.
+func TestDuplicateAnswerSwallowed(t *testing.T) {
+	s := New(testConfig(t), bus.New())
+	ag := &fakeAgent{}
+	sess := &Session{Name: "x", Dir: t.TempDir(), Preset: "default", status: StatusWorking, ag: ag}
+	qf := s.questionFunc(sess)
+
+	go qf(agent.Question{Prompt: "Remove it?", Options: []string{"Yes", "No"}}, nil)
+	deadline := time.After(2 * time.Second)
+	for !sess.HasQuestion() {
+		select {
+		case <-deadline:
+			t.Fatal("question never pending")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	// Answer the question.
+	if err := s.Prompt(sess, "Yes"); err != nil {
+		t.Fatal(err)
+	}
+	if ag.sentText != "" {
+		t.Fatalf("answer leaked to backend: %q", ag.sentText)
+	}
+	// Immediate duplicate of the same answer: swallowed, not sent.
+	if err := s.Prompt(sess, "Yes"); err != nil {
+		t.Fatal(err)
+	}
+	if ag.sentText != "" {
+		t.Fatalf("duplicate answer leaked to backend as a prompt: %q", ag.sentText)
+	}
+	// A genuinely different message after the question still sends.
+	if err := s.Prompt(sess, "now do something else"); err != nil {
+		t.Fatal(err)
+	}
+	if ag.sentText != "now do something else" {
+		t.Fatalf("real follow-up prompt was dropped: sentText=%q", ag.sentText)
+	}
+}
+
 // Aborting a session unblocks a waiting question with ok=false.
 func TestQuestionCancelledByAbort(t *testing.T) {
 	s := New(testConfig(t), bus.New())
