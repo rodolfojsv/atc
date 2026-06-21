@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -149,6 +150,43 @@ func (m *Model) sessionFiles() []string {
 	if dir == m.fileListDir && time.Since(m.fileListAt) < fileCacheTTL {
 		return m.fileList
 	}
+	files := gitFiles(dir)
+	if files == nil {
+		files = fsWalkFiles(dir)
+	}
+	m.fileList, m.fileListDir, m.fileListAt = files, dir, time.Now()
+	return files
+}
+
+// gitFiles lists the repo's tracked and untracked-but-not-ignored files
+// (forward-slash relative paths), or nil if dir isn't a git work tree or
+// git is unavailable. --exclude-standard applies .gitignore, .git/info/
+// exclude, and the user's global excludes — keeping build artifacts like
+// *.o out of the "@" picker.
+func gitFiles(dir string) []string {
+	cmd := exec.Command("git", "-C", dir, "ls-files",
+		"--cached", "--others", "--exclude-standard", "-z")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+	var files []string
+	for _, p := range strings.Split(strings.TrimRight(string(out), "\x00"), "\x00") {
+		if p == "" {
+			continue
+		}
+		files = append(files, p)
+		if len(files) >= maxFileWalk {
+			break
+		}
+	}
+	return files
+}
+
+// fsWalkFiles walks dir, skipping heavy/uninteresting directories and
+// capping the total, returning forward-slash relative paths. Fallback
+// for when dir isn't a git work tree.
+func fsWalkFiles(dir string) []string {
 	skip := map[string]bool{
 		".git": true, "node_modules": true, "vendor": true, "dist": true,
 		"build": true, "target": true, ".atc-worktrees": true, "__pycache__": true,
@@ -174,7 +212,6 @@ func (m *Model) sessionFiles() []string {
 		}
 		return nil
 	})
-	m.fileList, m.fileListDir, m.fileListAt = files, dir, time.Now()
 	return files
 }
 
