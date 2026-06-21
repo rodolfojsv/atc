@@ -132,19 +132,20 @@ func (s *Supervisor) Backends() []string {
 	return names
 }
 
-// PreferredBackend is what a new-session form should default to: the
-// last backend the user actually launched, else the configured default,
-// else the built-in default. Lets the choice stick across restarts
-// without editing config.
+// PreferredBackend is what a new-session form should default to. An
+// explicit defaultBackend in config wins so the user's stated choice is
+// always honored across restarts. Absent that, it falls back to the last
+// backend the user actually launched (so the choice sticks without
+// editing config), then the built-in default.
 func (s *Supervisor) PreferredBackend() string {
+	if _, ok := s.backends[s.cfg.DefaultBackend]; ok {
+		return s.cfg.DefaultBackend
+	}
 	s.prefsMu.Lock()
 	last := s.prefs.LastBackend
 	s.prefsMu.Unlock()
 	if _, ok := s.backends[last]; ok {
 		return last
-	}
-	if _, ok := s.backends[s.cfg.DefaultBackend]; ok {
-		return s.cfg.DefaultBackend
 	}
 	return DefaultBackend
 }
