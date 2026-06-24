@@ -215,11 +215,16 @@ type boardGroup struct {
 // alphabetically with Uncategorized last. Order within a group preserves
 // the supervisor's session order.
 func groupBoard(sessions []*supervisor.Session) []boardGroup {
+	var reminders []*supervisor.Session
 	var pinned []*supervisor.Session
 	byCat := map[string][]*supervisor.Session{}
 	var cats []string
 	for _, sess := range sessions {
 		v := sess.View()
+		if isReminder(v) {
+			reminders = append(reminders, sess)
+			continue
+		}
 		if v.Pinned {
 			pinned = append(pinned, sess)
 			continue
@@ -236,6 +241,9 @@ func groupBoard(sessions []*supervisor.Session) []boardGroup {
 		return cats[i] < cats[j]
 	})
 	var groups []boardGroup
+	if len(reminders) > 0 {
+		groups = append(groups, boardGroup{title: "REMINDERS", sessions: reminders})
+	}
 	if len(pinned) > 0 {
 		groups = append(groups, boardGroup{title: "PINNED", sessions: pinned})
 	}
@@ -259,7 +267,7 @@ func (m *Model) boardSessions() []*supervisor.Session {
 	out := make([]*supervisor.Session, 0, len(all))
 	for _, sess := range all {
 		v := sess.View()
-		if v.ScheduleName != "" && isSettled(v.Status) {
+		if v.ScheduleName != "" && isSettled(v.Status) && v.Acknowledged {
 			continue
 		}
 		out = append(out, sess)
@@ -269,6 +277,13 @@ func (m *Model) boardSessions() []*supervisor.Session {
 
 func isSettled(st supervisor.Status) bool {
 	return st == supervisor.StatusDone || st == supervisor.StatusError || st == supervisor.StatusClosed
+}
+
+// isReminder reports whether a session is a finished scheduled run the
+// user hasn't dismissed yet — these sit in the board's REMINDERS band
+// until acknowledged so a recurring reminder can't slip by unseen.
+func isReminder(v supervisor.SessionView) bool {
+	return v.ScheduleName != "" && isSettled(v.Status) && !v.Acknowledged
 }
 
 // ordered is the board's sessions flattened in display order, so the
@@ -419,6 +434,11 @@ func (m *Model) updateBoard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			} else {
 				m.flash = sess.Name + ": unpinned"
 			}
+		}
+	case "D":
+		if sess := m.selected(); sess != nil && isReminder(sess.View()) {
+			m.sup.SetAcknowledged(sess, true)
+			m.flash = sess.Name + ": dismissed"
 		}
 	case "c":
 		if sess := m.selected(); sess != nil {
@@ -626,8 +646,13 @@ func (m *Model) viewBoard() string {
 		}
 	}
 	footerBuf.WriteString(footer + "\n")
-	footerBuf.WriteString("\n" + keybar(
-		"j/k·gg·G", "move", "enter", "attach", "n", "new", "a", "approve", "p", "pin", "c", "category", "r", "rename", "d", "diff", "e", "export", "s", "schedules", "A", "auto⚡", "x", "abort", "K", "kill", "q", "quit"))
+	keys := []string{"j/k·gg·G", "move", "enter", "attach", "n", "new", "a", "approve", "p", "pin", "c", "category", "r", "rename", "d", "diff", "e", "export", "s", "schedules", "A", "auto⚡", "x", "abort", "K", "kill", "q", "quit"}
+	if sess := m.selected(); sess != nil && isReminder(sess.View()) {
+		// Surface the dismiss key only when a reminder is selected, since
+		// that's the only time it does anything.
+		keys = append([]string{"D", "dismiss"}, keys...)
+	}
+	footerBuf.WriteString("\n" + keybar(keys...))
 	footerStr := footerBuf.String()
 
 	groups := groupBoard(m.boardSessions())

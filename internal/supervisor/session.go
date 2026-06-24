@@ -167,6 +167,13 @@ type Session struct {
 	pinned   bool
 	category string
 
+	// acknowledged is set when the user dismisses a finished scheduled
+	// run. Until then a settled schedule-launched session stays on the
+	// board (in the REMINDERS band) so a daily reminder can't be missed;
+	// once acknowledged it drops off into the Scheduled view like before.
+	// Ignored for manually started sessions (ScheduleName == "").
+	acknowledged bool
+
 	// createdBy is the opaque per-device clientId of whoever started the
 	// session (web/app). Empty for TUI- and scheduler-started sessions.
 	// Used to scope notifications to "my" sessions; never shown as text.
@@ -194,6 +201,7 @@ type SessionView struct {
 	ReadOnly                                           bool
 	Pinned                                             bool
 	Category                                           string
+	Acknowledged                                       bool   // user dismissed this finished scheduled run
 	CreatedBy                                          string // per-device clientId of the creator; "" for TUI/scheduler
 	NotifyTopic                                        string // ntfy topic of the creator's device; "" = none
 	ScheduleName                                       string // schedule that launched this session; "" if started manually
@@ -255,7 +263,8 @@ func (s *Session) View() SessionView {
 		Branch: s.Branch, Backend: s.Backend, Preset: s.Preset, Status: s.status,
 		BaseBranch: s.BaseBranch, Intent: s.intent, Err: s.errMsg, Usage: s.usage,
 		AutoApprove: s.autoApprove, ReadOnly: s.ReadOnly, Created: s.Created,
-		Pinned: s.pinned, Category: s.category, CreatedBy: s.createdBy,
+		Pinned: s.pinned, Category: s.category, Acknowledged: s.acknowledged,
+		CreatedBy: s.createdBy,
 		NotifyTopic: s.notifyTopic, ScheduleName: s.ScheduleName,
 	}
 	if len(s.pending) > 0 {
@@ -437,6 +446,12 @@ func (s *Session) setPinned(on bool) {
 func (s *Session) setCategory(category string) {
 	s.mu.Lock()
 	s.category = category
+	s.mu.Unlock()
+}
+
+func (s *Session) setAcknowledged(on bool) {
+	s.mu.Lock()
+	s.acknowledged = on
 	s.mu.Unlock()
 }
 
