@@ -116,6 +116,7 @@ func (s *Server) routes() {
 	api("POST /api/sessions/{name}/kill", s.handleKill)
 	api("POST /api/sessions/{name}/auto", s.handleAuto)
 	api("POST /api/sessions/{name}/pin", s.handlePin)
+	api("POST /api/sessions/{name}/acknowledge", s.handleAcknowledge)
 	api("POST /api/sessions/{name}/category", s.handleCategory)
 	api("POST /api/sessions/{name}/rename", s.handleRename)
 	api("GET /api/sessions/{name}/diff", s.handleDiff)
@@ -165,6 +166,7 @@ type sessionJSON struct {
 	AutoOK       bool      `json:"autoApprove"`
 	Pinned       bool      `json:"pinned,omitempty"`
 	Category     string    `json:"category,omitempty"`
+	Acknowledged bool      `json:"acknowledged,omitempty"` // user dismissed this finished scheduled run
 	CreatedBy    string    `json:"createdBy,omitempty"`
 	ScheduleName string    `json:"scheduleName,omitempty"`
 	Created      time.Time `json:"created"`
@@ -232,7 +234,8 @@ func (s *Server) toSessionJSON(v supervisor.SessionView) sessionJSON {
 		Model: v.Model, Status: string(v.Status), Intent: v.Intent,
 		Err: v.Err, LastLine: v.LastLine, ReadOnly: v.ReadOnly,
 		AutoOK: v.AutoApprove, Pinned: v.Pinned, Category: v.Category,
-		CreatedBy: v.CreatedBy, ScheduleName: v.ScheduleName, Created: v.Created,
+		Acknowledged: v.Acknowledged,
+		CreatedBy:    v.CreatedBy, ScheduleName: v.ScheduleName, Created: v.Created,
 		SinceEvent:    v.SinceEvent.Seconds(),
 		InTokens:      v.Usage.InputTokens,
 		OutTokens:     v.Usage.OutputTokens,
@@ -316,11 +319,13 @@ func (s *Server) handleList(w http.ResponseWriter, _ *http.Request) {
 	out := make([]sessionJSON, 0, len(sessions))
 	for _, sess := range sessions {
 		v := sess.View()
-		// Schedule-originated sessions drop off the board once they settle —
-		// they're reachable through the Scheduled section (each schedule's
-		// run timeline links to them). Still-running or attention-needing
-		// ones stay visible so they aren't missed. Mirrors the TUI board.
-		if v.ScheduleName != "" && boardSettled(v.Status) {
+		// Schedule-originated sessions drop off the board once they settle
+		// AND the user has dismissed them — they're then reachable through
+		// the Scheduled section (each schedule's run timeline links to
+		// them). An undismissed finished run stays on the board (as a
+		// reminder), as does any still-running or attention-needing one, so
+		// nothing is missed. Mirrors the TUI board.
+		if v.ScheduleName != "" && boardSettled(v.Status) && v.Acknowledged {
 			continue
 		}
 		out = append(out, s.toSessionJSON(v))
@@ -627,6 +632,27 @@ func (s *Server) handlePin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.sup.SetPinned(sess, req.Pinned)
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+// handleAcknowledge dismisses (or restores) a finished scheduled run from
+// the board's reminders band. Body defaults to acknowledged=true so a
+// plain POST dismisses.
+func (s *Server) handleAcknowledge(w http.ResponseWriter, r *http.Request) {
+	sess := s.session(w, r)
+	if sess == nil {
+		return
+	}
+	req := struct {
+		Acknowledged bool `json:"acknowledged"`
+	}{Acknowledged: true}
+	if r.ContentLength != 0 {
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+			jsonError(w, http.StatusBadRequest, "bad JSON: "+err.Error())
+			return
+		}
+	}
+	s.sup.SetAcknowledged(sess, req.Acknowledged)
 	writeJSON(w, map[string]any{"ok": true})
 }
 

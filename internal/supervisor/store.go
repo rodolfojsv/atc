@@ -38,6 +38,7 @@ type savedSession struct {
 	AutoApprove  bool      `json:"autoApprove,omitempty"`
 	Pinned       bool      `json:"pinned,omitempty"`
 	Category     string    `json:"category,omitempty"`
+	Acknowledged bool      `json:"acknowledged,omitempty"` // user dismissed this finished scheduled run
 	CreatedBy    string    `json:"createdBy,omitempty"`    // per-device clientId of the creator
 	NotifyTopic  string    `json:"notifyTopic,omitempty"`  // ntfy topic of the creator's device
 	ScheduleName string    `json:"scheduleName,omitempty"` // schedule that launched it; "" if manual
