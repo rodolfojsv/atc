@@ -148,6 +148,7 @@ type promptOption struct {
 type promptInfo struct {
 	kind        string // "permission" | "question"
 	title       string
+	prose       string // for questions: the assistant's lead-in text scraped from above the box (often not yet in the JSONL — see emitQuestionProse)
 	options     []promptOption
 	multiSelect bool // a checkbox picker (toggle each choice with Space, submit with Enter)
 }
@@ -247,9 +248,11 @@ func detectPrompt(pane string) (promptInfo, bool) {
 	// the blank gap the picker leaves between them. Box glyphs (from a framed
 	// variant) are stripped so the title isn't polluted with border pieces.
 	title := ""
+	titleIdx := -1
 	for i := firstOpt - 1; i >= 0; i-- {
 		if t := strings.TrimSpace(stripBoxGlyphs(lines[i])); t != "" {
 			title = t
+			titleIdx = i
 			break
 		}
 	}
@@ -276,7 +279,97 @@ func detectPrompt(pane string) (promptInfo, bool) {
 	// single-select, so only a question can carry the multi flag. Signalled by a
 	// box glyph on an option line, or the Space-toggle hint.
 	multi := !isPermission && (optHadCheckbox || containsAny(pane, multiSelectHintMarkers))
-	return promptInfo{kind: kind, title: title, options: options, multiSelect: multi}, true
+	prose := ""
+	if !isPermission && titleIdx >= 0 {
+		prose = proseAbove(lines, titleIdx)
+	}
+	return promptInfo{kind: kind, title: title, prose: prose, options: options, multiSelect: multi}, true
+}
+
+// proseScanLimit bounds how far above a question's title we look for its lead-in
+// prose, so the scan can't wander up into an earlier turn's output.
+const proseScanLimit = 12
+
+// proseAbove returns the assistant's explanatory text rendered immediately above
+// a question box — the prose Claude writes before AskUserQuestion, which is often
+// not yet in the on-disk JSONL when the picker appears (see emitQuestionProse).
+// It walks up from the title past the box border, the blank gap, and the
+// multi-question tab bar, then gathers the contiguous block of plain text,
+// stopping at the next blank line, option, or picker chrome so it can't bleed
+// into the previous turn. Lines join with spaces (the pane hard-wraps a
+// paragraph at the pane width). Returns "" when there's no lead-in text.
+func proseAbove(lines []string, titleIdx int) string {
+	isBoundary := func(line string) bool {
+		return promptOptionRe.MatchString(line) ||
+			containsAny(line, pickerChromeMarkers) ||
+			containsAny(line, multiSelectHintMarkers)
+	}
+	lo := titleIdx - proseScanLimit
+	if lo < 0 {
+		lo = 0
+	}
+	// Walk up past the gap/border/tab-bar to the bottom line of the prose block.
+	i := titleIdx - 1
+	for i >= lo {
+		if t := strings.TrimSpace(stripBoxGlyphs(lines[i])); t != "" && !isBoundary(lines[i]) {
+			break
+		}
+		i--
+	}
+	// Collect the contiguous prose block, top-to-bottom.
+	var rev []string
+	for ; i >= lo; i-- {
+		if isBoundary(lines[i]) {
+			break
+		}
+		t := strings.TrimSpace(stripBoxGlyphs(lines[i]))
+		if t == "" {
+			break
+		}
+		rev = append(rev, stripLeadBullet(t))
+	}
+	for l, r := 0, len(rev)-1; l < r; l, r = l+1, r-1 {
+		rev[l], rev[r] = rev[r], rev[l]
+	}
+	return strings.TrimSpace(strings.Join(rev, " "))
+}
+
+// stripLeadBullet drops Claude Code's leading message bullet so the scraped prose
+// matches the JSONL text (which has no bullet) and reads cleanly.
+func stripLeadBullet(s string) string {
+	for _, g := range []string{"⏺ ", "● ", "• ", "◦ ", "▪ ", "‣ "} {
+		if strings.HasPrefix(s, g) {
+			return strings.TrimSpace(s[len(g):])
+		}
+	}
+	return s
+}
+
+// proseMatchMin is the shortest normalized prefix overlap we trust as "the same
+// prose" — long enough that an incidental shared opening can't trigger a false
+// dedup.
+const proseMatchMin = 24
+
+// normalizeProse canonicalizes prose for comparison: strip box glyphs and the
+// message bullet, then collapse all whitespace runs to single spaces. The pane
+// hard-wraps while the JSONL does not, so only a whitespace-insensitive compare
+// can match the two.
+func normalizeProse(s string) string {
+	s = stripLeadBullet(strings.TrimSpace(stripBoxGlyphs(s)))
+	return strings.Join(strings.Fields(s), " ")
+}
+
+// proseMatches reports whether two already-normalized prose strings are the same
+// text. The pane copy can be shorter than the JSONL copy (wrapping cut off the
+// bottom, or it scrolled), so a prefix overlap of at least proseMatchMin counts.
+func proseMatches(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	if len(a) > len(b) {
+		a, b = b, a
+	}
+	return len(a) >= proseMatchMin && strings.HasPrefix(b, a)
 }
 
 // questionSig is a stable identity for a question box — its title plus the
