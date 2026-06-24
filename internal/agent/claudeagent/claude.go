@@ -201,6 +201,9 @@ type session struct {
 	wake           chan struct{} // nudges the watcher back to fast polling when a turn starts (buffered 1)
 
 	lastUsageScrape time.Time // throttles the automatic /usage refresh
+
+	lastMsg    string // normalized text of the last assistant message emitted; lets a question detect prose the JSONL already delivered
+	shownProse string // normalized prose surfaced from the pane for the current question; suppresses its later (post-answer) JSONL flush
 }
 
 // newSession builds a session with its channels initialized.
@@ -218,12 +221,72 @@ func (s *session) ID() string { return s.id }
 func (s *session) tmuxName() string { return "atc-" + s.id }
 
 func (s *session) emit(e agent.Event) {
+	if e.Type == agent.EventMessage {
+		// Remember the last assistant message so a question surfacing right after
+		// can tell whether its prose already reached the user from the JSONL.
+		s.mu.Lock()
+		s.lastMsg = normalizeProse(e.Text)
+		s.mu.Unlock()
+	}
 	if s.spec.OnEvent != nil {
 		tracef("emit id=%s type=%s textlen=%d", s.id, e.Type, len(e.Text))
 		s.spec.OnEvent(e)
 		return
 	}
 	tracef("emit DROPPED id=%s type=%s onEvent=nil", s.id, e.Type)
+}
+
+// emitDrained emits transcript events, dropping a message that merely repeats a
+// question's prose already surfaced from the pane. A question turn's prose is
+// often not flushed to the JSONL until the question is answered, so the watcher
+// shows it from the pane up front (emitQuestionProse); this keeps the late
+// JSONL copy from then printing it a second time.
+func (s *session) emitDrained(evs []agent.Event) {
+	for _, e := range evs {
+		if e.Type == agent.EventMessage && s.suppressProse(e.Text) {
+			tracef("drain suppress-prose id=%s (already shown from pane)", s.id)
+			continue
+		}
+		s.emit(e)
+	}
+}
+
+// suppressProse reports whether text is the prose we already surfaced from the
+// pane for the current question (and clears the latch when it matches, so it
+// fires at most once per question).
+func (s *session) suppressProse(text string) bool {
+	n := normalizeProse(text)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.shownProse == "" || !proseMatches(n, s.shownProse) {
+		return false
+	}
+	s.shownProse = ""
+	return true
+}
+
+// emitQuestionProse surfaces a question's lead-in prose before the picker. The
+// prose is a text block in the same assistant turn as the AskUserQuestion, which
+// Claude Code frequently doesn't flush to the on-disk JSONL until the question is
+// answered — so draining can't supply it in order, and it would otherwise land
+// after the user has already answered. We take it from the pane instead, but only
+// when the JSONL hasn't already delivered it this turn (the good case, detected
+// via lastMsg), and latch it so the eventual JSONL copy is suppressed.
+func (s *session) emitQuestionProse(p promptInfo) {
+	prose := strings.TrimSpace(p.prose)
+	n := normalizeProse(prose)
+	if len(n) < proseMatchMin {
+		return // nothing, or too short to dedup safely
+	}
+	s.mu.Lock()
+	if proseMatches(n, s.lastMsg) {
+		s.mu.Unlock()
+		return // already emitted from the JSONL just before the question
+	}
+	s.shownProse = n
+	s.mu.Unlock()
+	tracef("question prose id=%s len=%d", s.id, len(prose))
+	s.emit(agent.Event{Type: agent.EventMessage, Text: prose})
 }
 
 func (s *session) isClosed() bool {
@@ -908,9 +971,7 @@ func (s *session) watch() {
 
 		// Emit any new transcript lines (assistant text, tool calls, usage).
 		if evs := s.drainTranscript(); len(evs) > 0 {
-			for _, e := range evs {
-				s.emit(e)
-			}
+			s.emitDrained(evs)
 			lastActivity = time.Now()
 			idleEmitted = false
 			interval = pollInterval
@@ -1020,19 +1081,16 @@ func (s *session) watch() {
 						s.mu.Unlock()
 						if !already {
 							surfacedSig = sig
-							// The prose preceding a question is a text block in the
-							// same assistant transcript line as the AskUserQuestion
-							// tool_use, so by the time the picker is on the pane that
-							// line exists. Drain it now — synchronously, in the watcher
-							// goroutine so it can't race the loop's own offset — so the
-							// prose is emitted before handleQuestion appends the
-							// question entry. Otherwise it lands on the next poll's
-							// drain, i.e. after the user has already answered.
-							if evs := s.drainTranscript(); len(evs) > 0 {
-								for _, e := range evs {
-									s.emit(e)
-								}
-							}
+							// Emit any prose that did make it to the JSONL in order,
+							// synchronously in the watcher goroutine so it can't race
+							// the loop's own offset.
+							s.emitDrained(s.drainTranscript())
+							// The prose preceding a question shares the AskUserQuestion's
+							// assistant turn, which Claude Code often doesn't flush to the
+							// JSONL until the question is answered — so the drain above
+							// can't supply it and it would otherwise land after the user
+							// has already answered. Surface it from the pane instead.
+							s.emitQuestionProse(p)
 							tracef("watch question id=%s title=%q multi=%t", s.id, p.title, p.multiSelect)
 							go s.handleQuestion(context.Background(), p, cancel)
 						}

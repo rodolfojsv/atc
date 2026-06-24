@@ -204,6 +204,67 @@ func TestStripBoxGlyphs(t *testing.T) {
 	}
 }
 
+// A question's lead-in prose is scraped from above the box so it can be shown
+// before the picker even when Claude hasn't flushed it to the JSONL yet.
+func TestDetectQuestionScrapesProse(t *testing.T) {
+	pane := strings.Join([]string{
+		"⏺ The bell isn't discoverable where it is. I'd move it to the top bar.",
+		"",
+		"  What should that dashboard bell do?",
+		"  ❯ 1. Open a notifications panel",
+		"    2. Jump to the activity feed",
+		"  Enter to select · Tab/Arrow keys to navigate · Esc to cancel",
+	}, "\n")
+
+	p, ok := detectPrompt(pane)
+	if !ok || p.kind != "question" {
+		t.Fatalf("expected a question, got ok=%v kind=%q", ok, p.kind)
+	}
+	want := "The bell isn't discoverable where it is. I'd move it to the top bar."
+	if p.prose != want {
+		t.Errorf("prose = %q, want %q", p.prose, want)
+	}
+}
+
+// The tab bar of a multi-question form is chrome, not prose: scraping must walk
+// past it to the real lead-in above (and never mistake the tab bar for prose).
+func TestProseAboveSkipsTabBarAndChrome(t *testing.T) {
+	lines := []string{
+		"⏺ Let's nail down the seating model before I build it.",
+		"",
+		"←  ☐ Color  ☐ Size  ✔ Submit  →",
+		"",
+		"What is your favorite color?",
+		"❯ 1. Red",
+	}
+	if got := proseAbove(lines, 4); got != "Let's nail down the seating model before I build it." {
+		t.Errorf("proseAbove = %q", got)
+	}
+	// No lead-in above the tab bar → no prose (the tab bar must not leak in).
+	noProse := []string{"←  ☐ Color  ✔ Submit  →", "", "What is your favorite color?", "❯ 1. Red"}
+	if got := proseAbove(noProse, 2); got != "" {
+		t.Errorf("proseAbove with no lead-in = %q, want empty", got)
+	}
+}
+
+func TestNormalizeAndMatchProse(t *testing.T) {
+	// Pane wrapping turns one paragraph into several lines with a bullet; the
+	// JSONL keeps it as one. Normalization must make them comparable.
+	paneJoined := normalizeProse("⏺ The fix is to lift them up to where people\n  actually look.")
+	jsonl := normalizeProse("The fix is to lift them up to where people actually look. I'd do three tiers:")
+	if !proseMatches(paneJoined, jsonl) {
+		t.Errorf("expected prefix match:\n pane=%q\n json=%q", paneJoined, jsonl)
+	}
+	// Different prose that merely shares a couple of words must not match.
+	if proseMatches(normalizeProse("The fix is over here"), normalizeProse("The fox is over there entirely")) {
+		t.Error("unrelated prose should not match")
+	}
+	// Too-short overlap is not trusted.
+	if proseMatches(normalizeProse("Short one"), normalizeProse("Short two")) {
+		t.Error("a sub-threshold overlap should not match")
+	}
+}
+
 // cursorOptionIndex must report which option the selection cursor sits on, so
 // selectIndex navigates relative to the real highlight (the resume dialog
 // defaults its cursor to a non-first option).
