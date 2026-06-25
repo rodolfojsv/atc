@@ -132,19 +132,20 @@ func (s *Supervisor) Backends() []string {
 	return names
 }
 
-// PreferredBackend is what a new-session form should default to: the
-// last backend the user actually launched, else the configured default,
-// else the built-in default. Lets the choice stick across restarts
-// without editing config.
+// PreferredBackend is what a new-session form should default to. An
+// explicit defaultBackend in config wins so the user's stated choice is
+// always honored across restarts. Absent that, it falls back to the last
+// backend the user actually launched (so the choice sticks without
+// editing config), then the built-in default.
 func (s *Supervisor) PreferredBackend() string {
+	if _, ok := s.backends[s.cfg.DefaultBackend]; ok {
+		return s.cfg.DefaultBackend
+	}
 	s.prefsMu.Lock()
 	last := s.prefs.LastBackend
 	s.prefsMu.Unlock()
 	if _, ok := s.backends[last]; ok {
 		return last
-	}
-	if _, ok := s.backends[s.cfg.DefaultBackend]; ok {
-		return s.cfg.DefaultBackend
 	}
 	return DefaultBackend
 }
@@ -549,7 +550,8 @@ func (s *Supervisor) ResumeAll() int {
 			Preset: sv.Preset, Agent: sv.Agent, ReadOnly: sv.ReadOnly, Model: sv.Model,
 			Created: sv.Created, BaseBranch: sv.BaseBranch, BaseCommit: sv.BaseCommit,
 			autoApprove: sv.AutoApprove, pinned: sv.Pinned, category: sv.Category,
-			createdBy: sv.CreatedBy, notifyTopic: sv.NotifyTopic,
+			acknowledged: sv.Acknowledged,
+			createdBy:    sv.CreatedBy, notifyTopic: sv.NotifyTopic,
 			ScheduleName: sv.ScheduleName,
 			status:       StatusStarting, id: sv.ID,
 		}
@@ -673,7 +675,7 @@ func (s *Supervisor) persist() {
 				Worktree: sess.Worktree, Branch: sess.Branch, Backend: sess.Backend,
 				Preset: sess.Preset, Agent: sess.Agent, Model: firstNonEmpty(sess.usage.Model, sess.Model), ReadOnly: sess.ReadOnly,
 				AutoApprove: sess.autoApprove,
-				Pinned:      sess.pinned, Category: sess.category, CreatedBy: sess.createdBy,
+				Pinned:      sess.pinned, Category: sess.category, Acknowledged: sess.acknowledged, CreatedBy: sess.createdBy,
 				NotifyTopic:  sess.notifyTopic,
 				ScheduleName: sess.ScheduleName,
 				BaseBranch:   sess.BaseBranch, BaseCommit: sess.BaseCommit,
@@ -781,7 +783,10 @@ func (s *Supervisor) PruneScheduledLoop(ctx context.Context, interval time.Durat
 // `atc run` calls it once after finishing, which also reaps store-only
 // sessions left by earlier runs that no UI ever adopted. maxAge <= 0
 // disables it. Sessions still running or awaiting input are kept, as are
-// all manually started sessions. Returns how many were removed.
+// all manually started sessions. A finished run the user hasn't dismissed
+// yet is also kept regardless of age — it's a live reminder on the board,
+// so retention only starts ticking once it's acknowledged. Returns how
+// many were removed.
 func (s *Supervisor) PruneScheduled(maxAge time.Duration) int {
 	if maxAge <= 0 {
 		return 0
@@ -792,7 +797,7 @@ func (s *Supervisor) PruneScheduled(maxAge time.Duration) int {
 	// In-memory pass: tear down adopted/live scheduled sessions on the board.
 	for _, sess := range s.Sessions() {
 		v := sess.View()
-		if v.ScheduleName == "" || !settled(v.Status) || !v.Created.Before(cutoff) {
+		if v.ScheduleName == "" || !settled(v.Status) || !v.Created.Before(cutoff) || !v.Acknowledged {
 			continue
 		}
 		s.log.Log(logx.Info, "session.prune", map[string]any{"session": v.Name, "schedule": v.ScheduleName})
@@ -814,7 +819,7 @@ func (s *Supervisor) PruneScheduled(maxAge time.Duration) int {
 	var keep []savedSession
 	changed := false
 	for _, sv := range s.store.load() {
-		if !live[sv.ID] && sv.ScheduleName != "" && sv.settled() && sv.Created.Before(cutoff) {
+		if !live[sv.ID] && sv.ScheduleName != "" && sv.settled() && sv.Created.Before(cutoff) && sv.Acknowledged {
 			if sv.Worktree != "" {
 				_ = s.trees.Remove(sv.Repo, sv.Worktree, sv.Branch)
 			}
@@ -1073,6 +1078,16 @@ func (s *Supervisor) Rename(sess *Session, newName string) error {
 // no effect on the agent — and persists it so it survives a restart.
 func (s *Supervisor) SetPinned(sess *Session, on bool) {
 	sess.setPinned(on)
+	s.persist()
+	s.poke()
+}
+
+// SetAcknowledged marks (or unmarks) a finished scheduled run as seen.
+// Acknowledging drops it from the board's REMINDERS band into the
+// Scheduled view; it's persisted so a reminder stays put across a
+// restart until the user actually dismisses it.
+func (s *Supervisor) SetAcknowledged(sess *Session, on bool) {
+	sess.setAcknowledged(on)
 	s.persist()
 	s.poke()
 }

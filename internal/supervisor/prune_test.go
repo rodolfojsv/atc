@@ -24,10 +24,13 @@ func TestPruneScheduledInMemory(t *testing.T) {
 	recent := time.Now().Add(-1 * time.Hour)
 
 	keepRunning := &Session{Name: "sched-running", ScheduleName: "nightly", status: StatusWorking, Created: old}
-	keepRecent := &Session{Name: "sched-recent", ScheduleName: "nightly", status: StatusDone, Created: recent}
+	keepRecent := &Session{Name: "sched-recent", ScheduleName: "nightly", status: StatusDone, Created: recent, acknowledged: true}
 	keepManual := &Session{Name: "manual-old", status: StatusDone, Created: old}
-	dropStale := &Session{Name: "sched-stale", ScheduleName: "nightly", status: StatusDone, Created: old}
-	s.sessions = []*Session{keepRunning, keepRecent, keepManual, dropStale}
+	// A stale finished run the user never dismissed stays put — it's still a
+	// live reminder on the board, so retention doesn't apply until it's acked.
+	keepUnacked := &Session{Name: "sched-unacked", ScheduleName: "nightly", status: StatusDone, Created: old}
+	dropStale := &Session{Name: "sched-stale", ScheduleName: "nightly", status: StatusDone, Created: old, acknowledged: true}
+	s.sessions = []*Session{keepRunning, keepRecent, keepManual, keepUnacked, dropStale}
 
 	if n := s.PruneScheduled(48 * time.Hour); n != 1 {
 		t.Fatalf("PruneScheduled removed %d, want 1", n)
@@ -39,7 +42,7 @@ func TestPruneScheduledInMemory(t *testing.T) {
 	if got["sched-stale"] {
 		t.Error("stale finished scheduled session should have been pruned")
 	}
-	for _, name := range []string{"sched-running", "sched-recent", "manual-old"} {
+	for _, name := range []string{"sched-running", "sched-recent", "manual-old", "sched-unacked"} {
 		if !got[name] {
 			t.Errorf("%s should have been kept", name)
 		}
@@ -51,10 +54,11 @@ func TestPruneScheduledStoreOnly(t *testing.T) {
 	old := time.Now().Add(-72 * time.Hour).UTC()
 	recent := time.Now().Add(-1 * time.Hour).UTC()
 	if err := s.store.save([]savedSession{
-		{ID: "a", Name: "sched-stale", ScheduleName: "nightly", Status: "done", Created: old},
-		{ID: "b", Name: "sched-recent", ScheduleName: "nightly", Status: "done", Created: recent},
+		{ID: "a", Name: "sched-stale", ScheduleName: "nightly", Status: "done", Created: old, Acknowledged: true},
+		{ID: "b", Name: "sched-recent", ScheduleName: "nightly", Status: "done", Created: recent, Acknowledged: true},
 		{ID: "c", Name: "manual-stale", Status: "done", Created: old},
 		{ID: "d", Name: "sched-running", ScheduleName: "nightly", Status: "working", Created: old},
+		{ID: "e", Name: "sched-unacked", ScheduleName: "nightly", Status: "done", Created: old},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -67,9 +71,9 @@ func TestPruneScheduledStoreOnly(t *testing.T) {
 		kept[sv.ID] = true
 	}
 	if kept["a"] {
-		t.Error("store entry a (stale scheduled) should have been pruned")
+		t.Error("store entry a (stale acknowledged scheduled) should have been pruned")
 	}
-	for _, id := range []string{"b", "c", "d"} {
+	for _, id := range []string{"b", "c", "d", "e"} {
 		if !kept[id] {
 			t.Errorf("store entry %s should have been kept", id)
 		}

@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -238,8 +239,43 @@ type fileCacheEntry struct {
 }
 
 // walkFiles returns the dir's files as forward-slash relative paths,
-// skipping heavy/uninteresting directories and capping the total.
+// capping the total. In a git repo it lists git's tracked + untracked
+// files (honouring .gitignore, so build artifacts like *.o stay out);
+// otherwise it falls back to a raw filesystem walk.
 func walkFiles(dir string) []string {
+	if files := gitFiles(dir); files != nil {
+		return files
+	}
+	return fsWalkFiles(dir)
+}
+
+// gitFiles lists the repo's tracked and untracked-but-not-ignored files
+// (forward-slash relative paths), or nil if dir isn't a git work tree or
+// git is unavailable. --exclude-standard applies .gitignore, .git/info/
+// exclude, and the user's global excludes.
+func gitFiles(dir string) []string {
+	cmd := exec.Command("git", "-C", dir, "ls-files",
+		"--cached", "--others", "--exclude-standard", "-z")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+	var files []string
+	for _, p := range strings.Split(strings.TrimRight(string(out), "\x00"), "\x00") {
+		if p == "" {
+			continue
+		}
+		files = append(files, p)
+		if len(files) >= maxFileWalk {
+			break
+		}
+	}
+	return files
+}
+
+// fsWalkFiles returns the dir's files as forward-slash relative paths,
+// skipping heavy/uninteresting directories and capping the total.
+func fsWalkFiles(dir string) []string {
 	skip := map[string]bool{
 		".git": true, "node_modules": true, "vendor": true, "dist": true,
 		"build": true, "target": true, ".atc-worktrees": true, "__pycache__": true,

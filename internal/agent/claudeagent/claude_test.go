@@ -311,6 +311,30 @@ func TestIsShellAndWorkingMarkers(t *testing.T) {
 	}
 }
 
+func TestInputProbes(t *testing.T) {
+	// Single short line: one probe, head == tail so it isn't duplicated.
+	if got := inputProbes("hello there"); len(got) != 1 || got[0] != "hello there" {
+		t.Errorf("short prompt probes = %q, want [\"hello there\"]", got)
+	}
+	// Long multi-line prompt: head (first 40 of line 1) and tail (last 40 of the
+	// final non-empty line) — the tail is what stays visible when the composer
+	// scrolls, so confirmInput must look for it too.
+	prompt := "I want to work on a couple things in the Coordinacion tab.\n\n1. schedule payments\n2. attach files so google drive shows their preview.\n"
+	got := inputProbes(prompt)
+	if len(got) != 2 {
+		t.Fatalf("multi-line probes = %q, want 2 probes", got)
+	}
+	if got[0] != "I want to work on a couple things in the" {
+		t.Errorf("head probe = %q", got[0])
+	}
+	if !strings.HasSuffix("2. attach files so google drive shows their preview.", got[1]) || len(got[1]) != 40 {
+		t.Errorf("tail probe = %q (len %d), want last 40 chars of the final line", got[1], len(got[1]))
+	}
+	if got := inputProbes(""); len(got) != 0 {
+		t.Errorf("empty prompt probes = %q, want none", got)
+	}
+}
+
 // The first-run trust dialog must be recognized (so waitReady can auto-accept
 // it) and must not be confused with the ready splash screen.
 func TestIsTrustPrompt(t *testing.T) {
