@@ -74,6 +74,11 @@ type Schedule struct {
 	// outcome of every fire is appended to the schedule run log so the UI
 	// can show "no updates since X". Empty disables gating (always run).
 	Precheck string `json:"precheck,omitempty"`
+	// Disabled turns a schedule off without deleting it: the definition stays
+	// in config (and on the board, marked disabled) but never fires. Flip it
+	// back to false to resume. The scheduler hot-reloads on a config change, so
+	// toggling this takes effect without a restart.
+	Disabled bool `json:"disabled,omitempty"`
 }
 
 // Web configures the optional local web UI (atc serve / atc --serve).

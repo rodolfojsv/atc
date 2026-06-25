@@ -3,7 +3,29 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"github.com/rodolfojsv/atc/internal/config"
+	"github.com/rodolfojsv/atc/internal/schedrun"
 )
+
+// A disabled schedule must not produce a job (so it never fires), and its cron
+// must not be validated — a disabled entry can carry a stale/invalid cron
+// without failing the whole reload. buildScheduleJobs only reads cfg here; the
+// Fire closures are never invoked, so nil deps are fine.
+func TestBuildScheduleJobsSkipsDisabled(t *testing.T) {
+	cfg := &config.Config{Schedules: []config.Schedule{
+		{Name: "live", Cron: "0 7 * * *", Repo: "/tmp"},
+		{Name: "off", Cron: "0 8 * * *", Repo: "/tmp", Disabled: true},
+		{Name: "off-bad-cron", Cron: "not-a-cron", Repo: "/tmp", Disabled: true},
+	}}
+	jobs, err := buildScheduleJobs(cfg, nil, schedrun.Log{})
+	if err != nil {
+		t.Fatalf("buildScheduleJobs: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("want 1 job (only the enabled schedule), got %d", len(jobs))
+	}
+}
 
 func TestCronToSchtasks(t *testing.T) {
 	cases := map[string]string{

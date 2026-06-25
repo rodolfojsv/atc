@@ -150,6 +150,10 @@ func (m *Model) schedulesContent() (string, []*supervisor.Session, int) {
 		if s.HasPrecheck {
 			precheck = styleDim.Render("  [precheck]")
 		}
+		disabled := ""
+		if s.Disabled {
+			disabled = styleErrSt.Render("  [disabled]")
+		}
 		next := "never"
 		if !s.NextFire.IsZero() {
 			next = "next " + relTime(s.NextFire)
@@ -158,7 +162,7 @@ func (m *Model) schedulesContent() (string, []*supervisor.Session, int) {
 		if !s.LastUpdate.IsZero() {
 			since = "updated " + relTime(s.LastUpdate)
 		}
-		write(styleSection.Render("  "+s.Name) + styleDim.Render("  "+s.Cron) + mode + precheck)
+		write(styleSection.Render("  "+s.Name) + styleDim.Render("  "+s.Cron) + mode + precheck + disabled)
 		write(styleDim.Render(fmt.Sprintf("    %s · %s", since, next)))
 
 		// The sessions this schedule has produced, newest first, as a

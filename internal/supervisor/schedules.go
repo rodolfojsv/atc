@@ -32,7 +32,8 @@ type ScheduleView struct {
 	Worktree    bool
 	Write       bool // false = read-only (plan mode), the default for schedules
 	HasPrecheck bool
-	NextFire    time.Time // zero when the cron is unparseable or can never fire
+	Disabled    bool      // turned off in config; kept on the board but never fires
+	NextFire    time.Time // zero when the cron is unparseable, disabled, or can never fire
 	LastUpdate  time.Time // time of the most recent "updated" fire; zero if never
 	Runs        []ScheduleRun
 }
@@ -63,9 +64,13 @@ func (s *Supervisor) Schedules() []ScheduleView {
 			Worktree:    sc.Worktree,
 			Write:       sc.Write,
 			HasPrecheck: sc.Precheck != "",
+			Disabled:    sc.Disabled,
 		}
-		if entry, err := sched.Parse(sc.Cron); err == nil {
-			v.NextFire = entry.Next(now)
+		// A disabled schedule never fires, so it has no next run to show.
+		if !sc.Disabled {
+			if entry, err := sched.Parse(sc.Cron); err == nil {
+				v.NextFire = entry.Next(now)
+			}
 		}
 
 		runs := byName[name]
