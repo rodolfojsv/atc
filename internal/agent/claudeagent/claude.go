@@ -353,6 +353,15 @@ func (s *session) Send(ctx context.Context, prompt string) error {
 		}
 	}
 	s.startWatch()
+	// Whether we're starting a turn from rest: only then do we expect — and
+	// require — the UserPromptSubmit hook to flip the state to "working" as proof
+	// the prompt was accepted. A prompt sent into an already-running turn is
+	// queued by Claude with no observable transition, so we can't verify it.
+	// Read before priming below, which overwrites the same value.
+	startedIdle := s.statePath() != "" && func() bool {
+		st, ok := s.readHookState()
+		return !ok || st != "working"
+	}()
 	// Prime "working" so the watcher treats the turn as live immediately, before
 	// the UserPromptSubmit hook lands (it will overwrite with the same value).
 	s.writeState("working")
@@ -375,7 +384,23 @@ func (s *session) Send(ctx context.Context, prompt string) error {
 		if !s.confirmInput(ctx, name, prompt) {
 			tracef("Send id=%s WARNING: input did not reflect prompt before submit", s.id)
 		}
-		sendErr = s.tm.SendEnter(ctx, name)
+		// Sample the primed state file's mtime before the Enter that should
+		// trigger the UserPromptSubmit hook, so confirmSubmitted can tell the
+		// hook's write apart from our own prime (see confirmSubmitted).
+		base := s.stateModTime()
+		if sendErr = s.tm.SendEnter(ctx, name); sendErr != nil {
+			return
+		}
+		// Verify the prompt actually dispatched. On a freshly-booted, MCP-laden
+		// TUI a large multi-line paste can land in the composer without
+		// submitting: the text sits there unsent until a later keystroke flushes
+		// it (seen as a long first prompt that "did nothing" until the user typed
+		// a stray "."). The single Enter above is then lost. When we started from
+		// rest, re-press Enter until the UserPromptSubmit hook proves the turn
+		// began — see confirmSubmitted.
+		if startedIdle {
+			s.confirmSubmitted(ctx, name, base)
+		}
 	})
 	if sendErr != nil {
 		return sendErr
@@ -627,6 +652,61 @@ func (s *session) confirmInput(ctx context.Context, name, prompt string) bool {
 		time.Sleep(pollInterval)
 	}
 	return false
+}
+
+// submitSettle is how long we wait, per attempt, for the UserPromptSubmit hook
+// to stamp the state file after we press Enter. The hook runs synchronously
+// before the turn, so on a real submit it fires within a poll or two; this only
+// has to outlast that, not the model's thinking.
+const submitSettle = 4 * time.Second
+
+// submitAttempts bounds how many times confirmSubmitted re-presses Enter before
+// giving up, so a session that genuinely won't accept input can't loop forever.
+const submitAttempts = 3
+
+// confirmSubmitted blocks until Claude has accepted the prompt we just sent, or
+// gives up after submitAttempts. The proof is the UserPromptSubmit hook
+// re-stamping the state file: base is the mtime of our own prime sampled just
+// before the Enter, so any modification newer than base is the hook firing —
+// i.e. the turn began. When the wait elapses with no such stamp, the Enter was
+// swallowed (a large paste into a still-booting TUI leaves the text unsent in
+// the composer); we re-press Enter to flush it and wait again. Caller must hold
+// the pane lock (run in withPane) and must have started from rest (see Send).
+func (s *session) confirmSubmitted(ctx context.Context, name string, base time.Time) bool {
+	for attempt := 0; attempt < submitAttempts; attempt++ {
+		deadline := time.Now().Add(submitSettle)
+		for time.Now().Before(deadline) {
+			if s.isClosed() {
+				return false
+			}
+			if mt := s.stateModTime(); mt.After(base) {
+				return true // the hook fired: the prompt dispatched
+			}
+			time.Sleep(pollInterval)
+		}
+		tracef("Send id=%s prompt unsubmitted after Enter (attempt %d/%d); re-pressing Enter",
+			s.id, attempt+1, submitAttempts)
+		if err := s.tm.SendEnter(ctx, name); err != nil {
+			return false
+		}
+	}
+	tracef("Send id=%s WARNING: prompt never dispatched after %d Enter attempts", s.id, submitAttempts)
+	return false
+}
+
+// stateModTime returns the modification time of the hook state file, or the zero
+// time if it is unavailable — used by confirmSubmitted to detect the hook
+// re-stamping it.
+func (s *session) stateModTime() time.Time {
+	p := s.statePath()
+	if p == "" {
+		return time.Time{}
+	}
+	fi, err := os.Stat(p)
+	if err != nil {
+		return time.Time{}
+	}
+	return fi.ModTime()
 }
 
 // isStarted / markStarted guard the started flag for callers that no longer
