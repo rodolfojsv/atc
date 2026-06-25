@@ -30,10 +30,12 @@ package claudeagent
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -89,6 +91,14 @@ const (
 	idDiscovery  = 8 * time.Second         // how long to wait for the session jsonl to appear
 	readyTimeout = 30 * time.Second        // how long to wait for the TUI to accept input after launch
 	readySettle  = 1500 * time.Millisecond // extra wait after ready chrome appears, so input is truly live
+
+	// turnStartTimeout bounds how long, after submitting the first prompt of a
+	// freshly-booted session, we watch for the turn to actually begin before
+	// giving up. Generous: a slow first token shouldn't be mistaken for a stuck
+	// prompt, and the spinner appears within a poll of a real turn anyway.
+	turnStartTimeout = 25 * time.Second
+	turnStartPoll    = 1500 * time.Millisecond // cadence for the turn-start check
+	turnStartNudges  = 2                       // max extra Enters used to flush a queued prompt
 )
 
 // readyMarkers are chrome the claude TUI shows once it is up and accepting
@@ -330,7 +340,8 @@ func (s *session) withPane(fn func()) {
 // deadlocks the goroutine and freezes every other call on the session. The
 // helpers lock only the brief field accesses they need.
 func (s *session) Send(ctx context.Context, prompt string) error {
-	if err := s.ensureLaunched(ctx); err != nil {
+	booted, err := s.ensureLaunched(ctx)
+	if err != nil {
 		return err
 	}
 	name := s.tmuxName()
@@ -389,6 +400,16 @@ func (s *session) Send(ctx context.Context, prompt string) error {
 		s.lastUsageScrape = time.Now()
 		s.mu.Unlock()
 		go s.scrapeUsage(name, true)
+		return nil
+	}
+	// On a freshly-booted session, a slow MCP-laden startup can render the ready
+	// chrome before the input box is truly live, so the type+Enter above lands
+	// the prompt in input history (it even gets an AI title) without launching a
+	// turn — it sits queued in the composer and the session hangs in "working"
+	// with no output. Verify the turn actually started, and flush a stuck prompt
+	// with a second Enter. Runs in the background so Send stays non-blocking.
+	if booted {
+		go s.confirmTurnStarted(context.Background(), name, prompt)
 	}
 	return nil
 }
@@ -601,19 +622,15 @@ func parseUsageLimits(text string) []agent.LimitWindow {
 	return out
 }
 
-// confirmInput polls until the pane shows the start of the prompt we just
-// typed (or a short deadline elapses), so Enter isn't pressed before a
-// slow/booting TUI has finished accepting a multi-line prompt.
+// confirmInput polls until the pane shows the prompt we just typed (or a short
+// deadline elapses), so Enter isn't pressed before a slow/booting TUI has
+// finished accepting a multi-line prompt. It checks both the head and tail of
+// the prompt: a long multi-line prompt scrolls its first line out of the small
+// composer, so only the tail is visible — matching head alone produced false
+// "not reflected" warnings on exactly those prompts.
 func (s *session) confirmInput(ctx context.Context, name, prompt string) bool {
-	probe := prompt
-	if i := strings.IndexByte(probe, '\n'); i >= 0 {
-		probe = probe[:i]
-	}
-	probe = strings.TrimSpace(probe)
-	if len(probe) > 40 {
-		probe = probe[:40]
-	}
-	if probe == "" {
+	probes := inputProbes(prompt)
+	if len(probes) == 0 {
 		return true
 	}
 	deadline := time.Now().Add(5 * time.Second)
@@ -621,10 +638,116 @@ func (s *session) confirmInput(ctx context.Context, name, prompt string) bool {
 		if s.isClosed() {
 			return false
 		}
-		if pane, err := s.tm.Capture(ctx, name, tmux.CaptureOpts{}); err == nil && strings.Contains(pane, probe) {
-			return true
+		if pane, err := s.tm.Capture(ctx, name, tmux.CaptureOpts{}); err == nil {
+			for _, p := range probes {
+				if strings.Contains(pane, p) {
+					return true
+				}
+			}
 		}
 		time.Sleep(pollInterval)
+	}
+	return false
+}
+
+// inputProbes returns short, distinctive slices of prompt to look for in the
+// pane — the first line's head and the last line's tail. Either appearing means
+// the composer received our text.
+func inputProbes(prompt string) []string {
+	lines := strings.Split(prompt, "\n")
+	head := strings.TrimSpace(lines[0])
+	if len(head) > 40 {
+		head = head[:40]
+	}
+	tail := ""
+	for i := len(lines) - 1; i >= 0; i-- {
+		if t := strings.TrimSpace(lines[i]); t != "" {
+			tail = t
+			break
+		}
+	}
+	if len(tail) > 40 {
+		tail = tail[len(tail)-40:]
+	}
+	var probes []string
+	if head != "" {
+		probes = append(probes, head)
+	}
+	if tail != "" && tail != head {
+		probes = append(probes, tail)
+	}
+	return probes
+}
+
+// confirmTurnStarted guards the first prompt of a freshly-booted session against
+// the startup input race: the ready chrome can render before the input box is
+// actually live, so the prompt lands in input history without launching a turn
+// — it sits queued in the composer and the session hangs in "working" with no
+// output. We poll for evidence the turn is underway (the busy spinner, a new
+// assistant entry, or a permission/question box); if none appears we press Enter
+// again to flush the queued prompt, the same recovery a user does by hand. A
+// bare Enter is safe either way: on an empty composer Claude Code ignores it.
+func (s *session) confirmTurnStarted(ctx context.Context, name, prompt string) {
+	baseline := transcriptSize(s.transcriptPath())
+	deadline := time.Now().Add(turnStartTimeout)
+	nudges := 0
+	for time.Now().Before(deadline) {
+		time.Sleep(turnStartPoll)
+		if s.isClosed() {
+			return
+		}
+		// A turn that has reached the model writes assistant content past the
+		// user echo we baselined — the most reliable "it's running" signal.
+		if s.transcriptHasAssistant(baseline) {
+			return
+		}
+		pane, err := s.tm.Capture(ctx, name, tmux.CaptureOpts{})
+		if err != nil {
+			continue
+		}
+		// Spinner up, or claude already blocked on a box: the turn is underway.
+		if isWorking(pane) {
+			return
+		}
+		if _, ok := detectPrompt(pane); ok {
+			return
+		}
+		// No turn in flight: the prompt is most likely sitting unsent in the
+		// composer. Flush it. confirmInput-style verification isn't reliable here
+		// (the prompt text is in the pane whether sent or not), so cap the nudges.
+		if nudges >= turnStartNudges {
+			tracef("confirmTurnStarted id=%s gave up after %d nudges; turn never started", s.id, nudges)
+			return
+		}
+		nudges++
+		tracef("confirmTurnStarted id=%s no turn after submit; re-Enter to flush (%d)", s.id, nudges)
+		s.withPane(func() { _ = s.tm.SendEnter(ctx, name) })
+	}
+}
+
+// transcriptHasAssistant reports whether the transcript has grown past baseline
+// with at least one assistant entry — proof the submitted turn reached the model
+// (the user echo alone, written even for a queued-but-unrun prompt, does not
+// count). Best-effort: a read error reads as "not yet".
+func (s *session) transcriptHasAssistant(baseline int64) bool {
+	path := s.transcriptPath()
+	if transcriptSize(path) <= baseline {
+		return false
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	if _, err := f.Seek(baseline, io.SeekStart); err != nil {
+		return false
+	}
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+	for sc.Scan() {
+		if bytes.Contains(sc.Bytes(), []byte(`"type":"assistant"`)) {
+			return true
+		}
 	}
 	return false
 }
@@ -675,12 +798,15 @@ func (s *session) startWatch() {
 
 // ensureLaunched makes sure claude is running in the tmux session, creating the
 // session (or recovering a dead claude) as needed. It does its own brief
-// locking; the caller must NOT hold s.mu (it blocks in waitReady).
-func (s *session) ensureLaunched(ctx context.Context) error {
+// locking; the caller must NOT hold s.mu (it blocks in waitReady). It returns
+// booted=true when it just started (or relaunched) claude — the case where the
+// fresh-boot input race applies and the first prompt may need a flush (see
+// confirmTurnStarted). A still-alive claude returns booted=false.
+func (s *session) ensureLaunched(ctx context.Context) (booted bool, err error) {
 	name := s.tmuxName()
 	has, err := s.tm.HasSession(ctx, name)
 	if err != nil {
-		return err
+		return false, err
 	}
 	started := s.isStarted()
 	tracef("ensureLaunched id=%s started=%t hasSession=%t", s.id, started, has)
@@ -699,14 +825,14 @@ func (s *session) ensureLaunched(ctx context.Context) error {
 				sendErr = s.tm.SendEnter(ctx, name)
 			})
 			if sendErr != nil {
-				return sendErr
+				return false, sendErr
 			}
 			s.waitReady(ctx)
 			tracef("ensureLaunched id=%s relaunch ready", s.id)
-			return nil
+			return true, nil
 		}
 		tracef("ensureLaunched id=%s claude-alive", s.id)
-		return nil // claude assumed alive
+		return false, nil // claude assumed alive
 	}
 	tracef("ensureLaunched id=%s fresh-launch", s.id)
 
@@ -723,7 +849,7 @@ func (s *session) ensureLaunched(ctx context.Context) error {
 		Width:      paneWidth,
 		Height:     paneHeight,
 	}); err != nil {
-		return err
+		return false, err
 	}
 	_ = s.tm.SetOption(ctx, name, "history-limit", historyLimit)
 	s.markStarted()
@@ -732,7 +858,7 @@ func (s *session) ensureLaunched(ctx context.Context) error {
 		s.discoverClaudeID()
 	}
 	tracef("ensureLaunched id=%s fresh-launch ready", s.id)
-	return nil
+	return true, nil
 }
 
 // waitReady blocks until the TUI shows it is up and accepting input, or a
