@@ -342,6 +342,7 @@ type scheduleJSON struct {
 	Worktree    bool              `json:"worktree,omitempty"`
 	Write       bool              `json:"write"`
 	HasPrecheck bool              `json:"hasPrecheck"`
+	Disabled    bool              `json:"disabled,omitempty"`
 	NextFire    *time.Time        `json:"nextFire,omitempty"`
 	LastUpdate  *time.Time        `json:"lastUpdate,omitempty"`
 	Runs        []scheduleRunJSON `json:"runs"`
@@ -361,7 +362,8 @@ func (s *Server) handleSchedules(w http.ResponseWriter, _ *http.Request) {
 		j := scheduleJSON{
 			Name: v.Name, Cron: v.Cron, Repo: v.Repo, Preset: v.Preset,
 			Worktree: v.Worktree, Write: v.Write, HasPrecheck: v.HasPrecheck,
-			Runs: make([]scheduleRunJSON, 0, len(v.Runs)),
+			Disabled: v.Disabled,
+			Runs:     make([]scheduleRunJSON, 0, len(v.Runs)),
 		}
 		if !v.NextFire.IsZero() {
 			t := v.NextFire

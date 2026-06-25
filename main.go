@@ -302,6 +302,12 @@ func startSchedules(ctx context.Context, configPath string, sup *supervisor.Supe
 func buildScheduleJobs(cfg *config.Config, sup *supervisor.Supervisor, runLog schedrun.Log) ([]sched.Job, error) {
 	var jobs []sched.Job
 	for _, s := range cfg.Schedules {
+		// A disabled schedule stays in config (and on the board) but never
+		// fires: skip building a job for it. Its cron is then not validated, so
+		// a disabled entry with a stale cron can't fail the whole reload.
+		if s.Disabled {
+			continue
+		}
 		entry, err := sched.Parse(s.Cron)
 		if err != nil {
 			return nil, fmt.Errorf("schedule %q: %w", s.Name, err)
