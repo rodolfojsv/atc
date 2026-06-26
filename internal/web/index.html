@@ -1170,7 +1170,7 @@ async function createSession() {
     saveWatch(); saveMuted();
     if (text.trim() || atts.length) pendingFirst = { name: s.name, text, atts };
     $('newSheet').classList.add('hidden');
-    $('fName').value = ''; $('fPrompt').value = ''; formAttachments = []; renderThumbs(); resetCompletion();
+    $('fName').value = ''; $('fPrompt').value = ''; autosize($('fPrompt')); formAttachments = []; renderThumbs(); resetCompletion();
     openSession(s.name);
   } catch (e) { alert(e.message); }
 }
@@ -1558,7 +1558,7 @@ function sendPrompt() {
 }
 function autosize(t) { t.style.height = 'auto'; t.style.height = Math.min(t.scrollHeight, 9 * 16) + 'px'; }
 $('prompt').addEventListener('input', e => { autosize(e.target); histIdx = -1; syncCompletion(mainCtx); }); // editing leaves recall mode
-$('fPrompt').addEventListener('input', () => syncCompletion(formCtx));
+$('fPrompt').addEventListener('input', e => { autosize(e.target); syncCompletion(formCtx); });
 
 // ---- "/" command + "@" file completion ----
 // Lists come from /complete once per session and are filtered locally,

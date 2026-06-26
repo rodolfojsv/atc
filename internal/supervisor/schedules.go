@@ -8,8 +8,9 @@ import (
 )
 
 // maxScheduleRuns caps how many recent fires a ScheduleView carries, so a
-// long-lived schedule's timeline stays bounded in the UI.
-const maxScheduleRuns = 60
+// long-lived schedule's timeline stays bounded in the UI: only the latest
+// few fires per task are shown.
+const maxScheduleRuns = 5
 
 // ScheduleRun is one entry in a scheduled task's timeline: the outcome of
 // a single fire. Result is "updated", "no-update", or "error".
