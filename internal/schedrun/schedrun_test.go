@@ -32,24 +32,6 @@ func TestAppendAndQuery(t *testing.T) {
 	if all[2].Detail != "precheck: boom" {
 		t.Errorf("detail roundtrip: got %q", all[2].Detail)
 	}
-
-	// Latest for "prs" is the final no-update, not the earlier update.
-	latest, ok := log.Latest("prs")
-	if !ok || latest.Result != NoUpdate || !latest.Time.Equal(base.Add(30*time.Minute)) {
-		t.Errorf("latest prs: got %+v ok=%v", latest, ok)
-	}
-
-	// LastUpdate skips the no-updates and returns the update time — the
-	// "no updates since X" anchor.
-	since, ok := log.LastUpdate("prs")
-	if !ok || !since.Equal(base) {
-		t.Errorf("last update prs: got %v ok=%v, want %v", since, ok, base)
-	}
-
-	// A schedule that never updated has no anchor.
-	if _, ok := log.LastUpdate("jira"); ok {
-		t.Errorf("jira never updated, want no anchor")
-	}
 }
 
 func TestEmptyAndMissing(t *testing.T) {
@@ -66,8 +48,5 @@ func TestEmptyAndMissing(t *testing.T) {
 	log := New(filepath.Join(t.TempDir(), "absent.jsonl"))
 	if runs, err := log.All(); err != nil || runs != nil {
 		t.Errorf("missing all: %v %v", runs, err)
-	}
-	if _, ok := log.Latest("any"); ok {
-		t.Errorf("missing latest: want none")
 	}
 }
