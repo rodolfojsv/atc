@@ -42,6 +42,11 @@ type Supervisor struct {
 	ledger   *spend.Ledger
 	log      *logx.Logger
 
+	// schedMu guards cfg.Schedules, which the web UI's schedule editor mutates
+	// while Schedules()/ScheduleConfigs() read it. Separate from mu so a schedule
+	// edit never contends with session bookkeeping.
+	schedMu sync.RWMutex
+
 	prefsMu    sync.Mutex
 	prefsStore prefsStore
 	prefs      prefs

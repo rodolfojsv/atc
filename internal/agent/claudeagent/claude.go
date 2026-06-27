@@ -1199,6 +1199,31 @@ func (s *session) watch() {
 			// EventIdle once on the working->idle edge. A new Send re-primes
 			// "working" and wakes us, so responsiveness is unaffected.
 			if !idleEmitted {
+				// One final scrape on the working->idle edge: the ExitPlanMode plan
+				// approval renders as a permission box right AFTER the Stop hook fires
+				// (unlike ordinary permission/question boxes, which keep the state
+				// "working"). Without this the session would go idle with the dialog
+				// silently waiting and never surface it. We only scrape on the edge,
+				// so the zero-exec idle path is preserved once no box is confirmed; if
+				// a box IS up we keep polling fast and hold off idle until it's
+				// answered (the answering guard launches exactly one handler).
+				if pane, err := s.capturePrompt(ctx, name); err == nil {
+					if p, ok := detectPrompt(pane); ok && p.kind == "permission" {
+						s.mu.Lock()
+						already := s.answering
+						if !already {
+							s.answering = true
+						}
+						s.mu.Unlock()
+						if !already {
+							tracef("watch permission(idle-edge) id=%s title=%q", s.id, p.title)
+							go s.handlePrompt(context.Background(), p)
+						}
+						lastActivity = time.Now()
+						interval = pollInterval
+						continue
+					}
+				}
 				tracef("watch idle(hook) id=%s", s.id)
 				s.emit(agent.Event{Type: agent.EventIdle})
 				idleEmitted = true

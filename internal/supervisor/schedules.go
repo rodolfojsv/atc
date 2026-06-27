@@ -3,6 +3,7 @@ package supervisor
 import (
 	"time"
 
+	"github.com/rodolfojsv/atc/internal/config"
 	"github.com/rodolfojsv/atc/internal/sched"
 	"github.com/rodolfojsv/atc/internal/schedrun"
 )
@@ -30,6 +31,10 @@ type ScheduleView struct {
 	Cron        string
 	Repo        string
 	Preset      string
+	Model       string // model override; empty falls back to preset/config default
+	Agent       string
+	Prompt      string
+	Precheck    string // raw precheck command, for the editor (HasPrecheck is the display flag)
 	Worktree    bool
 	Write       bool // false = read-only (plan mode), the default for schedules
 	HasPrecheck bool
@@ -37,6 +42,28 @@ type ScheduleView struct {
 	NextFire    time.Time // zero when the cron is unparseable, disabled, or can never fire
 	LastUpdate  time.Time // time of the most recent "updated" fire; zero if never
 	Runs        []ScheduleRun
+}
+
+// ScheduleConfigs returns a copy of the current schedule definitions, safe to
+// mutate by the caller (the web UI's schedule editor). Reads are guarded so a
+// concurrent SetSchedules can't tear the slice header.
+func (s *Supervisor) ScheduleConfigs() []config.Schedule {
+	s.schedMu.RLock()
+	defer s.schedMu.RUnlock()
+	out := make([]config.Schedule, len(s.cfg.Schedules))
+	copy(out, s.cfg.Schedules)
+	return out
+}
+
+// SetSchedules replaces the in-memory schedule set under lock, so concurrent
+// Schedules()/ScheduleConfigs() reads stay consistent. Persisting the change to
+// config.json is the caller's job (config.Save); the in-process scheduler
+// re-reads config.json from disk every minute, so a saved change fires without
+// a restart.
+func (s *Supervisor) SetSchedules(list []config.Schedule) {
+	s.schedMu.Lock()
+	s.cfg.Schedules = list
+	s.schedMu.Unlock()
 }
 
 // Schedules returns a view of every configured schedule joined with its
@@ -51,8 +78,9 @@ func (s *Supervisor) Schedules() []ScheduleView {
 	}
 
 	now := time.Now()
-	out := make([]ScheduleView, 0, len(s.cfg.Schedules))
-	for _, sc := range s.cfg.Schedules {
+	scheds := s.ScheduleConfigs()
+	out := make([]ScheduleView, 0, len(scheds))
+	for _, sc := range scheds {
 		name := sc.Name
 		if name == "" {
 			name = "sched"
@@ -62,6 +90,10 @@ func (s *Supervisor) Schedules() []ScheduleView {
 			Cron:        sc.Cron,
 			Repo:        sc.Repo,
 			Preset:      sc.Preset,
+			Model:       sc.Model,
+			Agent:       sc.Agent,
+			Prompt:      sc.Prompt,
+			Precheck:    sc.Precheck,
 			Worktree:    sc.Worktree,
 			Write:       sc.Write,
 			HasPrecheck: sc.Precheck != "",

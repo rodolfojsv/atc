@@ -101,6 +101,35 @@
   .sched .run.error .what { color: var(--err); }
   .sched .run.no-update .what { color: var(--dim); }
   .sched .runs .none { color: var(--faint); font-size: .82em; font-style: italic; }
+  /* schedules manager (🗓 modal) */
+  .schedmgr .none { color: var(--faint); font-style: italic; padding: .4em 0; }
+  .schedrow { display: flex; align-items: center; gap: .6em; flex-wrap: wrap;
+    padding: .5em .1em; border-bottom: 1px solid var(--line); }
+  .schedrow.off { opacity: .55; }
+  .schedrow .srmain { display: flex; align-items: center; gap: .5em; flex-wrap: wrap; flex: 1 1 60%; }
+  .schedrow .name { font-weight: 600; }
+  .schedrow .cron { color: var(--dim); font-size: .8em; font-family: var(--mono, monospace); }
+  .schedrow .next { color: var(--faint); font-size: .78em; }
+  .schedrow .sractions { display: flex; gap: .3em; margin-left: auto; }
+  .schedrow .sractions .ghost { font-size: .78em; padding: .15em .5em; }
+  /* notes panel (📝 modal) */
+  .ntabs { display: flex; gap: .4em; margin-bottom: .6em; }
+  .notespanel textarea { width: 100%; resize: vertical; }
+  .notespanel #notesPreview { margin-top: .6em; border-top: 1px solid var(--line); padding-top: .5em; }
+  .docsgrid { display: flex; gap: .8em; margin-top: .6em; align-items: flex-start; }
+  .docfiles { flex: 0 0 38%; max-height: 60vh; overflow: auto; border-right: 1px solid var(--line); padding-right: .5em; }
+  .docfile { padding: .25em .3em; border-radius: var(--r); cursor: pointer; font-size: .85em; color: var(--dim); word-break: break-all; }
+  .docfile:hover { background: var(--panel); color: var(--fg); }
+  .docfile.on { background: var(--panel); color: var(--accent); }
+  .docview { flex: 1 1 62%; max-height: 60vh; overflow: auto; }
+  /* On a phone, stack the file list above the rendered note instead of cramming
+     two columns side by side. */
+  @media (max-width: 640px) {
+    .docsgrid { flex-direction: column; }
+    .docfiles { flex: none; width: 100%; max-height: 32vh;
+      border-right: none; border-bottom: 1px solid var(--line); padding-right: 0; padding-bottom: .4em; }
+    .docview { flex: none; width: 100%; max-height: none; }
+  }
   .badge { font-size: .68em; padding: .05em .45em; border-radius: 20px; border: 1px solid var(--line); color: var(--faint); }
   .badge.warn { color: var(--warn); border-color: var(--warn); }
   .chip { font: inherit; font-size: .72em; padding: .12em .6em; border-radius: 20px; line-height: 1.5;
@@ -297,7 +326,9 @@
     <span class="lim hidden" id="limBadge" onclick="openLimits()"></span>
     <span class="spacer"></span>
     <button id="notifyBtn" class="ghost icon" onclick="toggleNotify()" title="Notify on permission / done">🔔</button>
-    <button id="appBtn" class="ghost icon" onclick="openAppPanel()" title="Get the app / pair a device">📱</button>
+    <button id="notesBtn" class="ghost icon" onclick="openNotes()" title="Notes & docs">📝</button>
+  <button id="schedBtn" class="ghost icon" onclick="openSchedules()" title="Manage scheduled tasks">🗓</button>
+  <button id="appBtn" class="ghost icon" onclick="openAppPanel()" title="Get the app / pair a device">📱</button>
     <span class="dot" id="live" title="live"></span>
   </header>
   <main>
@@ -322,7 +353,7 @@
           </div>
           <div>
             <label class="fld" for="fModel">Model</label>
-            <input id="fModel" placeholder="default" autocapitalize="off" spellcheck="false">
+            <select id="fModel"></select>
           </div>
         </div>
         <div>
@@ -1094,7 +1125,6 @@ function schedHTML(s) {
         ? `<span class="badge warn" title="This task can modify files (write:true)">writes</span>`
         : `<span class="badge" title="Read-only: inspects and advises, never modifies">read-only</span>`)
     + (s.hasPrecheck ? `<span class="badge" title="Only runs when its precheck reports a change">precheck</span>` : '')
-    + (s.disabled ? `<span class="badge warn" title="Turned off: kept here but never fires until re-enabled">disabled</span>` : '')
     + `<span class="next" title="${escAttr(absTime(s.nextFire))}">${esc(since)} · ${esc(next)}</span>`
     + `</div>`;
   let body = '';
@@ -1109,10 +1139,221 @@ function schedHTML(s) {
 function renderSchedules(list) {
   schedList = list || [];
   const el = $('schedules');
-  if (!schedList.length) { el.innerHTML = ''; return; }
+  // Disabled schedules live only in the manager (🗓), not on the main board.
+  const active = schedList.filter(s => !s.disabled);
+  if (!active.length) { el.innerHTML = ''; return; }
   el.innerHTML = `<div class="section" style="cursor:default"><span>Scheduled</span>` +
-    `<span class="cnt">${schedList.length}</span></div>` +
-    schedList.map(schedHTML).join('');
+    `<span class="cnt">${active.length}</span></div>` +
+    active.map(schedHTML).join('');
+}
+
+// ---- Schedules manager (🗓): create / edit / enable-disable / delete --------
+// All schedules, including disabled ones, are managed here; edits persist to
+// config.json server-side and the in-process scheduler reloads within a minute.
+let schedMgr = [];
+function modelOptions(selected) {
+  const models = meta.models || [];
+  let html = `<option value="" ${!selected ? 'selected' : ''}>(backend default)</option>`;
+  html += models.map(m => `<option value="${esc(m)}" ${m === selected ? 'selected' : ''}>${esc(m)}</option>`).join('');
+  // A pinned model that isn't in the configured menu must still be selectable.
+  if (selected && !models.includes(selected)) html += `<option value="${esc(selected)}" selected>${esc(selected)}</option>`;
+  return html;
+}
+function repoOptions(selected) {
+  return (meta.repos || []).map(r =>
+    `<option value="${esc(r)}" ${r === selected ? 'selected' : ''}>${esc(baseName(r))}</option>`).join('');
+}
+function presetOptions(selected) {
+  const names = (meta.presets || []).filter(p => p !== 'default');
+  return `<option value="">(default)</option>` +
+    names.map(p => `<option value="${esc(p)}" ${p === selected ? 'selected' : ''}>${esc(p)}</option>`).join('');
+}
+function agentOptions(selected) {
+  return `<option value="">(none)</option>` +
+    (meta.agents || []).map(a => `<option value="${esc(a)}" ${a === selected ? 'selected' : ''}>${esc(a)}</option>`).join('');
+}
+async function openSchedules() {
+  openModal('Scheduled tasks', `<div id="schedMgrBody" class="schedmgr"></div>`);
+  try { schedMgr = await api('/api/schedules'); } catch (e) { schedMgr = []; }
+  renderSchedManager(schedMgr);
+}
+function renderSchedManager(list) {
+  schedMgr = list || schedMgr;
+  if (!$('schedMgrBody')) return;
+  const rows = schedMgr.length ? schedMgr.map(schedMgrRow).join('')
+    : `<div class="none">No schedules yet.</div>`;
+  $('schedMgrBody').innerHTML =
+    `<div class="actions" style="margin-bottom:.6em"><button class="primary" onclick="schedNew()">＋ New schedule</button></div>` +
+    `<div class="schedrows">${rows}</div>`;
+}
+function schedMgrRow(s) {
+  const badges = (s.write
+      ? `<span class="badge warn" title="Can modify files">writes</span>`
+      : `<span class="badge" title="Read-only (plan mode)">read-only</span>`)
+    + (s.hasPrecheck ? `<span class="badge">precheck</span>` : '')
+    + (s.disabled ? `<span class="badge warn">disabled</span>` : '');
+  const next = s.disabled ? 'off' : (s.nextFire ? 'next ' + relTime(s.nextFire) : 'never');
+  return `<div class="schedrow ${s.disabled ? 'off' : ''}">
+    <div class="srmain">
+      <span class="name">${esc(s.name)}</span>
+      <span class="cron">${esc(s.cron)}</span>
+      ${badges}
+      <span class="next">${esc(next)} · ${esc(baseName(s.repo))}</span>
+    </div>
+    <div class="sractions">
+      <button class="ghost" onclick="editSchedule('${jsArg(s.name)}')">edit</button>
+      <button class="ghost" onclick="toggleSchedule('${jsArg(s.name)}', ${s.disabled ? 'false' : 'true'})">${s.disabled ? 'enable' : 'disable'}</button>
+      <button class="ghost bad" onclick="deleteSchedule('${jsArg(s.name)}')">delete</button>
+    </div>
+  </div>`;
+}
+function schedFormHTML(s) {
+  s = s || {};
+  const editing = s.name || '';
+  const agentRow = (meta.agents && meta.agents.length)
+    ? `<div><label class="fld" for="sfAgent">Agent</label><select id="sfAgent">${agentOptions(s.agent)}</select></div>` : '';
+  return `<div class="sheet" id="schedForm">
+    <h3>${editing ? 'Edit schedule' : 'New schedule'}</h3>
+    <input type="hidden" id="sfEditing" value="${escAttr(editing)}">
+    <div class="grid2">
+      <div><label class="fld" for="sfName">Name</label>
+        <input id="sfName" value="${escAttr(s.name || '')}" autocapitalize="off" spellcheck="false"></div>
+      <div><label class="fld" for="sfCron">Cron <span style="text-transform:none">(m h dom mon dow)</span></label>
+        <input id="sfCron" value="${escAttr(s.cron || '')}" placeholder="0 9 * * *" autocapitalize="off" spellcheck="false"></div>
+    </div>
+    <div><label class="fld" for="sfRepo">Repository</label><select id="sfRepo">${repoOptions(s.repo)}</select></div>
+    <div class="grid2">
+      <div><label class="fld" for="sfPreset">Preset</label><select id="sfPreset">${presetOptions(s.preset)}</select></div>
+      <div><label class="fld" for="sfModel">Model</label><select id="sfModel">${modelOptions(s.model)}</select></div>
+    </div>
+    ${agentRow}
+    <div><label class="fld" for="sfPrompt">Prompt</label>
+      <textarea id="sfPrompt" rows="3" autocapitalize="off" spellcheck="false">${esc(s.prompt || '')}</textarea></div>
+    <div><label class="fld" for="sfPrecheck">Precheck <span style="text-transform:none">(optional shell cmd; exit 0 = run)</span></label>
+      <input id="sfPrecheck" value="${escAttr(s.precheck || '')}" autocapitalize="off" spellcheck="false"></div>
+    <div class="grid2">
+      <label class="ck"><input type="checkbox" id="sfWorktree" ${s.worktree ? 'checked' : ''}> Worktree</label>
+      <label class="ck"><input type="checkbox" id="sfWrite" ${s.write ? 'checked' : ''}> ✍ Writes (off = read-only)</label>
+    </div>
+    <label class="ck" style="width:100%"><input type="checkbox" id="sfDisabled" ${s.disabled ? 'checked' : ''}> Disabled (kept but never fires)</label>
+    <div class="actions">
+      <button class="ghost" onclick="renderSchedManager()">Cancel</button>
+      <span class="spacer"></span>
+      <button class="primary" onclick="submitSchedule()">${editing ? 'Save' : 'Create'}</button>
+    </div>
+  </div>`;
+}
+function schedNew() { $('schedMgrBody').innerHTML = schedFormHTML({}); }
+function editSchedule(name) { $('schedMgrBody').innerHTML = schedFormHTML(schedMgr.find(x => x.name === name) || {}); }
+async function submitSchedule() {
+  const editing = $('sfEditing').value;
+  const body = {
+    name: $('sfName').value.trim(), cron: $('sfCron').value.trim(), repo: $('sfRepo').value,
+    preset: $('sfPreset').value, model: $('sfModel').value,
+    agent: $('sfAgent') ? $('sfAgent').value : '',
+    prompt: $('sfPrompt').value, precheck: $('sfPrecheck').value.trim(),
+    worktree: $('sfWorktree').checked, write: $('sfWrite').checked, disabled: $('sfDisabled').checked,
+  };
+  if (!body.name) { alert('Name is required.'); return; }
+  if (!body.cron) { alert('Cron is required.'); return; }
+  if (!body.repo) { alert('Pick a repository.'); return; }
+  try {
+    const path = editing ? '/api/schedules/' + encodeURIComponent(editing) : '/api/schedules';
+    const list = await api(path, { method: editing ? 'PUT' : 'POST',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    renderSchedManager(list);
+    pollBoard();
+  } catch (e) { alert(e.message); }
+}
+async function toggleSchedule(name, disable) {
+  try {
+    const list = await api('/api/schedules/' + encodeURIComponent(name) + '/disable',
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ disabled: disable }) });
+    renderSchedManager(list); pollBoard();
+  } catch (e) { alert(e.message); }
+}
+async function deleteSchedule(name) {
+  if (!confirm('Delete schedule "' + name + '"?')) return;
+  try {
+    const list = await api('/api/schedules/' + encodeURIComponent(name), { method: 'DELETE' });
+    renderSchedManager(list); pollBoard();
+  } catch (e) { alert(e.message); }
+}
+
+// ---- Notes (📝): an autosaved markdown scratchpad + a read-only docs browser
+let notesSaveTimer = null;
+function openNotes() {
+  const hasDocs = meta.docFolders && meta.docFolders.length;
+  openModal('Notes', `<div id="notesBody" class="notespanel">
+    <div class="ntabs">
+      <button class="chip on" id="ntabScratch" onclick="notesTab('scratch')">Scratchpad</button>
+      ${hasDocs ? `<button class="chip" id="ntabDocs" onclick="notesTab('docs')">Docs</button>` : ''}
+    </div>
+    <div id="notesScratch"></div>
+    <div id="notesDocs" class="hidden"></div>
+  </div>`);
+  renderScratch();
+  if (hasDocs) renderDocsBrowser();
+}
+function notesTab(which) {
+  const sc = which === 'scratch';
+  $('notesScratch').classList.toggle('hidden', !sc);
+  $('notesDocs').classList.toggle('hidden', sc);
+  if ($('ntabScratch')) $('ntabScratch').classList.toggle('on', sc);
+  if ($('ntabDocs')) $('ntabDocs').classList.toggle('on', !sc);
+}
+async function renderScratch() {
+  $('notesScratch').innerHTML =
+    `<div class="inputbar"><textarea id="notesText" rows="10" placeholder="Jot anything — markdown, autosaved" autocapitalize="off" spellcheck="false"></textarea></div>`
+    + `<div class="row"><span class="dim" id="notesStat"></span><span class="spacer"></span>`
+    + `<button class="ghost" id="notesPrevBtn" onclick="toggleNotesPreview()">preview</button></div>`
+    + `<div id="notesPreview" class="md hidden"></div>`;
+  try { $('notesText').value = (await api('/api/notes')).text || ''; } catch (e) { /* empty */ }
+  $('notesText').addEventListener('input', () => {
+    $('notesStat').textContent = 'saving…';
+    clearTimeout(notesSaveTimer);
+    notesSaveTimer = setTimeout(saveNotes, 800);
+    if (!$('notesPreview').classList.contains('hidden')) $('notesPreview').innerHTML = renderMarkdown($('notesText').value);
+  });
+}
+async function saveNotes() {
+  try {
+    await api('/api/notes', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: $('notesText').value }) });
+    if ($('notesStat')) $('notesStat').textContent = 'saved ✓';
+  } catch (e) { if ($('notesStat')) $('notesStat').textContent = 'save failed'; }
+}
+function toggleNotesPreview() {
+  const pv = $('notesPreview');
+  const nowHidden = pv.classList.toggle('hidden');
+  if (!nowHidden) pv.innerHTML = renderMarkdown($('notesText').value);
+  $('notesPrevBtn').textContent = nowHidden ? 'preview' : 'hide preview';
+}
+function renderDocsBrowser() {
+  const opts = (meta.docFolders || []).map(f => `<option value="${f.index}">${esc(f.label)}</option>`).join('');
+  $('notesDocs').innerHTML =
+    `<div class="row"><select id="docFolder" onchange="loadDocList()">${opts}</select></div>`
+    + `<div class="docsgrid"><div id="docFiles" class="docfiles"></div>`
+    + `<div id="docView" class="md docview"><div class="dim">Pick a file to render it.</div></div></div>`;
+  loadDocList();
+}
+async function loadDocList() {
+  const idx = $('docFolder').value;
+  $('docFiles').innerHTML = `<div class="dim">loading…</div>`;
+  try {
+    const files = (await api('/api/docs/list?folder=' + encodeURIComponent(idx))).files || [];
+    $('docFiles').innerHTML = files.length
+      ? files.map(f => `<div class="docfile" onclick="openDoc('${jsArg(idx)}','${jsArg(f)}',this)">${esc(f)}</div>`).join('')
+      : `<div class="dim">No .md files here.</div>`;
+  } catch (e) { $('docFiles').innerHTML = `<div class="dim">${esc(e.message)}</div>`; }
+}
+async function openDoc(idx, path, el) {
+  try {
+    const r = await api('/api/docs/file?folder=' + encodeURIComponent(idx) + '&path=' + encodeURIComponent(path));
+    $('docView').innerHTML = renderMarkdown(r.content || '');
+    document.querySelectorAll('.docfile').forEach(x => x.classList.remove('on'));
+    if (el) el.classList.add('on');
+  } catch (e) { $('docView').innerHTML = `<div class="dim">${esc(e.message)}</div>`; }
 }
 
 let boardList = [];
@@ -1766,7 +2007,7 @@ async function boot() {
     } else {
       $('fAgentRow').classList.add('hidden');
     }
-    if (meta.defaultModel) $('fModel').value = meta.defaultModel;
+    $('fModel').innerHTML = modelOptions(meta.defaultModel);
     $('fAuto').checked = !!meta.defaultAutoApprove;
     dropZone('formBar', formAttachments);
     dropZone('focusBar', attachments);

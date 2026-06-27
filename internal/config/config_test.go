@@ -5,6 +5,35 @@ import (
 	"testing"
 )
 
+// Save then Load must round-trip a schedule (including the new Model field) so
+// the web UI's schedule editor persists correctly.
+func TestSaveLoadRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	in := &Config{
+		Repos: []string{"/home/u/repo-a"},
+		Model: "claude-opus-4-8",
+		Schedules: []Schedule{{
+			Name: "nightly", Cron: "0 3 * * *", Repo: "/home/u/repo-a",
+			Prompt: "summarize", Model: "claude-sonnet-4-6", Write: true, Disabled: true,
+		}},
+	}
+	if err := Save(in, path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	out, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(out.Schedules) != 1 {
+		t.Fatalf("want 1 schedule, got %d", len(out.Schedules))
+	}
+	got := out.Schedules[0]
+	if got.Name != "nightly" || got.Cron != "0 3 * * *" || got.Model != "claude-sonnet-4-6" ||
+		!got.Write || !got.Disabled || got.Repo != "/home/u/repo-a" {
+		t.Errorf("round-trip mismatch: %+v", got)
+	}
+}
+
 func TestHasRepo(t *testing.T) {
 	c := &Config{Repos: []string{"/home/u/repo-a", "/home/u/repo-b/"}}
 	cases := []struct {

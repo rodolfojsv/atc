@@ -29,6 +29,7 @@ import (
 
 	"github.com/rodolfojsv/atc/internal/agent"
 	"github.com/rodolfojsv/atc/internal/config"
+	"github.com/rodolfojsv/atc/internal/sched"
 	"github.com/rodolfojsv/atc/internal/supervisor"
 )
 
@@ -47,23 +48,29 @@ const (
 type Server struct {
 	sup      *supervisor.Supervisor
 	cfg      *config.Config
+	cfgPath  string // config.json location, for persisting schedule edits ("" = default)
 	token    string
 	mux      *http.ServeMux
 	apkCache apkHashCache
+
+	// schedMu serializes schedule create/update/delete so two concurrent edits
+	// can't lose one's write when persisting config.json.
+	schedMu sync.Mutex
 
 	fileCacheMu sync.Mutex
 	fileCache   map[string]fileCacheEntry // working dir -> cached file walk
 }
 
 // New builds the server. An empty token gets a random per-run one;
-// read it back with Token() to print the access URL.
-func New(sup *supervisor.Supervisor, cfg *config.Config, token string) *Server {
+// read it back with Token() to print the access URL. cfgPath is the config.json
+// location ("" means the default) so the schedule editor can persist changes.
+func New(sup *supervisor.Supervisor, cfg *config.Config, token, cfgPath string) *Server {
 	if token == "" {
 		b := make([]byte, 16)
 		_, _ = rand.Read(b)
 		token = hex.EncodeToString(b)
 	}
-	s := &Server{sup: sup, cfg: cfg, token: token, mux: http.NewServeMux()}
+	s := &Server{sup: sup, cfg: cfg, cfgPath: cfgPath, token: token, mux: http.NewServeMux()}
 	s.routes()
 	return s
 }
@@ -106,6 +113,14 @@ func (s *Server) routes() {
 	}
 	api("GET /api/meta", s.handleMeta)
 	api("GET /api/schedules", s.handleSchedules)
+	api("POST /api/schedules", s.handleScheduleCreate)
+	api("PUT /api/schedules/{name}", s.handleScheduleUpdate)
+	api("DELETE /api/schedules/{name}", s.handleScheduleDelete)
+	api("POST /api/schedules/{name}/disable", s.handleScheduleToggle)
+	api("GET /api/notes", s.handleNotesGet)
+	api("PUT /api/notes", s.handleNotesPut)
+	api("GET /api/docs/list", s.handleDocList)
+	api("GET /api/docs/file", s.handleDocFile)
 	api("GET /api/complete", s.handleCompleteDir)
 	api("GET /api/sessions", s.handleList)
 	api("POST /api/sessions", s.handleCreate)
@@ -292,6 +307,14 @@ func (s *Server) handleMeta(w http.ResponseWriter, _ *http.Request) {
 		defaultRepo = s.cfg.Repos[0]
 	}
 	defaultBackend := s.sup.PreferredBackend()
+	docFolders := make([]map[string]any, 0, len(s.cfg.Web.DocFolders))
+	for i, d := range s.cfg.Web.DocFolders {
+		label := d.Label
+		if label == "" {
+			label = filepath.Base(d.Path)
+		}
+		docFolders = append(docFolders, map[string]any{"index": i, "label": label})
+	}
 	writeJSON(w, map[string]any{
 		"repos":              s.cfg.Repos,
 		"backends":           s.sup.Backends(),
@@ -301,6 +324,8 @@ func (s *Server) handleMeta(w http.ResponseWriter, _ *http.Request) {
 		"defaultRepo":        defaultRepo,
 		"defaultBackend":     defaultBackend,
 		"defaultModel":       s.cfg.Model,
+		"models":             s.cfg.ModelList(),
+		"docFolders":         docFolders,
 		"defaultAutoApprove": s.cfg.DefaultAutoApprove,
 		"spend": map[string]any{
 			"todayUsd": today.CostUSD, "todayAiu": today.NanoAiu / 1e9,
@@ -344,6 +369,10 @@ type scheduleJSON struct {
 	Cron        string            `json:"cron"`
 	Repo        string            `json:"repo"`
 	Preset      string            `json:"preset,omitempty"`
+	Model       string            `json:"model,omitempty"`
+	Agent       string            `json:"agent,omitempty"`
+	Prompt      string            `json:"prompt"`
+	Precheck    string            `json:"precheck,omitempty"`
 	Worktree    bool              `json:"worktree,omitempty"`
 	Write       bool              `json:"write"`
 	HasPrecheck bool              `json:"hasPrecheck"`
@@ -366,6 +395,7 @@ func (s *Server) handleSchedules(w http.ResponseWriter, _ *http.Request) {
 	for _, v := range views {
 		j := scheduleJSON{
 			Name: v.Name, Cron: v.Cron, Repo: v.Repo, Preset: v.Preset,
+			Model: v.Model, Agent: v.Agent, Prompt: v.Prompt, Precheck: v.Precheck,
 			Worktree: v.Worktree, Write: v.Write, HasPrecheck: v.HasPrecheck,
 			Disabled: v.Disabled,
 			Runs:     make([]scheduleRunJSON, 0, len(v.Runs)),
@@ -384,6 +414,182 @@ func (s *Server) handleSchedules(w http.ResponseWriter, _ *http.Request) {
 		out = append(out, j)
 	}
 	writeJSON(w, out)
+}
+
+// scheduleReq is the editable shape of a schedule for the create/update
+// endpoints, mirroring config.Schedule's user-facing fields.
+type scheduleReq struct {
+	Name     string `json:"name"`
+	Cron     string `json:"cron"`
+	Repo     string `json:"repo"`
+	Preset   string `json:"preset"`
+	Model    string `json:"model"`
+	Agent    string `json:"agent"`
+	Prompt   string `json:"prompt"`
+	Precheck string `json:"precheck"`
+	Worktree bool   `json:"worktree"`
+	Write    bool   `json:"write"`
+	Disabled bool   `json:"disabled"`
+}
+
+func (req scheduleReq) toConfig() config.Schedule {
+	return config.Schedule{
+		Name:     strings.TrimSpace(req.Name),
+		Cron:     strings.TrimSpace(req.Cron),
+		Repo:     strings.TrimSpace(req.Repo),
+		Preset:   strings.TrimSpace(req.Preset),
+		Model:    strings.TrimSpace(req.Model),
+		Agent:    strings.TrimSpace(req.Agent),
+		Prompt:   strings.TrimSpace(req.Prompt),
+		Precheck: strings.TrimSpace(req.Precheck),
+		Worktree: req.Worktree,
+		Write:    req.Write,
+		Disabled: req.Disabled,
+	}
+}
+
+// validateSchedule rejects a schedule that the scheduler couldn't run: a missing
+// name, a repo outside the configured set (a token-holder must not schedule work
+// in an arbitrary host path), or an unparseable cron expression.
+func (s *Server) validateSchedule(sc config.Schedule) error {
+	if sc.Name == "" {
+		return errors.New("name is required")
+	}
+	if sc.Cron == "" {
+		return errors.New("cron is required")
+	}
+	if sc.Repo == "" || !s.cfg.HasRepo(sc.Repo) {
+		return errors.New("repo is not in the configured repos list")
+	}
+	if _, err := sched.Parse(sc.Cron); err != nil {
+		return fmt.Errorf("invalid cron %q: %v", sc.Cron, err)
+	}
+	return nil
+}
+
+// persistSchedules swaps the in-memory schedule set and writes config.json so
+// the in-process scheduler — which re-reads the file each minute — picks the
+// change up without a restart. Caller holds s.schedMu.
+func (s *Server) persistSchedules(list []config.Schedule) error {
+	s.sup.SetSchedules(list)
+	return config.Save(s.cfg, s.cfgPath)
+}
+
+// scheduleIndex finds a schedule by name; a nameless entry is matched by the
+// "sched" fallback the UIs label it with.
+func scheduleIndex(list []config.Schedule, name string) int {
+	for i, sc := range list {
+		n := sc.Name
+		if n == "" {
+			n = "sched"
+		}
+		if n == name {
+			return i
+		}
+	}
+	return -1
+}
+
+func (s *Server) handleScheduleCreate(w http.ResponseWriter, r *http.Request) {
+	var req scheduleReq
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		jsonError(w, http.StatusBadRequest, "bad JSON: "+err.Error())
+		return
+	}
+	sc := req.toConfig()
+	if err := s.validateSchedule(sc); err != nil {
+		jsonError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.schedMu.Lock()
+	defer s.schedMu.Unlock()
+	list := s.sup.ScheduleConfigs()
+	if scheduleIndex(list, sc.Name) >= 0 {
+		jsonError(w, http.StatusConflict, "a schedule named "+sc.Name+" already exists")
+		return
+	}
+	list = append(list, sc)
+	if err := s.persistSchedules(list); err != nil {
+		jsonError(w, http.StatusInternalServerError, "saving config: "+err.Error())
+		return
+	}
+	s.handleSchedules(w, r)
+}
+
+func (s *Server) handleScheduleUpdate(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	var req scheduleReq
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		jsonError(w, http.StatusBadRequest, "bad JSON: "+err.Error())
+		return
+	}
+	sc := req.toConfig()
+	if err := s.validateSchedule(sc); err != nil {
+		jsonError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.schedMu.Lock()
+	defer s.schedMu.Unlock()
+	list := s.sup.ScheduleConfigs()
+	i := scheduleIndex(list, name)
+	if i < 0 {
+		jsonError(w, http.StatusNotFound, "no schedule named "+name)
+		return
+	}
+	// A rename must not collide with another existing schedule.
+	if sc.Name != name && scheduleIndex(list, sc.Name) >= 0 {
+		jsonError(w, http.StatusConflict, "a schedule named "+sc.Name+" already exists")
+		return
+	}
+	list[i] = sc
+	if err := s.persistSchedules(list); err != nil {
+		jsonError(w, http.StatusInternalServerError, "saving config: "+err.Error())
+		return
+	}
+	s.handleSchedules(w, r)
+}
+
+func (s *Server) handleScheduleDelete(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	s.schedMu.Lock()
+	defer s.schedMu.Unlock()
+	list := s.sup.ScheduleConfigs()
+	i := scheduleIndex(list, name)
+	if i < 0 {
+		jsonError(w, http.StatusNotFound, "no schedule named "+name)
+		return
+	}
+	list = append(list[:i], list[i+1:]...)
+	if err := s.persistSchedules(list); err != nil {
+		jsonError(w, http.StatusInternalServerError, "saving config: "+err.Error())
+		return
+	}
+	s.handleSchedules(w, r)
+}
+
+func (s *Server) handleScheduleToggle(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	var req struct {
+		Disabled bool `json:"disabled"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
+		jsonError(w, http.StatusBadRequest, "bad JSON: "+err.Error())
+		return
+	}
+	s.schedMu.Lock()
+	defer s.schedMu.Unlock()
+	list := s.sup.ScheduleConfigs()
+	i := scheduleIndex(list, name)
+	if i < 0 {
+		jsonError(w, http.StatusNotFound, "no schedule named "+name)
+		return
+	}
+	list[i].Disabled = req.Disabled
+	if err := s.persistSchedules(list); err != nil {
+		jsonError(w, http.StatusInternalServerError, "saving config: "+err.Error())
+		return
+	}
+	s.handleSchedules(w, r)
 }
 
 func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {

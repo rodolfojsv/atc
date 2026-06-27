@@ -25,7 +25,7 @@ func testServer(t *testing.T) (*Server, *httptest.Server) {
 		t.Fatal(err)
 	}
 	cfg.Repos = []string{"/tmp/repo-a"}
-	s := New(supervisor.New(cfg, bus.New()), cfg, "secret")
+	s := New(supervisor.New(cfg, bus.New()), cfg, "secret", "")
 	ts := httptest.NewServer(s.mux)
 	t.Cleanup(ts.Close)
 	return s, ts
@@ -58,6 +58,126 @@ func TestAuthRequired(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("query token: status %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestDocsConfinement(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "vault")
+	if err := os.MkdirAll(filepath.Join(root, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "sub", "a.md"), []byte("# Hi"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A secret outside the configured root must never be reachable.
+	if err := os.WriteFile(filepath.Join(dir, "secret.md"), []byte("nope"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := config.Load(filepath.Join(t.TempDir(), "none.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Web.DocFolders = []config.DocFolder{{Label: "Vault", Path: root}}
+	s := New(supervisor.New(cfg, bus.New()), cfg, "secret", "")
+	ts := httptest.NewServer(s.mux)
+	defer ts.Close()
+
+	// Listing finds the nested .md by relative path.
+	resp := get(t, ts.URL+"/api/docs/list?folder=0&token=secret", "")
+	var list struct{ Files []string }
+	json.NewDecoder(resp.Body).Decode(&list)
+	resp.Body.Close()
+	if len(list.Files) != 1 || list.Files[0] != filepath.Join("sub", "a.md") {
+		t.Fatalf("list = %v", list.Files)
+	}
+
+	// In-root file renders.
+	resp = get(t, ts.URL+"/api/docs/file?folder=0&path="+url.QueryEscape("sub/a.md")+"&token=secret", "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("in-root file status %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Traversal out of the root is refused.
+	resp = get(t, ts.URL+"/api/docs/file?folder=0&path="+url.QueryEscape("../secret.md")+"&token=secret", "")
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("traversal status %d, want 403", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Unknown folder index is rejected.
+	resp = get(t, ts.URL+"/api/docs/list?folder=9&token=secret", "")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("bad folder status %d, want 404", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestScheduleCRUD(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	cfg, err := config.Load(cfgPath) // missing file → defaults
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Repos = []string{"/tmp/repo-a"}
+	s := New(supervisor.New(cfg, bus.New()), cfg, "secret", cfgPath)
+	ts := httptest.NewServer(s.mux)
+	defer ts.Close()
+
+	do := func(method, path, body string) *http.Response {
+		req, _ := http.NewRequest(method, ts.URL+path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer secret")
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+	mustStatus := func(method, path, body string, want int) {
+		t.Helper()
+		resp := do(method, path, body)
+		defer resp.Body.Close()
+		if resp.StatusCode != want {
+			b, _ := io.ReadAll(resp.Body)
+			t.Fatalf("%s %s: status %d, want %d (%s)", method, path, resp.StatusCode, want, b)
+		}
+	}
+
+	// Create, then reject the predictable bad inputs.
+	mustStatus("POST", "/api/schedules",
+		`{"name":"nightly","cron":"0 3 * * *","repo":"/tmp/repo-a","prompt":"go","model":"claude-sonnet-4-6","write":true}`, 200)
+	mustStatus("POST", "/api/schedules", `{"name":"bad","cron":"not a cron","repo":"/tmp/repo-a","prompt":"x"}`, 400)
+	mustStatus("POST", "/api/schedules", `{"name":"r","cron":"0 3 * * *","repo":"/tmp/other","prompt":"x"}`, 400)
+	mustStatus("POST", "/api/schedules", `{"name":"nightly","cron":"0 3 * * *","repo":"/tmp/repo-a","prompt":"x"}`, 409)
+
+	if got := s.sup.ScheduleConfigs(); len(got) != 1 || got[0].Model != "claude-sonnet-4-6" || !got[0].Write {
+		t.Fatalf("in-memory schedule wrong: %+v", got)
+	}
+	// The change must be on disk so the scheduler's next config reload sees it.
+	reloaded, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reloaded.Schedules) != 1 || reloaded.Schedules[0].Name != "nightly" {
+		t.Fatalf("not persisted: %+v", reloaded.Schedules)
+	}
+
+	// Disable, rename+edit, delete.
+	mustStatus("POST", "/api/schedules/nightly/disable", `{"disabled":true}`, 200)
+	if got := s.sup.ScheduleConfigs(); !got[0].Disabled {
+		t.Error("toggle did not disable")
+	}
+	mustStatus("PUT", "/api/schedules/nightly", `{"name":"daily","cron":"0 9 * * *","repo":"/tmp/repo-a","prompt":"go2"}`, 200)
+	if got := s.sup.ScheduleConfigs(); len(got) != 1 || got[0].Name != "daily" || got[0].Cron != "0 9 * * *" {
+		t.Fatalf("update wrong: %+v", got)
+	}
+	mustStatus("DELETE", "/api/schedules/daily", "", 200)
+	if got := s.sup.ScheduleConfigs(); len(got) != 0 {
+		t.Fatalf("not deleted: %+v", got)
 	}
 }
 
@@ -223,7 +343,7 @@ func TestAppLatestAndDownload(t *testing.T) {
 	}
 	cfg.Web.APKPath = apk
 	cfg.Web.APKVersion = "1.2.3"
-	s := New(supervisor.New(cfg, bus.New()), cfg, "secret")
+	s := New(supervisor.New(cfg, bus.New()), cfg, "secret", "")
 	ts := httptest.NewServer(s.mux)
 	t.Cleanup(ts.Close)
 
