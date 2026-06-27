@@ -137,7 +137,7 @@ func cmdTUI(argv []string) int {
 	}
 
 	if *serveFlag {
-		srv := web.New(sup, cfg, cfg.Web.Token)
+		srv := web.New(sup, cfg, cfg.Web.Token, *configPath)
 		url, err := srv.Start(cfg.Web.Addr)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "atc: web:", err)
@@ -189,7 +189,7 @@ func cmdServe(argv []string) int {
 	defer sup.Stop()
 	attachNtfy(b, sup, cfg, token)
 
-	srv := web.New(sup, cfg, token)
+	srv := web.New(sup, cfg, token, *configPath)
 	url, err := srv.Start(*addr)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "atc: web:", err)
@@ -351,6 +351,7 @@ func fireSchedule(s config.Schedule, sup *supervisor.Supervisor, runLog schedrun
 		Repo:         s.Repo,
 		Preset:       s.Preset,
 		Agent:        s.Agent,
+		Model:        s.Model,
 		UseWorktree:  s.Worktree,
 		Prompt:       s.Prompt,
 		ReadOnly:     !s.Write, // scheduled tasks are read-only unless write:true

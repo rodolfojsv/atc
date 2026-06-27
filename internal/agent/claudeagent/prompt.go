@@ -37,11 +37,19 @@ var permissionTitleMarkers = []string{"Do you want", "wants to", "proceed?"}
 var permissionOptionMarkers = []string{"don't ask again", "tell Claude", "Yes, and", "No, and"}
 
 // Option-text fragments used to pick the right choice for a decision.
+//
+// manualApproveMarkers/"auto-accept" target the ExitPlanMode plan-approval
+// dialog's two "Yes" rows ("Yes, and manually approve edits" / "Yes, and
+// auto-accept edits"): a plain approve-once keeps prompting (manual), while
+// approve-for-the-session (don't-ask-again) is what enters auto-accept — so the
+// "auto-accept" fragment lives in alwaysMarkers, not the approve-once path,
+// which otherwise would silently drop the session into bypass mode.
 var (
-	yesMarkers     = []string{"Yes"}
-	alwaysMarkers  = []string{"don't ask", "always"}
-	denyTalkMarker = []string{"tell Claude", "No, and"}
-	noMarkers      = []string{"No"}
+	yesMarkers           = []string{"Yes"}
+	manualApproveMarkers = []string{"manually approve"}
+	alwaysMarkers        = []string{"don't ask", "always", "auto-accept"}
+	denyTalkMarker       = []string{"tell Claude", "No, and"}
+	noMarkers            = []string{"No"}
 )
 
 // promptSettle bounds how long we wait for a box to disappear after answering,
@@ -205,12 +213,40 @@ var typeSomethingMarkers = []string{"Type something"}
 // all a caller needs; the watcher re-fires for each tab as the form advances.
 func detectPrompt(pane string) (promptInfo, bool) {
 	lines := strings.Split(pane, "\n")
+
+	// A permission/approval box names its action on a title line ("Do you want…",
+	// "…Would you like to proceed?"). When one is present, only the numbered
+	// options BELOW it are real choices: this is what stops the ExitPlanMode
+	// plan-approval dialog's embedded plan body — which routinely carries its own
+	// numbered list — from being scooped up as bogus options that displace the
+	// real Yes/No rows (and garble the title). We take the last such title that is
+	// actually followed by an option, so a stray "proceed?" in prose can't anchor
+	// it. With no permission title (an AskUserQuestion), scan from the top.
+	optScanFrom := 0
+	for i, ln := range lines {
+		if !containsAny(stripBoxGlyphs(ln), permissionTitleMarkers) {
+			continue
+		}
+		for j := i + 1; j < len(lines) && j <= i+4; j++ {
+			if strings.TrimSpace(lines[j]) == "" {
+				continue
+			}
+			if promptOptionRe.MatchString(lines[j]) {
+				optScanFrom = i
+			}
+			break
+		}
+	}
+
 	var options []promptOption
 	var optLines []int // line index of each option, parallel to options
 	firstOpt := -1
 	cursorOnOption := false
 	optHadCheckbox := false // an option line carried a ☐/☒ box (multi-select)
 	for i, ln := range lines {
+		if i < optScanFrom {
+			continue
+		}
 		if m := promptOptionRe.FindStringSubmatch(ln); m != nil {
 			if firstOpt < 0 {
 				firstOpt = i
@@ -643,7 +679,16 @@ func (s *session) answerPermission(ctx context.Context, p promptInfo) {
 	s.withPane(func() {
 		switch decision {
 		case agent.ApproveOnce:
-			s.selectMatch(ctx, p, yesMarkers, 0)
+			// On an ExitPlanMode plan-approval dialog, approve-once means "proceed
+			// but keep prompting me" → pick "Yes, and manually approve edits", never
+			// the first "Yes" ("auto-accept edits"), which would silently switch the
+			// session into auto-accept/bypass. Ordinary permission boxes have no such
+			// option, so this falls back to the usual first-"Yes".
+			if i := indexMatching(p.options, manualApproveMarkers); i >= 0 {
+				s.selectIndex(ctx, i)
+			} else {
+				s.selectMatch(ctx, p, yesMarkers, 0)
+			}
 		case agent.ApproveSession:
 			if i := indexMatching(p.options, alwaysMarkers); i >= 0 {
 				s.selectIndex(ctx, i)

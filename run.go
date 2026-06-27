@@ -63,6 +63,9 @@ func cmdRun(argv []string) int {
 				if opts.Preset == "" {
 					opts.Preset = s.Preset
 				}
+				if opts.Model == "" {
+					opts.Model = s.Model
+				}
 				if opts.Name == "" {
 					opts.Name = s.Name
 				}

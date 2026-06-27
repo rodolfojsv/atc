@@ -55,6 +55,9 @@ type Schedule struct {
 	Repo     string `json:"repo"`
 	Worktree bool   `json:"worktree,omitempty"`
 	Prompt   string `json:"prompt"`
+	// Model overrides the model for this scheduled session. Empty falls back to
+	// the preset's model, then the config default (Config.Model).
+	Model string `json:"model,omitempty"`
 	// Write opts a scheduled task out of read-only mode. Scheduled tasks
 	// run in the backend's plan/read-only mode by default — they inspect,
 	// summarize, and advise but never modify files or run mutating tools —
@@ -95,6 +98,17 @@ type Web struct {
 	// "no build yet". APKVersion is the human label shown beside it.
 	APKPath    string `json:"apkPath,omitempty"`
 	APKVersion string `json:"apkVersion,omitempty"`
+	// DocFolders are read-only markdown folders the web UI's Notes view can
+	// browse and render (each a label + a folder path; "~" is expanded). Only
+	// .md files within a folder's root are ever served — paths that escape the
+	// root are rejected.
+	DocFolders []DocFolder `json:"docFolders,omitempty"`
+}
+
+// DocFolder names a folder of markdown files exposed read-only in the web UI.
+type DocFolder struct {
+	Label string `json:"label"`
+	Path  string `json:"path"`
 }
 
 // Ntfy configures outbound push notifications via an ntfy server
@@ -166,7 +180,11 @@ type Config struct {
 	// for Claude this means the process spawns in bypassPermissions.
 	DefaultAutoApprove bool              `json:"defaultAutoApprove,omitempty"`
 	Model              string            `json:"model,omitempty"`
-	Presets            map[string]Preset `json:"presets,omitempty"`
+	// Models is the menu of models the new-session and schedule forms offer as a
+	// dropdown. Empty falls back to DefaultModels() — a built-in list of current
+	// model ids — so the picker is never empty out of the box.
+	Models  []string          `json:"models,omitempty"`
+	Presets map[string]Preset `json:"presets,omitempty"`
 	// Agents are custom agents you can tag onto a session (in the
 	// new-session form, a preset's "agent", or a schedule's "agent"),
 	// keyed by name. atc injects them into the backend at launch so they
@@ -184,6 +202,22 @@ type Config struct {
 	ScheduledRetentionDays int  `json:"scheduledRetentionDays,omitempty"`
 	Web                    Web  `json:"web,omitempty"`
 	Ntfy                   Ntfy `json:"ntfy,omitempty"`
+}
+
+// DefaultModels is the built-in model menu used when Config.Models is unset, so
+// the new-session/schedule pickers always have something to offer. Override it
+// in config.json ("models": [...]) to pin your own list.
+func DefaultModels() []string {
+	return []string{"claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5", "gpt-5"}
+}
+
+// ModelList returns the configured model menu, or DefaultModels() when none is
+// set.
+func (c *Config) ModelList() []string {
+	if len(c.Models) > 0 {
+		return c.Models
+	}
+	return DefaultModels()
 }
 
 // Path returns the default config file location:
@@ -217,6 +251,36 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("parsing config %s: %w", path, err)
 	}
 	return cfg.withDefaults(), nil
+}
+
+// Save writes the config back to path ("" means the default location) as
+// pretty-printed JSON, via a temp file + rename so a crash can't leave a
+// half-written config. atc otherwise only reads config.json; this is used by
+// the web UI's schedule editor. Note that it rewrites the file in canonical
+// form (Go field order, sorted map keys, omitempty fields dropped) — there are
+// no comments in JSON to lose, but hand-formatting is not preserved.
+func Save(c *Config, path string) error {
+	if path == "" {
+		var err error
+		if path, err = Path(); err != nil {
+			return err
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("creating config dir: %w", err)
+	}
+	data, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshaling config: %w", err)
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return fmt.Errorf("writing config: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return fmt.Errorf("replacing config: %w", err)
+	}
+	return nil
 }
 
 func (c *Config) withDefaults() *Config {

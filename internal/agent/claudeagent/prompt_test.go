@@ -34,6 +34,59 @@ func TestDetectPermissionPrompt(t *testing.T) {
 	}
 }
 
+// The ExitPlanMode plan-approval dialog embeds the plan body — which routinely
+// carries its own numbered list — directly above the Yes/No options. Detection
+// must anchor the real options to the "…proceed?" title so the plan's numbers
+// aren't scooped up as bogus choices (which would garble the title and option
+// list), and the option markers must map a plain approve to "manually approve
+// edits" (keep prompting) rather than silently to "auto-accept edits" (bypass).
+func TestDetectPlanApprovalDialog(t *testing.T) {
+	pane := strings.Join([]string{
+		"⏺ Here's what I'd do.",
+		"",
+		"Here is Claude's plan:",
+		"1. Add config.Save and write the file back",
+		"2. Add the schedule CRUD endpoints",
+		"3. Build the schedule form in the web UI",
+		"",
+		"Claude has written up a plan and is ready to execute. Would you like to proceed?",
+		"",
+		"❯ 1. Yes, and auto-accept edits",
+		"  2. Yes, and manually approve edits",
+		"  3. No, keep planning",
+		"",
+	}, "\n")
+
+	p, ok := detectPrompt(pane)
+	if !ok {
+		t.Fatal("expected the plan-approval dialog to be detected")
+	}
+	if p.kind != "permission" {
+		t.Errorf("kind = %q, want permission", p.kind)
+	}
+	// The plan body's "1./2./3." lines must NOT leak in as options.
+	if len(p.options) != 3 {
+		t.Fatalf("want 3 options (plan body excluded), got %d: %+v", len(p.options), p.options)
+	}
+	if p.title != "Claude has written up a plan and is ready to execute. Would you like to proceed?" {
+		t.Errorf("title = %q (plan body leaked into the title?)", p.title)
+	}
+	if p.options[0].label != "Yes, and auto-accept edits" || p.options[2].label != "No, keep planning" {
+		t.Errorf("option labels wrong: %+v", p.options)
+	}
+	// Decision routing: approve-once → manual (index 1), approve-session/always →
+	// auto-accept (index 0), deny → keep planning (index 2).
+	if i := indexMatching(p.options, manualApproveMarkers); i != 1 {
+		t.Errorf("manually-approve not at index 1: %+v (got %d)", p.options, i)
+	}
+	if i := indexMatching(p.options, alwaysMarkers); i != 0 {
+		t.Errorf("auto-accept not matched by alwaysMarkers at index 0: %+v (got %d)", p.options, i)
+	}
+	if i := indexMatching(p.options, noMarkers); i != 2 {
+		t.Errorf("keep-planning not at index 2: %+v (got %d)", p.options, i)
+	}
+}
+
 func TestDetectQuestionPrompt(t *testing.T) {
 	pane := strings.Join([]string{
 		"  Indentation: Tabs or spaces?",
