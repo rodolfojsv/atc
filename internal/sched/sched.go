@@ -128,37 +128,16 @@ type Job struct {
 	Fire  func()
 }
 
-// Run checks all jobs once per minute, aligned to the wall-clock
-// minute, until ctx is done. Each firing runs on its own goroutine.
-func Run(ctx context.Context, jobs []Job) {
-	if len(jobs) == 0 {
-		return
-	}
-	for {
-		now := time.Now()
-		next := now.Truncate(time.Minute).Add(time.Minute)
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(next.Sub(now)):
-		}
-		tick := time.Now()
-		for _, j := range jobs {
-			if j.Entry.Matches(tick) {
-				go j.Fire()
-			}
-		}
-	}
-}
-
-// RunReloadable behaves like Run but re-derives the job set from build()
-// once per minute, so schedules added, edited, or removed in config take
-// effect without restarting the process. build() is expected to be cheap
-// (e.g. gated on the config file's mtime) and to return the desired job
-// set, or a non-nil error when it cannot — in which case the previous
-// good set keeps firing and the error is reported via onErr (which may be
-// nil). Unlike Run, this never returns early on an empty set: a config
-// may legitimately have zero schedules now and gain one later.
+// RunReloadable checks all jobs once per minute, aligned to the
+// wall-clock minute, until ctx is done, re-deriving the job set from
+// build() each minute so schedules added, edited, or removed in config
+// take effect without restarting the process. Each firing runs on its
+// own goroutine. build() is expected to be cheap (e.g. gated on the
+// config file's mtime) and to return the desired job set, or a non-nil
+// error when it cannot — in which case the previous good set keeps
+// firing and the error is reported via onErr (which may be nil). An
+// empty set is fine: a config may have zero schedules now and gain one
+// later.
 func RunReloadable(ctx context.Context, build func() ([]Job, error), onErr func(error)) {
 	report := func(err error) {
 		if err != nil && onErr != nil {

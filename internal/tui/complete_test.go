@@ -6,15 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
-
 	"github.com/rodolfojsv/atc/internal/config"
 	"github.com/rodolfojsv/atc/internal/supervisor"
 )
-
-func keyRunes(s string) tea.KeyMsg {
-	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)}
-}
 
 func TestFuzzyFilter(t *testing.T) {
 	files := []string{"internal/tui/app.go", "internal/supervisor/session.go", "main.go", "README.md"}

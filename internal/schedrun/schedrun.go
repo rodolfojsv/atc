@@ -113,27 +113,3 @@ func (l Log) All() ([]Run, error) {
 	}
 	return out, sc.Err()
 }
-
-// Latest returns the most recent run for the named schedule, if any.
-func (l Log) Latest(schedule string) (Run, bool) {
-	runs, _ := l.All()
-	for i := len(runs) - 1; i >= 0; i-- {
-		if runs[i].Schedule == schedule {
-			return runs[i], true
-		}
-	}
-	return Run{}, false
-}
-
-// LastUpdate returns the time of the most recent Updated run for the named
-// schedule — the "X" in "no updates since X". The bool is false when the
-// task has never produced an update.
-func (l Log) LastUpdate(schedule string) (time.Time, bool) {
-	runs, _ := l.All()
-	for i := len(runs) - 1; i >= 0; i-- {
-		if runs[i].Schedule == schedule && runs[i].Result == Updated {
-			return runs[i].Time, true
-		}
-	}
-	return time.Time{}, false
-}

@@ -75,8 +75,6 @@ func New(sup *supervisor.Supervisor, cfg *config.Config, token, cfgPath string) 
 	return s
 }
 
-func (s *Server) Token() string { return s.token }
-
 // Start listens on addr and serves in the background, returning the
 // browseable URL (including the token, so it can be opened directly).
 func (s *Server) Start(addr string) (string, error) {
